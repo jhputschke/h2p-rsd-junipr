@@ -27,3 +27,4 @@ cpp/build/
 .DS_Store
 .vscode/
 .idea/
+*.code-workspace

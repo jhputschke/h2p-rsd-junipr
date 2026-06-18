@@ -3,6 +3,11 @@
 Validation + physics figures, nbstripped in git (see `.pre-commit-config.yaml`)
 and rendered in the docs:
 
+- **inference_demo.ipynb** — standalone end-to-end evaluation: load a `best.ckpt`,
+  take a `jets.root` test file **or** generate synthetic matched test data, and show
+  posterior + MAP point-estimate performance vs truth (single-jet posterior & Lund
+  plane, multiplicity / leading-emission recovery, coordinate marginals, SBC / PIT /
+  coverage). Runs with no arguments. Combines the three notebooks below into one.
 - **closure.ipynb** — leading-emission Lund distance, multiplicity bias, MAP vs
   plain-RSD vs truth trees (§8 closure).
 - **calibration.ipynb** — SBC rank histogram, PIT, coverage (Talts et al.,
