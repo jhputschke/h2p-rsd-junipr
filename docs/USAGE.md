@@ -1,6 +1,8 @@
 # Usage guide: training, checkpoints, resume, inference
 
-A practical, copy-pasteable walkthrough of the full workflow. For the physics see
+A practical, copy-pasteable walkthrough of the full workflow. For a field-by-field
+explanation of **every config knob** (including the inference/decode parameters) see
+[`CONFIGURATION.md`](CONFIGURATION.md); for the physics see
 [`README_PHYSICS.md`](README_PHYSICS.md); for the design see
 [`PRODUCTION-PLAN-v4.md`](PRODUCTION-PLAN-v4.md).
 
@@ -109,7 +111,8 @@ Encoders: `gru`, `lundnet`, `deepsets`.
 | `geometry.n_bins` | 10 | Lund-cell grid (n_cells = n_bins²) |
 | `run_root` | runs | where run dirs go |
 
-Full list: the dataclass schemas in `src/h2p_rsd_junipr/config.py`.
+Full list with per-field explanations: [`CONFIGURATION.md`](CONFIGURATION.md) (the
+dataclass schemas in `src/h2p_rsd_junipr/config.py` are the source of truth).
 
 ### Quick smoke (seconds)
 
