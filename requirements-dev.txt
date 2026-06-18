@@ -1,0 +1,27 @@
+# Development + optional-extra dependencies for h2p-rsd-junipr.
+#
+#   pip install -r requirements-dev.txt
+#
+# Pulls in the core runtime, the test/lint toolchain (the pyproject [dev] extra),
+# and the optional feature extras. Comment out groups you do not need.
+
+-r requirements.txt
+
+# --- test / lint / type-check (pyproject [dev]) ---------------------------
+pytest>=7.4          # tested: 9.0.2
+ruff>=0.4            # tested: 0.15.17
+black>=24.0
+isort>=5.13
+mypy>=1.8
+pre-commit>=3.6
+
+# --- [track] lightweight experiment logging -------------------------------
+tensorboard>=2.14
+
+# --- [serve] FastAPI service + ONNX export --------------------------------
+fastapi>=0.110
+uvicorn>=0.27        # tested: 0.40.0
+onnxruntime>=1.17
+
+# --- [lundnet] EdgeConv graph encoder (heavy; install per your CUDA/CPU) ---
+# torch-geometric>=2.4

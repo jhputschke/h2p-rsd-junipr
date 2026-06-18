@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=1.24",
     "omegaconf>=2.3",
     "uproot>=5.0",
+    "awkward>=2.6",
 ]
 
 [project.optional-dependencies]
