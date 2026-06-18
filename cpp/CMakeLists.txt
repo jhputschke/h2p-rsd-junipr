@@ -59,6 +59,10 @@ else()
   message(STATUS "write_lund_rntuple: PYTHIA not found, using toy event source")
 endif()
 
+# ---- reader / inspector (ROOT-only; no FastJet/PYTHIA) -----------------------
+add_executable(read_lund_rntuple apps/read_lund_rntuple.cpp)
+target_link_libraries(read_lund_rntuple PRIVATE ROOT::RIO ROOT::Tree ROOT::ROOTNTuple)
+
 # ---- dedicated PYTHIA driver (only when PYTHIA is available) ------------------
 if(PYTHIA8_FOUND)
   add_executable(pythia_driver apps/pythia_driver.cpp)

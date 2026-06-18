@@ -95,6 +95,7 @@ pairs with any decoder family.
 cmake -S cpp -B cpp/build && cmake --build cpp/build -j
 ctest --test-dir cpp/build           # Soft Drop boundary + matching unit tests
 ./cpp/build/pythia_driver 100000 jets.root 1
+./cpp/build/read_lund_rntuple jets.root Jets   # inspect: schema, provenance, #jets, first jet
 ```
 
 Finds ROOT (≥6.36, RNTuple), FastJet, fjcontrib LundPlane, and PYTHIA 8 (optional;
