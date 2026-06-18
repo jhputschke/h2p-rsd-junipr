@@ -10,9 +10,9 @@
 # torch: a >= floor rather than an exact pin — install the right wheel for your
 # platform/accelerator from https://pytorch.org (tested with 2.11.0.dev; >=2.1
 # is the supported floor). On Apple Silicon the default wheel includes MPS.
-torch>=2.1
+torch>=2.10
 
-numpy>=1.24,<3        # tested: 2.3.5
+numpy>=2.0,<3        # tested: 2.3.5
 omegaconf>=2.3,<3     # tested: 2.3.1  (structured-config validation, no Hydra)
 uproot>=5.0,<6        # tested: 5.6.9  (reads the ROOT RNTuple written by cpp/)
 awkward>=2.6,<3       # tested: 2.8.11 (jagged Lund columns: arrays(library="ak"))
