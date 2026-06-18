@@ -73,7 +73,7 @@ def cmd_train(argv) -> int:
 
 
 def cmd_eval(argv) -> int:
-    from .config import OmegaConf
+    from .config import OmegaConf, decode_params
     from .eval.calibration import run_calibration
     from .eval.closure import print_point_estimate, run_closure
     from .models.base import build_model
@@ -95,18 +95,21 @@ def cmd_eval(argv) -> int:
         model.load_state_dict(info["model_state"])
         _, val_ds = LundDataModule(cfg2, geometry).setup().datasets()
         dm_jets = LundDataModule(cfg2, geometry).setup().val_jets
+        decode = decode_params(cfg2)  # follow the checkpoint's decode config (tolerant of old snapshots)
     else:
         from .train.trainer import build_components
         model, _, _ = build_components(cfg, geometry, device)
         dm_jets = dm.val_jets
+        decode = decode_params(cfg)
         print("[eval] no checkpoint given; evaluating an untrained model (smoke).")
 
     model.eval()
     run_closure(model, val_ds, dm_jets, geometry, device,
-                K=cfg.experiment.n_closure_samples, n_closure=cfg.experiment.closure_jets)
+                K=cfg.experiment.n_closure_samples, n_closure=cfg.experiment.closure_jets,
+                decode=decode)
     run_calibration(model, val_ds, geometry, device,
                     K=cfg.experiment.n_closure_samples, n_jets=cfg.experiment.closure_jets)
-    print_point_estimate(model, val_ds, dm_jets, geometry, device)
+    print_point_estimate(model, val_ds, dm_jets, geometry, device, decode=decode)
     return 0
 
 

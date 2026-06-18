@@ -88,6 +88,8 @@ class ARJuniprConfig:
     continuous_coords: bool = True     # True == v2, False == v1
     sigma_floor: float = 1e-2
     kappa_max: float = 50.0
+    cell_label_smoothing: float = 0.0  # split-head label smoothing; 0.0 == off (likelihood
+    #                                    parity preserved). Probe knob for the MAP collapse.
 
 
 @dataclass
@@ -140,6 +142,10 @@ class DecodeConfig:
     max_emissions: int = 25
     n_posterior_samples: int = 500
     cont_temperature: float = 1.0      # exposure-bias remedy, sampling-time only
+    min_emissions: int = 1             # MAP floor: the point estimate never collapses
+    #                                    to the unphysical empty tree (>=1 splitting)
+    length_penalty: float = 0.0        # GNMT-style score/len**alpha at final beam rank;
+    #                                    0.0 == no normalization (default = today's behavior)
 
 
 @dataclass
@@ -250,3 +256,34 @@ def save_config(cfg: DictConfig, path: Path) -> None:
 
 def to_container(cfg: DictConfig) -> dict:
     return OmegaConf.to_container(cfg, resolve=True)
+
+
+# Decode defaults, kept in sync with DecodeConfig — the single source of truth for
+# tolerant reads of cfg.decode (see decode_params).
+_DECODE_DEFAULTS: dict = {
+    "beam_width": 8,
+    "topk_cells": 6,
+    "max_emissions": 25,
+    "n_posterior_samples": 500,
+    "cont_temperature": 1.0,
+    "min_emissions": 1,
+    "length_penalty": 0.0,
+}
+
+
+def decode_params(cfg) -> dict:
+    """Resolved decode kwargs, tolerant of OLD checkpoint snapshots whose `decode`
+    block predates newer fields (e.g. min_emissions/length_penalty).
+
+    `OmegaConf.select` returns None for an absent node even under struct mode, so a
+    missing key falls back to the DecodeConfig default rather than raising. This is the
+    ONLY supported way to read decode params — never access `cfg.decode.<newfield>`
+    directly, or loading a pre-change checkpoint will crash."""
+    out = dict(_DECODE_DEFAULTS)
+    dec = OmegaConf.select(cfg, "decode")
+    if dec is not None:
+        for k in out:
+            v = OmegaConf.select(dec, k)
+            if v is not None:
+                out[k] = v
+    return out

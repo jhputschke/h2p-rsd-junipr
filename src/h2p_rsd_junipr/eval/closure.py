@@ -73,11 +73,14 @@ def lund_tree_str(obj, title: str, geometry: Geometry, ref=None) -> str:
     return "\n".join([head, *rows]) if rows else head + "\n  (empty)"
 
 
-def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300, verbose=True):
+def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
+                verbose=True, decode=None):
     """Closure + calibration on held-out jets (cell-level, as the v2 script). Returns
-    a metrics dict and (optionally) prints the same summary lines."""
+    a metrics dict and (optionally) prints the same summary lines. `decode` is a
+    decode_params(cfg) dict threaded into sampling (n_posterior_samples ignored here;
+    K wins) — kept for a uniform call signature with print_point_estimate."""
     d_id, d_mode = [], []
-    n_id_bias, n_mean_bias = [], []
+    n_id_bias, n_mean_bias, n_median_bias = [], [], []
     covered = []
     n_closure = min(n_closure, len(val_ds))
     for i in range(n_closure):
@@ -103,6 +106,7 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
 
         n_id_bias.append(len(x_cells) - ny_true)
         n_mean_bias.append(mults.mean() - ny_true)
+        n_median_bias.append(np.median(mults) - ny_true)
 
         order = np.argsort(-counts)
         cum = np.cumsum(counts[order]) / counts.sum()
@@ -121,6 +125,7 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         "dlund_posterior_mode": float(np.nanmean(d_mode)),
         "mult_bias_identity": float(np.mean(n_id_bias)),
         "mult_bias_posterior": float(np.mean(n_mean_bias)),
+        "mult_bias_posterior_median": float(np.mean(n_median_bias)),
         "coverage_68": float(np.mean(covered)),
     }
     if verbose:
@@ -136,7 +141,8 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         )
         print(
             f"  multiplicity signed bias  <n - n_true>   :  identity(x) = {metrics['mult_bias_identity']:+.3f}"
-            f"   posterior-mean = {metrics['mult_bias_posterior']:+.3f}   (closer to 0 is better)"
+            f"   posterior-mean = {metrics['mult_bias_posterior']:+.3f}"
+            f"   posterior-median = {metrics['mult_bias_posterior_median']:+.3f}   (closer to 0 is better)"
         )
         print(
             f"  posterior 68% coverage of true leading cell = {metrics['coverage_68']:.2f}"
@@ -145,14 +151,16 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     return metrics
 
 
-def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=500):
-    """Per-jet point estimate: plain RSD (hadron x) vs model MAP vs truth (jet 0)."""
+def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=500, decode=None):
+    """Per-jet point estimate: plain RSD (hadron x) vs model MAP vs truth (jet 0).
+    `decode` is a decode_params(cfg) dict (beam keys steer the MAP, e.g. min_emissions)."""
+    dec = decode or {}
     item = val_ds[0]
     xf = item["xf"].unsqueeze(0).to(device)
     nx = torch.tensor([item["nx"]], device=device)
     draws = model.sample_batch(xf, nx, n_samples)
     mults = np.array([len(d) for d in draws])
-    y_hat = model.map_estimate(xf, nx)
+    y_hat = model.map_estimate(xf, nx, **dec)
 
     x_raw = node_raw(*val_jets[0]["x"])
     y_truth = item["yraw"]
@@ -170,7 +178,7 @@ def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=50
         f"  multiplicity:  truth y = {item['ny']}   model MAP = {y_hat.multiplicity}   "
         f"plain RSD (hadron x) = {len(x_raw)}   "
         f"posterior = {mults.mean():.2f} +/- {mults.std():.2f} "
-        f"(68% CR [{np.percentile(mults, 16):.0f}, {np.percentile(mults, 84):.0f}])"
+        f"(median {np.median(mults):.0f}, 68% CR [{np.percentile(mults, 16):.0f}, {np.percentile(mults, 84):.0f}])"
     )
     print(
         f"  leading-emission Lund distance to truth:  plain RSD = {d_rsd:.3f}   "

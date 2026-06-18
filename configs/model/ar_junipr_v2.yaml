@@ -7,3 +7,4 @@ coord_head_layers: 2
 continuous_coords: true
 sigma_floor: 0.01
 kappa_max: 50.0
+cell_label_smoothing: 0.0   # off by default (keeps per_jet_nll parity); probe knob

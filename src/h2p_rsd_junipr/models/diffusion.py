@@ -156,8 +156,9 @@ class Diffusion(PosteriorModel):
         e = self.encode(xf, nx)
         n_star = int(F.log_softmax(self.n_head(e), dim=-1).argmax(-1).item())
         cell_lp = F.log_softmax(self.cell_head(e), dim=-1).squeeze(0)
-        if n_star == 0:
-            return LundPointEstimate(nodes=[], logprob=0.0, multiplicity=0)
+        # floor the MAP multiplicity so it is never the unphysical empty tree (the
+        # constrained MAP under a minimum-emission floor; default min_emissions=1)
+        n_star = max(n_star, int(kw.get("min_emissions", 1)))
         top = torch.topk(cell_lp, k=min(n_star, self.n_cells))
         cells = top.indices.tolist()
         ctx = torch.cat(

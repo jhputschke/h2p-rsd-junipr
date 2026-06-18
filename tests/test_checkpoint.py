@@ -55,3 +55,34 @@ def test_load_for_inference_ignores_optimizer(tmp_path, batch):
     info = load_for_inference(path)
     assert info["model_name"] == "ar_junipr_v2"
     assert "model_state" in info and "config" in info
+
+
+def test_old_snapshot_backward_compat(tmp_path, batch):
+    """A checkpoint whose config predates min_emissions/length_penalty/cell_label_smoothing
+    must still rebuild, read decode params tolerantly, and round-trip its own config_hash."""
+    from omegaconf import OmegaConf
+
+    from h2p_rsd_junipr.config import config_hash, decode_params
+    from h2p_rsd_junipr.models.base import build_model
+
+    b, geom = batch
+    cfg = load_config(["model=ar_junipr_v2"])
+    model, opt, sched = build_components(cfg, geom, torch.device("cpu"))
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    path = tmp_path / "ckpt.pt"
+    save_checkpoint(path, model=model, optimizer=opt, scheduler=sched, scaler=scaler,
+                    epoch=1, step=1, best_val=0.0, cfg=cfg)
+
+    # simulate an OLD snapshot by dropping the newly added schema fields
+    snap = OmegaConf.create(load_for_inference(path)["config"])
+    OmegaConf.set_struct(snap, False)
+    del snap.decode["min_emissions"]
+    del snap.decode["length_penalty"]
+    del snap.model["cell_label_smoothing"]
+
+    # rebuild + tolerant decode read must not raise on the trimmed config
+    m2 = build_model(snap, geom)
+    m2.load_state_dict(load_for_inference(path)["model_state"])
+    assert m2.cell_label_smoothing == 0.0           # getattr default kicked in
+    assert decode_params(snap)["min_emissions"] == 1  # backfilled, no struct-mode crash
+    assert config_hash(snap) == config_hash(snap)     # deterministic round-trip

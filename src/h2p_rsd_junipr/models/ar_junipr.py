@@ -55,6 +55,8 @@ class ARJunipr(PosteriorModel):
         self.continuous_coords = bool(m.continuous_coords)
         self.sigma_floor = float(m.sigma_floor)
         self.kappa_max = float(m.kappa_max)
+        # default 0.0 == off; getattr tolerates old checkpoint configs lacking the field
+        self.cell_label_smoothing = float(getattr(m, "cell_label_smoothing", 0.0))
         self.half_u = geometry.half_u
         self.half_v = geometry.half_v
 
@@ -158,6 +160,9 @@ class ARJunipr(PosteriorModel):
             eh_t = eh[:, :L, :]
             split_lp = F.log_softmax(self.split_head(eh_t), dim=-1)
             split_per = split_lp.gather(-1, yc.clamp(min=0).unsqueeze(-1)).squeeze(-1)
+            if self.cell_label_smoothing > 0.0:  # off by default -> per_jet_nll parity
+                eps = self.cell_label_smoothing
+                split_per = (1.0 - eps) * split_per + eps * split_lp.mean(-1)
 
             split_mask = (torch.arange(L, device=dev).unsqueeze(0) < n).float()
             split_ll = (split_per * split_mask).sum(1)
@@ -211,13 +216,15 @@ class ARJunipr(PosteriorModel):
 
     # -- contract: MAP -------------------------------------------------------
     @torch.inference_mode()
-    def map_decode(self, xf, nx, beam_width: int = 8, topk_cells: int = 6, max_emissions: int = 25):
+    def map_decode(self, xf, nx, beam_width: int = 8, topk_cells: int = 6,
+                   max_emissions: int = 25, min_emissions: int = 1, length_penalty: float = 0.0):
         self.eval()
         e = self.encode(xf, nx)
         h0 = self._init_hidden(e)
         return beam_search_cells(
             self._step, e, h0, self.start_token, xf.device,
             beam_width=beam_width, topk_cells=topk_cells, max_emissions=max_emissions,
+            min_emissions=min_emissions, length_penalty=length_penalty,
         )
 
     @torch.inference_mode()
@@ -273,9 +280,15 @@ class ARJunipr(PosteriorModel):
         total += float(logp_stop[L])
         return LundPointEstimate(nodes=nodes, logprob=total, multiplicity=L)
 
+    # beam-search keys map_estimate forwards to map_decode (sampling keys like
+    # n_posterior_samples / cont_temperature are silently ignored, so a single
+    # decode_params() dict can be splatted into both map_estimate and sample).
+    _BEAM_KEYS = ("beam_width", "topk_cells", "max_emissions", "min_emissions", "length_penalty")
+
     @torch.inference_mode()
     def map_estimate(self, xf, nx, **beam_kwargs) -> LundPointEstimate:
-        cells = self.map_decode(xf, nx, **beam_kwargs)
+        beam = {k: beam_kwargs[k] for k in self._BEAM_KEYS if k in beam_kwargs}
+        cells = self.map_decode(xf, nx, **beam)
         return self.describe_sequence(xf, nx, cells)
 
     # back-compat alias

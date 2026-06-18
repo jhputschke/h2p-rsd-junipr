@@ -76,9 +76,19 @@ def beam_search_cells(
     beam_width: int = 8,
     topk_cells: int = 6,
     max_emissions: int = 25,
+    min_emissions: int = 1,
+    length_penalty: float = 0.0,
 ) -> list[int]:
     """MAP cell structure: argmax over (continue/stop, cell) by beam search.
-    `step(tok, e, h) -> (p_cont: float, logp_split: (n_cells,), h)`."""
+    `step(tok, e, h) -> (p_cont: float, logp_split: (n_cells,), h)`.
+
+    `min_emissions` is a hard floor on the returned length: a STOP shorter than the
+    floor is never recorded, so the MAP never collapses to the unphysical empty tree
+    (a groomed jet has >=1 primary splitting). `length_penalty` (alpha) ranks finished
+    hypotheses by GNMT-style `score / len**alpha` to counter the brevity bias of an
+    un-normalized argmax over a high-entropy categorical head; alpha=0 (and
+    min_emissions=0) reproduces the raw-score behavior exactly. Pruning within a step
+    stays on raw score, where all candidates share a length."""
     start = torch.full((1, 1), start_token, dtype=torch.long, device=device)
     active = [(0.0, [], h0, start)]
     finished: list[tuple[float, list[int]]] = []
@@ -87,7 +97,8 @@ def beam_search_cells(
         for score, cells, h, tok in active:
             p_cont, logp_split, h_next = step(tok, e, h)
             p_cont = min(max(p_cont, 1e-8), 1 - 1e-8)
-            finished.append((score + math.log(1 - p_cont), cells))  # STOP
+            if len(cells) >= min_emissions:                         # STOP (floor-gated)
+                finished.append((score + math.log(1 - p_cont), cells))
             top = torch.topk(logp_split, k=min(topk_cells, logp_split.numel()))
             for lp, cell in zip(top.values.tolist(), top.indices.tolist()):
                 nt = torch.tensor([[cell]], dtype=torch.long, device=device)
@@ -96,8 +107,12 @@ def beam_search_cells(
             break
         cand.sort(key=lambda b: b[0], reverse=True)
         active = cand[:beam_width]
-    for score, cells, h, tok in active:
-        p_cont, _, _ = step(tok, e, h)
-        finished.append((score + math.log(min(max(1 - p_cont, 1e-8), 1.0)), cells))
-    finished.sort(key=lambda b: b[0], reverse=True)
+    for score, cells, h, tok in active:                            # terminal flush
+        if len(cells) >= min_emissions:
+            p_cont, _, _ = step(tok, e, h)
+            finished.append((score + math.log(min(max(1 - p_cont, 1e-8), 1.0)), cells))
+    if not finished:  # degenerate (e.g. max_emissions < min_emissions): best active beam
+        active.sort(key=lambda b: b[0], reverse=True)
+        return active[0][1]
+    finished.sort(key=lambda b: b[0] / max(len(b[1]), 1) ** length_penalty, reverse=True)
     return finished[0][1]
