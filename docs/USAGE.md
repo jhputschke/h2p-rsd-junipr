@@ -9,7 +9,7 @@ A practical, copy-pasteable walkthrough of the full workflow. For the physics se
 - [2. Checkpoints and the "best" model](#2-checkpoints-and-the-best-model)
 - [3. Resume a pre-empted run](#3-resume-a-pre-empted-run)
 - [4. Evaluate / inference testing](#4-evaluate--inference-testing)
-- [5. Programmatic inference](#5-programmatic-inference)
+- [5. Inference in your own script or notebook](#5-inference-in-your-own-script-or-notebook)
 - [6. Export and serve](#6-export-and-serve)
 - [7. Sweeps](#7-sweeps)
 - [8. Troubleshooting](#8-troubleshooting)
@@ -262,52 +262,172 @@ pytest tests/test_train_integration.py   # fast_dev train for ar_junipr_v1/v2/ci
 
 ---
 
-## 5. Programmatic inference
+## 5. Inference in your own script or notebook
 
-The contract every family implements is `log_prob` / `sample` / `map_estimate`.
-Load a checkpoint and call them directly:
+You don't need the CLI to run the model — `import h2p_rsd_junipr` and call it
+directly. The package installs as `pip install -e .`; nothing here needs the
+`[serve]` or `[track]` extras (only `numpy`/`torch`; add `matplotlib` for the
+plots in §5.4).
+
+The contract every model family implements is **`log_prob`** (exact per-jet
+`log q_φ(y|x)`), **`sample`** (posterior draws), and **`map_estimate`** (the MAP
+Lund tree). Everything below is built on those three.
+
+### 5.1 Load a trained model once
+
+Two equivalent ways. The shortest is the serving helper (no FastAPI needed — it is
+only imported when you start the web server):
 
 ```python
-import numpy as np, torch
+import torch
+from h2p_rsd_junipr.serving.api import load_service_model
+from h2p_rsd_junipr.train.trainer import select_device     # cuda > mps > cpu
+
+device = select_device()                                   # or torch.device("cpu")
+model, geom = load_service_model("runs/<id>/best.ckpt", device)
+# model is in eval() mode; `geom` is the Lund-plane geometry (cell <-> coords)
+```
+
+Equivalently, the explicit form (useful if you want the config too):
+
+```python
 from omegaconf import OmegaConf
 from h2p_rsd_junipr.geometry import Geometry
 from h2p_rsd_junipr.models.base import build_model
 from h2p_rsd_junipr.train.checkpoint import load_for_inference
-from h2p_rsd_junipr.data.dataset import MatchedLundDataset, collate
-from h2p_rsd_junipr.data.synthetic import synthetic_matched_dataset   # or data.rntuple.load_rntuple
 
-# 1. rebuild the exact model from the checkpoint's snapshotted config
-info  = load_for_inference("runs/<id>/best.ckpt", map_location="cpu")
-cfg   = OmegaConf.create(info["config"])
+info  = load_for_inference("runs/<id>/best.ckpt", map_location=device)
+cfg   = OmegaConf.create(info["config"])                   # the run's full config
 geom  = Geometry.from_config(cfg.geometry)
-model = build_model(cfg, geom)
+model = build_model(cfg, geom).to(device)
 model.load_state_dict(info["model_state"]); model.eval()
-
-# 2. one jet (here synthetic; in practice from load_rntuple)
-ds   = MatchedLundDataset(synthetic_matched_dataset(50, seed=123), geom)
-item = ds[0]
-xf, nx = item["xf"].unsqueeze(0), torch.tensor([item["nx"]])
-
-# 3a. MAP point estimate: beam search + conditional coordinate modes
-mp = model.map_estimate(xf, nx)
-print(mp.pretty())                       # human-readable Lund tree
-print(mp.multiplicity, mp.logprob)       # n splittings, log q(y_hat|x)
-for n in mp.nodes:
-    print(n.cell, n.kt, n.delta_R, n.z, n.psi)   # per-node continuous coords
-
-# 3b. posterior draws: ancestral sampling -> multiplicity band
-draws = model.sample(xf, nx, n=500)      # list of cell-id chains
-m = np.array([len(d) for d in draws])
-print(f"mult mean={m.mean():.2f}  68% CR={np.percentile(m,[16,84])}")
-
-# 3c. exact per-jet log-likelihood on a collated batch
-batch = collate([ds[0], ds[1], ds[2]])
-print(model.log_prob(batch))             # (B,) tensor of log q_phi(y|x)
 ```
 
-`map_estimate` returns a `LundPointEstimate` (`.nodes`, `.multiplicity`,
-`.logprob`, `.pretty()`); each `LundNode` carries the cell id and the continuous
-`(ln 1/ΔR, ln k_t, ln z, ψ)` plus derived `kt`, `delta_R`, `z`.
+### 5.2 Infer from a single hadron-level Lund sequence
+
+If you already have a jet's groomed **hadron-level** primary Lund sequence as four
+arrays `(ln 1/ΔR, ln k_t, ln z, ψ)`, the one-call helper returns the MAP tree plus a
+posterior summary:
+
+```python
+from h2p_rsd_junipr.serving.api import predict
+
+x = {"lnInvDelta": [0.29, 1.29, 4.26, 4.29, 5.21],   # your jet's hadron-level x
+     "lnkt":       [4.70, 4.42, 3.63, 2.17, 3.93],
+     "lnz":        [-1.10, -0.16, -0.90, -1.90, -0.31],
+     "psi":        [-3.07, -2.80, -0.31,  2.95, -2.38]}
+
+out = predict(model, geom, device, x)
+print(out["map_multiplicity"], out["map_logprob"])
+print(out["posterior_mult_mean"], out["posterior_mult_68CR"])
+for node in out["map_nodes"]:
+    print(node["cell"], node["ln_invDelta"], node["ln_kt"], node["ln_z"], node["psi"])
+```
+
+To drive the model yourself (full control over `n` samples, beam width, etc.), build
+the input tensor with `node_features` and call the contract methods:
+
+```python
+import numpy as np, torch
+from h2p_rsd_junipr.features import node_features
+
+xf = torch.tensor(node_features(x["lnInvDelta"], x["lnkt"], x["lnz"], x["psi"]))
+xf = xf.unsqueeze(0).to(device)                # (1, n_nodes, 5)
+nx = torch.tensor([xf.shape[1]], device=device)
+
+# MAP groomed parton tree: beam search + conditional coordinate modes
+mp = model.map_estimate(xf, nx)                # LundPointEstimate
+print(mp.pretty())                             # human-readable tree
+print("multiplicity:", mp.multiplicity, " log q(y_hat|x):", mp.logprob)
+for n in mp.nodes:                             # each node carries continuous coords
+    print(n.cell, n.kt, n.delta_R, n.z, n.psi)
+
+# Posterior draws -> multiplicity band (ancestral sampling; returns cell-id chains)
+draws = model.sample(xf, nx, n=500)
+mult  = np.array([len(d) for d in draws])
+print(f"posterior multiplicity: mean={mult.mean():.2f} "
+      f"68% CR=[{np.percentile(mult,16):.0f}, {np.percentile(mult,84):.0f}]")
+```
+
+### 5.3 Batch inference over a `jets.root` file
+
+Read the RNTuple your C++ stage produced, build the dataset, and run the model on
+many jets at once. `log_prob` is vectorised over the batch; `map_estimate`/`sample`
+are per-jet:
+
+```python
+import numpy as np, torch
+from h2p_rsd_junipr.data.rntuple import load_rntuple
+from h2p_rsd_junipr.data.dataset import MatchedLundDataset, collate
+
+jets = load_rntuple("jets.root", "Jets")       # list of per-jet dicts (x, y, weight, ...)
+ds   = MatchedLundDataset(jets, geom)          # uses the model's geometry for cell targets
+
+# (a) exact per-jet log-likelihood, batched
+batch = collate([ds[i] for i in range(min(256, len(ds)))])
+batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+with torch.inference_mode():
+    logq = model.log_prob(batch)               # (B,) tensor of log q_phi(y|x)
+print("mean log q(y|x) =", float(logq.mean()))
+
+# (b) MAP tree + posterior multiplicity for each jet
+records = []
+for i in range(min(100, len(ds))):
+    item = ds[i]
+    xf = item["xf"].unsqueeze(0).to(device)
+    nx = torch.tensor([item["nx"]], device=device)
+    mp = model.map_estimate(xf, nx)
+    mult = np.array([len(d) for d in model.sample(xf, nx, n=200)])
+    records.append({"jet": i, "map_mult": mp.multiplicity, "map_logq": mp.logprob,
+                    "post_mult_mean": float(mult.mean())})
+# records -> pandas.DataFrame(records) for analysis
+```
+
+(If you only need the hadron-level `x` and not the matched truth `y`, build the
+encoder input straight from the arrays with `node_features`, as in §5.2 — `y` is
+only required for `log_prob`.)
+
+### 5.4 In a Jupyter notebook (with plots)
+
+The same calls work in a notebook; add `matplotlib` (`pip install matplotlib`) to
+visualise the posterior. This plots the posterior multiplicity distribution and the
+posterior draws on the Lund plane, with the MAP tree overlaid:
+
+```python
+import numpy as np, torch, matplotlib.pyplot as plt
+from h2p_rsd_junipr.features import node_features
+
+xf = torch.tensor(node_features(x["lnInvDelta"], x["lnkt"], x["lnz"], x["psi"])).unsqueeze(0).to(device)
+nx = torch.tensor([xf.shape[1]], device=device)
+
+draws = model.sample(xf, nx, n=2000)           # posterior cell-id chains
+mp    = model.map_estimate(xf, nx)
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+
+# posterior multiplicity
+mult = np.array([len(d) for d in draws])
+ax1.hist(mult, bins=range(0, mult.max() + 2), align="left", alpha=0.8)
+ax1.axvline(mp.multiplicity, color="k", ls="--", label=f"MAP n={mp.multiplicity}")
+ax1.set_xlabel("posterior multiplicity"); ax1.set_ylabel("draws"); ax1.legend()
+
+# posterior draws on the Lund plane (cell centres), MAP nodes overlaid
+pts = np.array([geom.cell_center(c) for d in draws for c in d])   # (N, 2): (ln1/ΔR, ln kt)
+if len(pts):
+    ax2.hist2d(pts[:, 0], pts[:, 1], bins=geom.n_bins,
+               range=[list(geom.ln_invdelta_range), list(geom.ln_kt_range)], cmap="Blues")
+ax2.scatter([n.ln_invDelta for n in mp.nodes], [n.ln_kt for n in mp.nodes],
+            c="red", marker="*", s=160, label="MAP")
+ax2.set_xlabel(r"$\ln 1/\Delta R$"); ax2.set_ylabel(r"$\ln k_t$"); ax2.legend()
+plt.tight_layout(); plt.show()
+
+print(mp.pretty())                             # the MAP Lund tree, as text
+```
+
+Notebook tips: pick the device once with `select_device()` (CPU is fine and fully
+deterministic for inference); wrap heavy loops in `torch.inference_mode()`; and
+remember a freshly `build_model`'d-but-unloaded model is random — always
+`load_state_dict` (or use `load_service_model`) before trusting the output.
 
 ---
 
