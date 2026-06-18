@@ -3,7 +3,7 @@
 *Amortized per-jet posterior inference of the groomed parton-shower configuration
 across hadronization.*
 
-This document is the physics companion to [`README.md`](README.md). It explains
+This document is the physics companion to [`README.md`](../README.md). It explains
 **what** the code infers and **why** the inference is well-posed, working from the
 methodological note `amortized_posterior_hadronization.md` and the background
 surveys on parton showers and on hadronization/grooming. Wherever a physics idea

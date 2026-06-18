@@ -1,8 +1,8 @@
 # Usage guide: training, checkpoints, resume, inference
 
 A practical, copy-pasteable walkthrough of the full workflow. For the physics see
-[`README_PHYSICS.md`](../README_PHYSICS.md); for the design see
-[`PRODUCTION-PLAN-v4.md`](../PRODUCTION-PLAN-v4.md).
+[`README_PHYSICS.md`](README_PHYSICS.md); for the design see
+[`PRODUCTION-PLAN-v4.md`](PRODUCTION-PLAN-v4.md).
 
 - [0. Mental model](#0-mental-model)
 - [1. Train](#1-train)

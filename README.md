@@ -8,12 +8,12 @@ Louppe, *PNAS* **117** (2020) 30055, arXiv:1911.01429; Papamakarios & Murray,
 *NeurIPS* 2016, arXiv:1605.06376).
 
 This is the productionized form of the `conditional_rsd_junipr_v2.py` research
-script, built to [`PRODUCTION-PLAN-v4.md`](PRODUCTION-PLAN-v4.md): one model
+script, built to [`PRODUCTION-PLAN-v4.md`](docs/PRODUCTION-PLAN-v4.md): one model
 contract, many families behind a registry; config-first (OmegaConf, no Hydra); a
 lean custom Trainer with exact checkpoint/resume; a built+tested C++ data-generation
 stage (FastJet + fjcontrib LundPlane + PYTHIA 8); and a mandatory validation suite.
 
-> **Physics background:** [`README_PHYSICS.md`](README_PHYSICS.md) explains the QCD
+> **Physics background:** [`README_PHYSICS.md`](docs/README_PHYSICS.md) explains the QCD
 > setting (parton shower → Lund-string hadronization → grooming), why the inverse is
 > a posterior rather than a function, and how each physics choice maps onto the code.
 
@@ -120,5 +120,6 @@ provenance. Omit the card to fall back to the built-in defaults.
 `src/h2p_rsd_junipr/` — `config` · `geometry` · `features` · `distributions` ·
 `data/` · `encoders/` · `models/` · `inference/` · `eval/` · `train/` · `serving/`
 · `cli`. `configs/` — YAML group files composed by `config.py`. `cpp/` — the
-generation stage. `tests/` — pytest mirror. See `PRODUCTION-PLAN-v4.md` for the
-full design and the §14 phased roadmap.
+generation stage. `tests/` — pytest mirror. See
+[`docs/PRODUCTION-PLAN-v4.md`](docs/PRODUCTION-PLAN-v4.md) for the full design and
+the §14 phased roadmap.
