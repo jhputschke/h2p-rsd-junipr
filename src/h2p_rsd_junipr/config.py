@@ -146,6 +146,9 @@ class DecodeConfig:
     #                                    to the unphysical empty tree (>=1 splitting)
     length_penalty: float = 0.0        # GNMT-style score/len**alpha at final beam rank;
     #                                    0.0 == no normalization (default = today's behavior)
+    length_floor_quantile: float = 0.0 # per-jet MAP floor from the learned P(n|x): the
+    #                                    effective floor is max(min_emissions, Q_alpha(P(n|x))).
+    #                                    0.0 == off (short-circuits; merged behavior unchanged)
 
 
 @dataclass
@@ -268,6 +271,7 @@ _DECODE_DEFAULTS: dict = {
     "cont_temperature": 1.0,
     "min_emissions": 1,
     "length_penalty": 0.0,
+    "length_floor_quantile": 0.0,
 }
 
 

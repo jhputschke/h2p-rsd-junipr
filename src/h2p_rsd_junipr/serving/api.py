@@ -11,6 +11,7 @@ import torch
 from ..config import OmegaConf, decode_params
 from ..features import node_features
 from ..geometry import Geometry
+from ..inference.length import learned_min_emissions
 from ..models.base import build_model
 from ..train.checkpoint import load_for_inference
 
@@ -28,15 +29,26 @@ def load_service_model(ckpt_path: str, device: torch.device):
 def predict(model, geometry, device, x_seq, decode: dict | None = None) -> dict:
     """x_seq: dict with lists lnInvDelta, lnkt, lnz, psi -> MAP + posterior summary.
     `decode` is a decode_params(cfg) dict; when None the model defaults apply (the
-    MAP floor min_emissions=1 still holds via the method signature)."""
-    dec = decode or {}
+    MAP floor min_emissions=1 still holds via the method signature).
+
+    When `decode.length_floor_quantile > 0` the MAP multiplicity is floored per jet at
+    the learned quantile of P(n|x): the posterior draws are taken first and their
+    multiplicities reused, so the learned floor costs no extra sampling. alpha=0 (the
+    default) short-circuits and the MAP is identical to today's hard-floored beam."""
+    dec = dict(decode or {})
     xf = torch.tensor(
         node_features(x_seq["lnInvDelta"], x_seq["lnkt"], x_seq["lnz"], x_seq["psi"])
     ).unsqueeze(0).to(device)
     nx = torch.tensor([xf.shape[1]], device=device)
-    y_hat = model.map_estimate(xf, nx, **dec)  # map_estimate keeps only the beam keys
     draws = model.sample_batch(xf, nx, int(dec.get("n_posterior_samples", 200)))
     mults = np.array([len(d) for d in draws])
+    alpha = float(dec.get("length_floor_quantile", 0.0))
+    if alpha > 0.0:  # learned per-jet floor reuses the draws above (no double-sample)
+        dec["min_emissions"] = learned_min_emissions(
+            model, xf, nx, quantile=alpha,
+            base_floor=int(dec.get("min_emissions", 1)), mults=mults,
+        )
+    y_hat = model.map_estimate(xf, nx, **dec)  # map_estimate keeps only the beam keys
     return {
         "map_multiplicity": y_hat.multiplicity,
         "map_logprob": y_hat.logprob,

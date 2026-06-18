@@ -206,6 +206,8 @@ class DecodeConfig:
     cont_temperature: float = 1.0          # exposure-bias remedy, sampling-time only
     min_emissions: int = 1                 # MAP floor: never the unphysical empty tree
     length_penalty: float = 0.0            # GNMT score/len**alpha at final beam rank; 0 == off
+    length_floor_quantile: float = 0.0     # learned per-jet MAP floor: max(min_emissions,
+    #                                        Q_alpha(P(n|x))); 0.0 == off (opt-in)
 ```
 
 OmegaConf schema conventions (assumes `from dataclasses import field`,
@@ -232,8 +234,19 @@ Notes tied to the model discussion:
   Both are *decode-time* only; cINN/diffusion clamp their categorical multiplicity
   head identically. These params are now read from `cfg.decode` end-to-end (eval CLI,
   serving) via the `decode_params()` accessor, which tolerates pre-floor checkpoint
-  snapshots. **Reporting** carries the MAP, the posterior mean **and the posterior
-  median** (the recommended multiplicity point estimate).
+  snapshots; at `eval` the checkpoint's snapshot decode is the default but an explicit
+  CLI `decode.*` override still wins (so an A/B like `decode.length_floor_quantile=0.9`
+  takes effect on a trained checkpoint). **Reporting** carries the MAP, the posterior
+  mean **and the posterior median** (the recommended multiplicity point estimate).
+- `decode.length_floor_quantile` (default 0.0 == off) is the *learned, per-jet*
+  generalization of `min_emissions`: instead of a hard global constant the MAP length
+  is floored at the `alpha`-quantile of the model's own length belief P(n|x) — the
+  effective floor is `max(min_emissions, floor(Q_alpha(P(n|x))))`, passed straight into
+  the unchanged `map_estimate`. P(n|x) is read from the cINN/diffusion multiplicity
+  head exactly and from reused posterior draws for AR (`models/*.length_pmf`,
+  `inference/length.py`). The floor only ever *raises* the bound (n>=1 preserved), and
+  `alpha=0` short-circuits to today's behavior (structural parity). `alpha->median`
+  approaches a length-conditioned MAP at that quantile.
 
 CLI override example (ergonomics identical across versions — here OmegaConf's
 dotted parsing, not Hydra, implements them):

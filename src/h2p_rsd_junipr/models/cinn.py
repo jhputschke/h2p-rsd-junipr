@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -172,6 +173,13 @@ class CINN(PosteriorModel):
 
     def sample_batch(self, xf, nx, n_samples, max_emissions: int = 25):
         return self.sample(xf, nx, n_samples)
+
+    @torch.inference_mode()
+    def length_pmf(self, xf, nx, mults=None, n_samples: int = 500) -> np.ndarray:
+        """Exact P(n|x) from the categorical multiplicity head (no sampling)."""
+        self.eval()
+        e = self.encode(xf, nx)
+        return F.softmax(self.n_head(e), dim=-1).squeeze(0).cpu().numpy()
 
     @torch.inference_mode()
     def map_estimate(self, xf, nx, **kw) -> LundPointEstimate:
