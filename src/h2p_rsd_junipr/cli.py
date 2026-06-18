@@ -96,6 +96,13 @@ def cmd_eval(argv) -> int:
         _, val_ds = LundDataModule(cfg2, geometry).setup().datasets()
         dm_jets = LundDataModule(cfg2, geometry).setup().val_jets
         decode = decode_params(cfg2)  # follow the checkpoint's decode config (tolerant of old snapshots)
+        # ...but an explicit CLI `decode.*` override still wins over the snapshot (decode is
+        # inference-time tuning, e.g. an A/B on decode.length_floor_quantile). Tokens were
+        # already schema-validated by load_config(argv) above, so they are safe to apply.
+        cli_decode = [t for t in argv if t.startswith("decode.") and "=" in t]
+        if cli_decode:
+            ov = OmegaConf.to_container(OmegaConf.from_dotlist(cli_decode).decode, resolve=True)
+            decode.update(ov)
     else:
         from .train.trainer import build_components
         model, _, _ = build_components(cfg, geometry, device)

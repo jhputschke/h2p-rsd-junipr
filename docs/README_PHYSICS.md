@@ -118,8 +118,17 @@ Two consequences are built into the code:
   `decode.min_emissions` (default 1) — a *constrained MAP under a minimum-emission
   floor* — and an optional GNMT length penalty `decode.length_penalty`
   ($\text{score}/\text{len}^{\alpha}$) to counter the brevity bias; cINN/diffusion clamp
-  their multiplicity head the same way. For a *count*, prefer the **posterior median**:
-  the MAP is the wrong summary for multiplicity. Quantified in
+  their multiplicity head the same way. A **learned, per-jet** generalization of that
+  floor is `decode.length_floor_quantile` ($\alpha$, default 0 = off): the model already
+  learns a per-jet length belief $P(n\mid x)$ (an explicit categorical head for
+  cINN/diffusion; the empirical multiplicity of posterior draws for the autoregressive
+  model), which — unlike the joint argmax — is *unbiased* in length. Flooring the MAP at
+  a low quantile of it, $\hat n=\max(\texttt{min\_emissions},\,\lfloor
+  Q_\alpha(P(n\mid x))\rfloor)$, transfers that belief into the point estimate and cuts
+  the residual under-count; the floor only ever *raises* the bound (so $n\ge 1$ is
+  preserved), $\alpha\to0$ reproduces the hard floor exactly, and $\alpha\to$ median
+  approaches a **length-conditioned MAP** at that quantile. For a *count*, still prefer
+  the **posterior median**: the MAP is the wrong summary for multiplicity. Quantified in
   `notebooks/inference_demo.ipynb` §6a and `scripts/probe_map_collapse.py`.
 - **A direct conditional MLE.** A simpler MAP-on-a-tractable-likelihood precedent is
   the Ginkgo / Quantum-Trellis line (arXiv:2105.10512, arXiv:2112.12795); here the

@@ -54,13 +54,16 @@ def test_decode_config_has_new_fields():
     cfg = load_config([])
     assert cfg.decode.min_emissions == 1
     assert cfg.decode.length_penalty == pytest.approx(0.0)
+    assert cfg.decode.length_floor_quantile == pytest.approx(0.0)
 
 
 def test_decode_params_full():
     dec = decode_params(load_config([]))
     assert set(dec) == {"beam_width", "topk_cells", "max_emissions", "n_posterior_samples",
-                        "cont_temperature", "min_emissions", "length_penalty"}
+                        "cont_temperature", "min_emissions", "length_penalty",
+                        "length_floor_quantile"}
     assert dec["min_emissions"] == 1
+    assert dec["length_floor_quantile"] == pytest.approx(0.0)
 
 
 def test_decode_params_tolerates_old_snapshot():
@@ -69,5 +72,7 @@ def test_decode_params_tolerates_old_snapshot():
                                        "n_posterior_samples": 500, "cont_temperature": 1.0}})
     dec = decode_params(old)
     assert dec["min_emissions"] == 1 and dec["length_penalty"] == pytest.approx(0.0)
+    assert dec["length_floor_quantile"] == pytest.approx(0.0)
     # and a config with no decode block at all
     assert decode_params(OmegaConf.create({}))["min_emissions"] == 1
+    assert decode_params(OmegaConf.create({}))["length_floor_quantile"] == pytest.approx(0.0)

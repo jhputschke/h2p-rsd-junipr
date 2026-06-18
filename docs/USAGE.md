@@ -239,9 +239,14 @@ per-jet point estimate q_phi(y | x) for one validation jet:
 > the **unphysical empty tree** (0 splittings) for a large fraction of jets. The
 > decoder enforces `decode.min_emissions` (default **1**) so the MAP always has ≥1
 > splitting; `decode.length_penalty` (GNMT `score/len**α`, default 0) further counters
-> the brevity bias. For a *count*, prefer the **posterior median** — the MAP is the
-> wrong summary for multiplicity. See `notebooks/inference_demo.ipynb` §6a and
-> `scripts/probe_map_collapse.py`.
+> the brevity bias. `decode.length_floor_quantile` (default **0.0** = off) is the
+> *learned, per-jet* version of that floor: it raises the MAP length to the
+> `α`-quantile of the model's own length belief `P(n|x)` —
+> `eff = max(min_emissions, ⌊Q_α(P(n|x))⌋)` — cutting the residual under-count while
+> keeping `n=0` at 0% (the floor only ever raises the bound; `α=0` is bit-for-bit
+> today's behavior, `α→median` ≈ a length-conditioned MAP). For a *count*, still prefer
+> the **posterior median** — the MAP is the wrong summary for multiplicity. See
+> `notebooks/inference_demo.ipynb` §6a and `scripts/probe_map_collapse.py`.
 
 What the metrics mean:
 - **leading-emission Lund distance** — how close the MAP's hardest splitting is to
@@ -362,6 +367,26 @@ print(f"posterior multiplicity: median={np.median(mult):.0f} mean={mult.mean():.
 # the posterior median is the recommended multiplicity point estimate (the MAP is the
 # length-biased joint mode; see the MAP floor note in §4)
 ```
+
+**Learned per-jet floor.** To floor the MAP at a low quantile of the model's own length
+belief `P(n|x)` instead of the hard `min_emissions` constant, compute the per-jet floor
+with `learned_min_emissions` (reusing the draws you already took — no second sample) and
+feed it back as `min_emissions`:
+
+```python
+from h2p_rsd_junipr.inference.length import learned_min_emissions
+
+mult = np.array([len(d) for d in draws])                 # the draws from above
+eff  = learned_min_emissions(model, xf, nx, quantile=0.15, base_floor=1, mults=mult)
+mp_floored = model.map_estimate(xf, nx, min_emissions=eff)   # eff = max(1, ⌊Q_0.15(P(n|x))⌋)
+print("learned floor:", eff, " MAP multiplicity:", mp_floored.multiplicity)
+```
+
+`quantile=0` short-circuits to `base_floor` (today's behavior). For cINN/diffusion the
+`P(n|x)` is read exactly from the multiplicity head (the `mults` are ignored); for AR it
+is the histogram of `mults`. Or, end-to-end, just set
+`decode.length_floor_quantile=0.15` and the eval CLI / `predict` / `serve` path applies
+it automatically (the posterior draws those code paths already take are reused).
 
 ### 5.3 Batch inference over a `jets.root` file
 

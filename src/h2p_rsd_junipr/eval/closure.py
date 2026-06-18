@@ -16,6 +16,7 @@ import torch
 
 from ..features import node_raw
 from ..geometry import Geometry
+from ..inference.length import learned_min_emissions
 from ..inference.point_estimate import LundPointEstimate
 
 
@@ -153,13 +154,21 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
 
 def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=500, decode=None):
     """Per-jet point estimate: plain RSD (hadron x) vs model MAP vs truth (jet 0).
-    `decode` is a decode_params(cfg) dict (beam keys steer the MAP, e.g. min_emissions)."""
-    dec = decode or {}
+    `decode` is a decode_params(cfg) dict (beam keys steer the MAP, e.g. min_emissions).
+    When `decode.length_floor_quantile > 0` the MAP multiplicity is floored per jet at
+    the learned quantile of P(n|x), reusing the posterior draws below."""
+    dec = dict(decode or {})
     item = val_ds[0]
     xf = item["xf"].unsqueeze(0).to(device)
     nx = torch.tensor([item["nx"]], device=device)
     draws = model.sample_batch(xf, nx, n_samples)
     mults = np.array([len(d) for d in draws])
+    alpha = float(dec.get("length_floor_quantile", 0.0))
+    if alpha > 0.0:  # learned per-jet floor reuses the draws above (no double-sample)
+        dec["min_emissions"] = learned_min_emissions(
+            model, xf, nx, quantile=alpha,
+            base_floor=int(dec.get("min_emissions", 1)), mults=mults,
+        )
     y_hat = model.map_estimate(xf, nx, **dec)
 
     x_raw = node_raw(*val_jets[0]["x"])
