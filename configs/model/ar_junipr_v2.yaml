@@ -1,0 +1,9 @@
+# §5.1 autoregressive JUNIPR with continuous per-node coordinates (v2).
+ctx_dim: 64
+dec_dim: 64
+dec_layers: 1
+split_head_layers: 2
+coord_head_layers: 2
+continuous_coords: true
+sigma_floor: 0.01
+kappa_max: 50.0

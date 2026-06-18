@@ -1,0 +1,7 @@
+[parity] batch of 64 jets
+[parity] old per_jet_nll mean = 41.943302
+[parity] new per_jet_nll mean = 41.943302
+[parity] max |delta| = 0.000e+00
+[parity] allclose(atol=1e-5): True
+[parity] log_prob == -per_jet_nll: True
+PARITY PASSED — refactor reproduces the v2 likelihood bit-for-bit.

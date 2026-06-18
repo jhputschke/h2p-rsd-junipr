@@ -1,0 +1,5 @@
+# §5.3 conditional diffusion / bridge (baseline drop-in).
+ctx_dim: 64
+hidden_dim: 64
+n_steps: 50
+max_emissions: 25

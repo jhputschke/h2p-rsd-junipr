@@ -1,0 +1,68 @@
+training on 7200 jets, validating on 800 (device=mps)  [fingerprint=3d320ef1f36e]
+model parameters: 111.5k
+epoch  1   train NLL/jet =   30.893   val NLL/jet =   27.851
+epoch  2   train NLL/jet =   26.756   val NLL/jet =   26.375
+epoch  3   train NLL/jet =   25.275   val NLL/jet =   25.221
+epoch  4   train NLL/jet =   24.438   val NLL/jet =   24.564
+epoch  5   train NLL/jet =   23.694   val NLL/jet =   23.984
+epoch  6   train NLL/jet =   23.103   val NLL/jet =   23.494
+epoch  7   train NLL/jet =   22.624   val NLL/jet =   23.282
+epoch  8   train NLL/jet =   22.217   val NLL/jet =   22.718
+epoch  9   train NLL/jet =   21.604   val NLL/jet =   22.339
+epoch 10   train NLL/jet =   21.271   val NLL/jet =   22.018
+epoch 11   train NLL/jet =   20.932   val NLL/jet =   21.881
+epoch 12   train NLL/jet =   20.674   val NLL/jet =   21.558
+epoch 13   train NLL/jet =   20.400   val NLL/jet =   21.604
+epoch 14   train NLL/jet =   20.177   val NLL/jet =   21.226
+epoch 15   train NLL/jet =   19.963   val NLL/jet =   21.173
+epoch 16   train NLL/jet =   19.765   val NLL/jet =   20.975
+epoch 17   train NLL/jet =   19.611   val NLL/jet =   20.928
+epoch 18   train NLL/jet =   19.487   val NLL/jet =   20.872
+epoch 19   train NLL/jet =   19.355   val NLL/jet =   20.796
+epoch 20   train NLL/jet =   19.267   val NLL/jet =   20.764
+
+closure + calibration on held-out jets:
+  mean multiplicity            :  true y = 5.34   hadron x = 5.18   posterior = 6.33
+  leading-emission Lund distance to true y :  identity(x) = 0.466   posterior-mode = 0.750   (lower is better)
+  multiplicity signed bias  <n - n_true>   :  identity(x) = -0.160   posterior-mean = +0.991   (closer to 0 is better)
+  posterior 68% coverage of true leading cell = 0.71   (target ~0.68; <0.68 => over-confident)
+
+posterior calibration (SBC / PIT / coverage):
+  SBC rank-uniformity chi^2 (10 bins) = 615.53   (lower => more uniform => better calibrated)
+  SBC mean rank = 0.207   PIT mean = 0.309   (target ~0.5)
+  leading-cell 68% coverage = 0.73   (target ~0.68)
+
+per-jet point estimate q_phi(y | x) for one validation jet:
+  multiplicity:  truth y = 5   model MAP = 6   plain RSD (hadron x) = 6   posterior = 6.18 +/- 0.76 (68% CR [5, 7])
+  leading-emission Lund distance to truth:  plain RSD = 0.000   model MAP = 0.000   (lower is better)
+
+model MAP groomed shower: 6 primary splittings, log q(y_hat|x) = -8.032
+  [0] kt=121.46 GeV  DeltaR=0.902  z=0.455  psi=-2.79  (ln1/DR=0.10, lnkt=4.80, lnz=-0.79)  logP=+0.55  dLund=0.208
+  [1] kt=100.14 GeV  DeltaR=0.227  z=0.602  psi=-2.43  (ln1/DR=1.48, lnkt=4.61, lnz=-0.51)  logP=-1.19  dLund=0.273
+  [2] kt= 27.54 GeV  DeltaR=0.081  z=0.584  psi=-1.95  (ln1/DR=2.52, lnkt=3.32, lnz=-0.54)  logP=-1.92  dLund=1.765
+  [3] kt= 25.55 GeV  DeltaR=0.011  z=0.501  psi=-1.84  (ln1/DR=4.50, lnkt=3.24, lnz=-0.69)  logP=-2.12  dLund=1.094
+  [4] kt= 14.07 GeV  DeltaR=0.005  z=0.410  psi=-1.99  (ln1/DR=5.24, lnkt=2.64, lnz=-0.89)  logP=-1.86  dLund=1.285
+  [5] kt= 24.90 GeV  DeltaR=0.003  z=0.346  psi=-1.91  (ln1/DR=5.93, lnkt=3.21, lnz=-1.06)  logP=-1.38
+
+plain RSD groomed shower (hadron-level x): 6 primary splittings
+  [0] kt= 79.66 GeV  DeltaR=1.000  z=0.387  psi=-2.73  (ln1/DR=0.00, lnkt=4.38, lnz=-0.95)  cell=  7  dLund=0.432
+  [1] kt=  1.80 GeV  DeltaR=0.429  z=0.624  psi=+0.51  (ln1/DR=0.85, lnkt=0.59, lnz=-0.47)  cell= 10  dLund=3.859
+  [2] kt=121.08 GeV  DeltaR=0.200  z=0.999  psi=-2.33  (ln1/DR=1.61, lnkt=4.80, lnz=-0.00)  cell= 27  dLund=2.893
+  [3] kt= 27.26 GeV  DeltaR=0.015  z=0.387  psi=-1.05  (ln1/DR=4.17, lnkt=3.31, lnz=-0.95)  cell= 65  dLund=1.144
+  [4] kt=  3.98 GeV  DeltaR=0.012  z=0.111  psi=-3.07  (ln1/DR=4.40, lnkt=1.38, lnz=-2.20)  cell= 72  dLund=2.674
+  [5] kt= 68.02 GeV  DeltaR=0.005  z=0.606  psi=-2.10  (ln1/DR=5.24, lnkt=4.22, lnz=-0.50)  cell= 87
+
+true groomed shower: 5 primary splittings
+  [0] kt=110.07 GeV  DeltaR=0.751  z=0.332  psi=-3.07  (ln1/DR=0.29, lnkt=4.70, lnz=-1.10)  cell=  7
+  [1] kt= 83.02 GeV  DeltaR=0.276  z=0.849  psi=-2.80  (ln1/DR=1.29, lnkt=4.42, lnz=-0.16)  cell= 27
+  [2] kt= 37.54 GeV  DeltaR=0.014  z=0.407  psi=-0.31  (ln1/DR=4.26, lnkt=3.63, lnz=-0.90)  cell= 76
+  [3] kt=  8.73 GeV  DeltaR=0.014  z=0.149  psi=+2.95  (ln1/DR=4.29, lnkt=2.17, lnz=-1.90)  cell= 73
+  [4] kt= 50.84 GeV  DeltaR=0.005  z=0.730  psi=-2.38  (ln1/DR=5.21, lnkt=3.93, lnz=-0.31)  cell= 86
+
+================================================================
+VERIFICATION vs v2 reference (bands are run-to-run tolerant):
+  val_nll          got= 20.764  ref= 20.710  band=[0.0,23.0]  PASS
+  mult_posterior   got=  6.327  ref=  6.140  band=[4.5,8.0]  PASS
+  coverage         got=  0.707  ref=  0.680  band=[0.45,0.88]  PASS
+================================================================
+SYNTHETIC VERIFICATION PASSED

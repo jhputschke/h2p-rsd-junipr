@@ -1,0 +1,54 @@
+[load_rntuple] could not read jets.root:Jets ([Errno 2] No such file or directory: '/private/tmp/jets.root'); using synthetic data.
+training on 7200 jets, validating on 800 (device=mps)
+epoch  1   train NLL/jet =   30.961   val NLL/jet =   28.027
+epoch  2   train NLL/jet =   26.606   val NLL/jet =   26.409
+epoch  3   train NLL/jet =   25.114   val NLL/jet =   25.437
+epoch  4   train NLL/jet =   24.220   val NLL/jet =   24.737
+epoch  5   train NLL/jet =   23.633   val NLL/jet =   24.146
+epoch  6   train NLL/jet =   23.011   val NLL/jet =   23.743
+epoch  7   train NLL/jet =   22.566   val NLL/jet =   23.165
+epoch  8   train NLL/jet =   22.013   val NLL/jet =   22.682
+epoch  9   train NLL/jet =   21.407   val NLL/jet =   22.144
+epoch 10   train NLL/jet =   20.941   val NLL/jet =   21.916
+epoch 11   train NLL/jet =   20.595   val NLL/jet =   21.592
+epoch 12   train NLL/jet =   20.305   val NLL/jet =   21.610
+epoch 13   train NLL/jet =   20.022   val NLL/jet =   21.351
+epoch 14   train NLL/jet =   19.801   val NLL/jet =   21.298
+epoch 15   train NLL/jet =   19.607   val NLL/jet =   21.050
+epoch 16   train NLL/jet =   19.379   val NLL/jet =   20.916
+epoch 17   train NLL/jet =   19.183   val NLL/jet =   20.878
+epoch 18   train NLL/jet =   19.070   val NLL/jet =   20.833
+epoch 19   train NLL/jet =   18.939   val NLL/jet =   20.789
+epoch 20   train NLL/jet =   18.831   val NLL/jet =   20.712
+
+closure + calibration on held-out jets:
+  mean multiplicity            :  true y = 5.34   hadron x = 5.18   posterior = 6.14
+  leading-emission Lund distance to true y :  identity(x) = 0.466   posterior-mode = 0.699   (lower is better)
+  multiplicity signed bias  <n - n_true>   :  identity(x) = -0.160   posterior-mean = +0.807   (closer to 0 is better)
+  posterior 68% coverage of true leading cell = 0.68   (target ~0.68; <0.68 => over-confident)
+
+per-jet point estimate q_phi(y | x) for one validation jet:
+  multiplicity:  truth y = 5   model MAP = 5   plain RSD (hadron x) = 6   posterior = 5.88 +/- 0.66 (68% CR [5, 6])
+  leading-emission Lund distance to truth:  plain RSD = 0.000   model MAP = 0.000   (lower is better)
+
+model MAP groomed shower: 5 primary splittings, log q(y_hat|x) = -5.703
+  [0] kt=121.17 GeV  DeltaR=0.893  z=0.493  psi=-2.75  (ln1/DR=0.11, lnkt=4.80, lnz=-0.71)  logP=+0.51  dLund=0.198
+  [1] kt=106.42 GeV  DeltaR=0.349  z=0.648  psi=-2.41  (ln1/DR=1.05, lnkt=4.67, lnz=-0.43)  logP=-0.74  dLund=0.340
+  [2] kt= 27.05 GeV  DeltaR=0.041  z=0.637  psi=-2.06  (ln1/DR=3.19, lnkt=3.30, lnz=-0.45)  logP=-2.11  dLund=1.117
+  [3] kt= 43.19 GeV  DeltaR=0.010  z=0.594  psi=-1.82  (ln1/DR=4.59, lnkt=3.77, lnz=-0.52)  logP=-1.39  dLund=1.627
+  [4] kt= 26.70 GeV  DeltaR=0.003  z=0.465  psi=-2.01  (ln1/DR=5.98, lnkt=3.28, lnz=-0.77)  logP=-1.73  dLund=1.002
+
+plain RSD groomed shower (hadron-level x): 6 primary splittings
+  [0] kt= 79.66 GeV  DeltaR=1.000  z=0.387  psi=-2.73  (ln1/DR=0.00, lnkt=4.38, lnz=-0.95)  cell=  7  dLund=0.432
+  [1] kt=  1.80 GeV  DeltaR=0.429  z=0.624  psi=+0.51  (ln1/DR=0.85, lnkt=0.59, lnz=-0.47)  cell= 10  dLund=3.859
+  [2] kt=121.08 GeV  DeltaR=0.200  z=0.999  psi=-2.33  (ln1/DR=1.61, lnkt=4.80, lnz=-0.00)  cell= 27  dLund=2.893
+  [3] kt= 27.26 GeV  DeltaR=0.015  z=0.387  psi=-1.05  (ln1/DR=4.17, lnkt=3.31, lnz=-0.95)  cell= 65  dLund=1.144
+  [4] kt=  3.98 GeV  DeltaR=0.012  z=0.111  psi=-3.07  (ln1/DR=4.40, lnkt=1.38, lnz=-2.20)  cell= 72  dLund=2.674
+  [5] kt= 68.02 GeV  DeltaR=0.005  z=0.606  psi=-2.10  (ln1/DR=5.24, lnkt=4.22, lnz=-0.50)  cell= 87
+
+true groomed shower: 5 primary splittings
+  [0] kt=110.07 GeV  DeltaR=0.751  z=0.332  psi=-3.07  (ln1/DR=0.29, lnkt=4.70, lnz=-1.10)  cell=  7
+  [1] kt= 83.02 GeV  DeltaR=0.276  z=0.849  psi=-2.80  (ln1/DR=1.29, lnkt=4.42, lnz=-0.16)  cell= 27
+  [2] kt= 37.54 GeV  DeltaR=0.014  z=0.407  psi=-0.31  (ln1/DR=4.26, lnkt=3.63, lnz=-0.90)  cell= 76
+  [3] kt=  8.73 GeV  DeltaR=0.014  z=0.149  psi=+2.95  (ln1/DR=4.29, lnkt=2.17, lnz=-1.90)  cell= 73
+  [4] kt= 50.84 GeV  DeltaR=0.005  z=0.730  psi=-2.38  (ln1/DR=5.21, lnkt=3.93, lnz=-0.31)  cell= 86

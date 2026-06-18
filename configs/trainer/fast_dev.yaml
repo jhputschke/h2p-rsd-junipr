@@ -1,0 +1,6 @@
+max_epochs: 1
+batch_size: 16
+seed: 0
+fast_dev_run: true
+num_workers: 0
+deterministic: true

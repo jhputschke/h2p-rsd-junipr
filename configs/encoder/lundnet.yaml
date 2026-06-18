@@ -1,0 +1,6 @@
+name: lundnet
+emb_dim: 32
+hidden_dim: 64
+num_layers: 3
+k: 4
+dropout: 0.1

@@ -1,0 +1,7 @@
+# §5.2 conditional normalizing flow (baseline drop-in).
+ctx_dim: 64
+n_blocks: 6
+hidden_dim: 64
+max_emissions: 25
+sigma_floor: 0.01
+kappa_max: 50.0

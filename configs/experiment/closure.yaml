@@ -1,0 +1,4 @@
+name: closure
+closure_jets: 300
+n_closure_samples: 200
+generator_b: null

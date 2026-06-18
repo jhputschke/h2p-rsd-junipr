@@ -1,0 +1,9 @@
+max_epochs: 20
+batch_size: 64
+seed: 0
+amp: false
+compile: false
+fast_dev_run: false
+ema_decay: null
+num_workers: 0
+deterministic: true

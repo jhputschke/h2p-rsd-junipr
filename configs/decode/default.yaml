@@ -1,0 +1,5 @@
+beam_width: 8
+topk_cells: 6
+max_emissions: 25
+n_posterior_samples: 500
+cont_temperature: 1.0

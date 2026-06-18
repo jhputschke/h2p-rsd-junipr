@@ -1,0 +1,4 @@
+name: pythia_vs_herwig
+closure_jets: 300
+n_closure_samples: 200
+generator_b: HERWIG-7.3

@@ -1,0 +1,252 @@
+"""Configuration system (§2): dataclass schemas backed by OmegaConf, no Hydra.
+
+OmegaConf turns the dataclasses below into a validated, struct-mode config object
+(runtime type checks, unknown-key rejection, interpolation, deep merge). The
+loader (`load_config`) only selects the group files and merges them; Hydra's
+defaults-list composition is the one piece replaced by hand (~60 lines).
+
+Every physics/architecture knob from `conditional_rsd_junipr_v2.py` lives here as
+a schema field, never hard-coded in source.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from omegaconf import MISSING, DictConfig, OmegaConf
+
+# Repo-root-relative config directory (src/h2p_rsd_junipr/config.py -> ../../configs)
+CONFIGS = Path(__file__).resolve().parents[2] / "configs"
+
+GROUPS = ("geometry", "data", "model", "encoder", "optim", "trainer", "decode", "experiment")
+
+
+# ---------------------------------------------------------------------------
+# Sub-config schemas
+# ---------------------------------------------------------------------------
+@dataclass
+class GeometryConfig:
+    # OmegaConf stores sequences as ListConfig, so type ranges as List[float].
+    ln_invdelta_range: list[float] = field(default_factory=lambda: [0.0, 6.0])
+    ln_kt_range: list[float] = field(default_factory=lambda: [0.0, 6.0])
+    n_bins: int = 10  # -> n_cells = n_bins**2 (derived in geometry.py, §2.1)
+
+
+@dataclass
+class DataConfig:
+    source: str = "synthetic"          # synthetic | rntuple
+    path: str = "jets.root"            # rntuple path (source == rntuple)
+    ntuple: str = "Jets"
+    n_jets: int = 8000                 # synthetic dataset size
+    seed: int = 0                      # synthetic / split seed
+    val_fraction: float = 0.1
+    min_val: int = 200
+    cache_dir: str | None = None    # preprocessed-tensor cache (§4 stage 3)
+    max_emissions: int = 20            # synthetic parton sequence cap
+
+
+@dataclass
+class EncoderConfig:
+    name: str = "gru"                  # gru | lundnet | deepsets
+    emb_dim: int = 32
+    hidden_dim: int = 64               # was enc_dim
+    num_layers: int = 1                # the "encoder depth" knob
+    bidirectional: bool = True
+    dropout: float = 0.1               # wired in (the script defines but never applies it)
+
+
+@dataclass
+class LundNetEncoderConfig:
+    name: str = "lundnet"
+    emb_dim: int = 32
+    hidden_dim: int = 64
+    num_layers: int = 3
+    k: int = 4                         # EdgeConv neighbourhood (chain graph -> sequential)
+    dropout: float = 0.1
+
+
+@dataclass
+class DeepSetsEncoderConfig:
+    name: str = "deepsets"
+    emb_dim: int = 32
+    hidden_dim: int = 64
+    num_layers: int = 2
+    dropout: float = 0.1
+
+
+@dataclass
+class ARJuniprConfig:
+    name: str = "ar_junipr"
+    ctx_dim: int = 64
+    dec_dim: int = 64
+    dec_layers: int = 1                # decoder depth (h0 built (dec_layers, B, dec_dim))
+    split_head_layers: int = 2
+    coord_head_layers: int = 2
+    continuous_coords: bool = True     # True == v2, False == v1
+    sigma_floor: float = 1e-2
+    kappa_max: float = 50.0
+
+
+@dataclass
+class CINNConfig:
+    name: str = "cinn"
+    ctx_dim: int = 64
+    n_blocks: int = 6
+    hidden_dim: int = 64
+    max_emissions: int = 25
+    sigma_floor: float = 1e-2
+    kappa_max: float = 50.0
+
+
+@dataclass
+class DiffusionConfig:
+    name: str = "diffusion"
+    ctx_dim: int = 64
+    hidden_dim: int = 64
+    n_steps: int = 50
+    max_emissions: int = 25
+
+
+@dataclass
+class OptimConfig:
+    lr: float = 2e-3
+    weight_decay: float = 3e-4
+    scheduler: str = "cosine"
+    eta_min: float = 3e-4
+    grad_clip: float = 1.0
+
+
+@dataclass
+class TrainerConfig:
+    max_epochs: int = 20
+    batch_size: int = 64
+    seed: int = 0
+    amp: bool = False                  # off by default — model is overhead-bound (§6.1)
+    compile: bool = False              # torch.compile(mode="reduce-overhead") when True
+    fast_dev_run: bool = False         # CI smoke path (~2 steps)
+    ema_decay: float | None = None  # OmegaConf wants Optional[...] for nullable fields
+    num_workers: int = 0
+    resume_from: str | None = None
+    deterministic: bool = True
+
+
+@dataclass
+class DecodeConfig:
+    beam_width: int = 8
+    topk_cells: int = 6
+    max_emissions: int = 25
+    n_posterior_samples: int = 500
+    cont_temperature: float = 1.0      # exposure-bias remedy, sampling-time only
+
+
+@dataclass
+class ExperimentConfig:
+    name: str = "default"
+    closure_jets: int = 300
+    n_closure_samples: int = 200
+    generator_b: str | None = None  # second generator for the systematic (§8)
+
+
+@dataclass
+class Config:
+    geometry: GeometryConfig = field(default_factory=GeometryConfig)
+    data: DataConfig = field(default_factory=DataConfig)
+    model: Any = MISSING               # polymorphic; bound to the chosen family at load
+    encoder: Any = MISSING             # polymorphic; bound to the chosen encoder at load
+    optim: OptimConfig = field(default_factory=OptimConfig)
+    trainer: TrainerConfig = field(default_factory=TrainerConfig)
+    decode: DecodeConfig = field(default_factory=DecodeConfig)
+    experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+    run_name: str = "${model.name}_${encoder.name}"
+    run_root: str = "runs"
+
+
+# Polymorphic group -> schema binding (§2.1)
+MODEL_SCHEMA = {
+    "ar_junipr_v2": ARJuniprConfig,
+    "ar_junipr_v1": ARJuniprConfig,
+    "cinn": CINNConfig,
+    "diffusion": DiffusionConfig,
+}
+ENCODER_SCHEMA = {
+    "gru": EncoderConfig,
+    "lundnet": LundNetEncoderConfig,
+    "deepsets": DeepSetsEncoderConfig,
+}
+
+
+# ---------------------------------------------------------------------------
+# Loader (§2.1) — OmegaConf, no Hydra
+# ---------------------------------------------------------------------------
+def _register_resolvers() -> None:
+    if not OmegaConf.has_resolver("sq"):
+        OmegaConf.register_new_resolver("sq", lambda x: x * x)
+
+
+def _split_args(argv: list[str], groups: tuple[str, ...]):
+    """Partition CLI tokens into group selectors (group=name) and dotted value
+    overrides (a.b.c=value)."""
+    selectors: dict[str, str] = {}
+    dotlist: list[str] = []
+    for tok in argv:
+        if "=" not in tok:
+            raise ValueError(f"override must be key=value: {tok!r}")
+        key, val = tok.split("=", 1)
+        if key in groups:
+            selectors[key] = val
+        else:
+            dotlist.append(tok)
+    return selectors, dotlist
+
+
+def load_config(argv: list[str] | None = None) -> DictConfig:
+    """Compose the validated, struct-mode run config: base selectors + globals,
+    CLI group picks, per-group YAML, then dotted value overrides. Every merge is
+    type-checked against the schema and rejects unknown keys."""
+    _register_resolvers()
+    argv = list(argv or [])
+    base = OmegaConf.load(CONFIGS / "config.yaml")          # selectors + globals
+    selectors_cli, dotlist = _split_args(argv, GROUPS)
+    selectors = OmegaConf.merge(base.defaults, selectors_cli)   # CLI picks override base
+
+    cfg = OmegaConf.structured(Config)                      # typed skeleton, struct mode ON
+    cfg.model = OmegaConf.structured(MODEL_SCHEMA[selectors.model])
+    cfg.encoder = OmegaConf.structured(ENCODER_SCHEMA[selectors.encoder])
+
+    for group in GROUPS:
+        name = selectors.get(group)
+        if name is None:
+            continue
+        path = CONFIGS / group / f"{name}.yaml"
+        if path.exists():
+            cfg[group] = OmegaConf.merge(cfg[group], OmegaConf.load(path))
+
+    # global top-level fields (everything in base except the defaults block)
+    globals_ = {k: v for k, v in OmegaConf.to_container(base).items() if k != "defaults"}
+    if globals_:
+        cfg = OmegaConf.merge(cfg, globals_)
+    if dotlist:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(dotlist))
+
+    # record which model/encoder variant was selected (v1 vs v2 etc.)
+    cfg.model.name = selectors.model
+    OmegaConf.resolve(cfg)
+    return cfg
+
+
+def config_hash(cfg: DictConfig) -> str:
+    """Stable hash of the resolved config — used for run-dir naming and the
+    checkpoint config_hash guard (§6)."""
+    payload = OmegaConf.to_yaml(cfg, resolve=True)
+    return hashlib.sha1(payload.encode()).hexdigest()[:10]
+
+
+def save_config(cfg: DictConfig, path: Path) -> None:
+    OmegaConf.save(cfg, path)
+
+
+def to_container(cfg: DictConfig) -> dict:
+    return OmegaConf.to_container(cfg, resolve=True)

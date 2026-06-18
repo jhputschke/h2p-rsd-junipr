@@ -1,0 +1,7 @@
+source: synthetic
+n_jets: 8000
+seed: 0
+val_fraction: 0.1
+min_val: 200
+max_emissions: 20
+cache_dir: null

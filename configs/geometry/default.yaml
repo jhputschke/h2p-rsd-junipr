@@ -1,0 +1,4 @@
+# Lund-plane discretisation (matches the v2 script globals).
+ln_invdelta_range: [0.0, 6.0]
+ln_kt_range: [0.0, 6.0]
+n_bins: 10

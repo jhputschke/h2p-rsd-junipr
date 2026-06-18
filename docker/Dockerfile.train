@@ -1,0 +1,13 @@
+# Training / serving image: CUDA + PyTorch + the Python package (§10).
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
+
+WORKDIR /workspace
+COPY pyproject.toml README.md LICENSE /workspace/
+COPY src/ /workspace/src/
+COPY configs/ /workspace/configs/
+
+RUN python -m pip install --upgrade pip && pip install -e ".[track,serve]"
+
+# Default: show the CLI help; override with train/eval/serve subcommands.
+ENTRYPOINT ["h2p-rsd-junipr"]
+CMD ["--help"]

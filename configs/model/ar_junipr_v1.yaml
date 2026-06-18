@@ -1,0 +1,9 @@
+# §5.1 autoregressive JUNIPR, discrete cells only (v1: no continuous coords).
+ctx_dim: 64
+dec_dim: 64
+dec_layers: 1
+split_head_layers: 2
+coord_head_layers: 2
+continuous_coords: false
+sigma_floor: 0.01
+kappa_max: 50.0

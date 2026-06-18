@@ -1,0 +1,7 @@
+source: rntuple
+path: jets.root
+ntuple: Jets
+seed: 0
+val_fraction: 0.1
+min_val: 200
+cache_dir: null

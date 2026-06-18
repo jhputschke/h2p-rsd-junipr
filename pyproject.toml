@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "h2p-rsd-junipr"
+version = "0.1.0"
+description = "Amortized hadron-to-parton (h2p) hadronization-inversion posterior over groomed Lund trees (RSD-JUNIPR)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "RSD-JUNIPR authors" }]
+keywords = ["jet-physics", "lund-plane", "hadronization", "simulation-based-inference", "junipr"]
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "omegaconf>=2.3",
+    "uproot>=5.0",
+]
+
+[project.optional-dependencies]
+lundnet = ["torch-geometric>=2.4"]
+track = ["tensorboard>=2.14"]
+serve = ["fastapi>=0.110", "uvicorn>=0.27", "onnxruntime>=1.17"]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
+    "black>=24.0",
+    "isort>=5.13",
+    "mypy>=1.8",
+    "pre-commit>=3.6",
+]
+
+[project.scripts]
+h2p-rsd-junipr = "h2p_rsd_junipr.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+h2p_rsd_junipr = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["scripts/reference"]   # vendored original v2 script, kept verbatim
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+# B905: equal-length physics loops faithfully ported from the v2 script — strict=
+# everywhere is noise; B008: FastAPI-style default args.
+ignore = ["E501", "B008", "B905"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = false
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

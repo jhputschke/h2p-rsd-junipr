@@ -1,0 +1,67 @@
+cff-version: 1.2.0
+title: "h2p-rsd-junipr: amortized hadron-to-parton hadronization-inversion posterior"
+message: "If you use this software, please cite it and the method/physics references below."
+type: software
+authors:
+  - name: "RSD-JUNIPR authors"
+version: 0.1.0
+license: MIT
+keywords:
+  - jet physics
+  - Lund plane
+  - hadronization
+  - simulation-based inference
+  - JUNIPR
+references:
+  - type: article
+    title: "The frontier of simulation-based inference"
+    authors: [{family-names: Cranmer}, {family-names: Brehmer}, {family-names: Louppe}]
+    journal: "PNAS"
+    volume: "117"
+    year: 2020
+    notes: "arXiv:1911.01429"
+  - type: article
+    title: "Fast epsilon-free Inference of Simulation Models (sequential neural posterior)"
+    authors: [{family-names: Papamakarios}, {family-names: Murray}]
+    journal: "NeurIPS"
+    year: 2016
+    notes: "arXiv:1605.06376"
+  - type: article
+    title: "JUNIPR: a Framework for Unsupervised Machine Learning in Particle Physics"
+    authors: [{family-names: Andreassen}]
+    journal: "EPJC"
+    volume: "79"
+    year: 2019
+    notes: "arXiv:1804.09720; binary JUNIPR PRL 123 (2019) 182001, arXiv:1906.10137"
+  - type: article
+    title: "Invertible Networks or Partons to Detector and Back Again (cINN unfolding)"
+    authors: [{family-names: Bellagente}]
+    journal: "SciPost Phys."
+    volume: "9"
+    year: 2020
+    notes: "arXiv:2006.06685"
+  - type: article
+    title: "Validating Bayesian Inference Algorithms with Simulation-Based Calibration"
+    authors: [{family-names: Talts}]
+    year: 2018
+    notes: "arXiv:1804.06788"
+  - type: article
+    title: "A comprehensive guide to the physics and usage of PYTHIA 8.3"
+    authors: [{family-names: Bierlich}]
+    journal: "SciPost Phys. Codebases"
+    year: 2022
+    notes: "arXiv:2203.11601"
+  - type: article
+    title: "Soft Drop"
+    authors: [{family-names: Larkoski}, {family-names: Marzani}, {family-names: Soyez}, {family-names: Thaler}]
+    journal: "JHEP"
+    volume: "05"
+    year: 2014
+    notes: "arXiv:1402.2657; Recursive Soft Drop arXiv:1804.03657"
+  - type: article
+    title: "Jet tagging in the Lund plane with graph networks (LundNet)"
+    authors: [{family-names: Dreyer}, {family-names: Qu}]
+    journal: "JHEP"
+    volume: "03"
+    year: 2021
+    notes: "arXiv:2012.08526"

@@ -1,0 +1,14 @@
+# Group selectors (one file per group) + global fields. Composed by config.py
+# via OmegaConf (no Hydra). CLI `group=name` overrides a selector; `a.b=v`
+# overrides a value.
+defaults:
+  geometry: default
+  data: synthetic
+  model: ar_junipr_v2
+  encoder: gru
+  optim: default
+  trainer: default
+  decode: default
+  experiment: closure
+
+run_root: runs

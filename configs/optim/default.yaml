@@ -1,0 +1,5 @@
+lr: 2.0e-3
+weight_decay: 3.0e-4
+scheduler: cosine
+eta_min: 3.0e-4
+grad_clip: 1.0
