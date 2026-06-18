@@ -55,6 +55,11 @@ like `optim.lrr=1e-3` or `geometry.n_bins=ten` fails at load, not at hour three.
 > run-dir layout, `best.ckpt` vs `last.ckpt`, pre-empt/resume (with a worked
 > example), the eval/calibration metrics, programmatic inference
 > (`log_prob`/`sample`/`map_estimate`), export, serving, and sweeps.
+>
+> **Config knob reference:** [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) explains
+> every parameter field-by-field — geometry, data, encoder, model, optim, trainer, and
+> the inference/decode knobs (the MAP floor / mincut, the learned quantile floor, length
+> penalty, sampling temperature).
 
 ## Verification (this is the acceptance test)
 
