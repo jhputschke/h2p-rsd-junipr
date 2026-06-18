@@ -51,6 +51,11 @@ h2p-rsd-junipr train data=rntuple data.path=jets.root model=ar_junipr_v2
 CLI overrides are OmegaConf-dotted and **type-checked against the schema** — a typo
 like `optim.lrr=1e-3` or `geometry.n_bins=ten` fails at load, not at hour three.
 
+> **Full workflow guide:** [`docs/USAGE.md`](docs/USAGE.md) covers training and the
+> run-dir layout, `best.ckpt` vs `last.ckpt`, pre-empt/resume (with a worked
+> example), the eval/calibration metrics, programmatic inference
+> (`log_prob`/`sample`/`map_estimate`), export, serving, and sweeps.
+
 ## Verification (this is the acceptance test)
 
 Two checks reproduce the original v2 script on the **same synthetic data**:
