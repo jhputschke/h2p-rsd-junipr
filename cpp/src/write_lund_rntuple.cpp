@@ -10,10 +10,11 @@
 // the writer (clustering -> matching -> primaryLund -> RNTuple) always builds and
 // runs off-cluster.
 //
-// Usage:  write_lund_rntuple [nEvents] [out.root] [seed]
+// Usage:  write_lund_rntuple [nEvents] [out.root] [seed] [card.cmnd]
 
 #include "lund_io.hpp"
 #include "lund_writer.hpp"
+#include "run_settings.hpp"
 
 #include "fastjet/PseudoJet.hh"
 
@@ -90,28 +91,34 @@ int main(int argc, char** argv) {
   const std::uint64_t nEvents = (argc > 1) ? std::strtoull(argv[1], nullptr, 10) : 200;
   const std::string out = (argc > 2) ? argv[2] : "jets.root";
   const int seed = (argc > 3) ? std::atoi(argv[3]) : 1;
+  const std::string card = (argc > 4) ? argv[4] : "";  // PYTHIA path only
 
-  const h2p::GroomParams g;  // z_cut=0.1, beta=0, R0=1, kt_floor=1
-  const h2p::JetParams jp;   // R=0.4, ptmin=20, |y|<2, match 0.3
+  h2p::GroomParams g;  // defaults: z_cut=0.1, beta=0, R0=1, kt_floor=1
+  h2p::JetParams jp;   // defaults: R=0.4, ptmin=20, |y|<2, match 0.3
+  std::string generator;
   fastjet::contrib::LundGenerator lund;  // reclusters with C/A internally
 
 #ifdef HAVE_PYTHIA8
-  const std::string generator = "PYTHIA-8:tune-Monash";
   Pythia8::Pythia pythia;
+  h2p::registerAnalysisSettings(pythia);  // jet/grooming knobs as custom settings
   pythia.readString("Beams:eCM = 13000.");
   pythia.readString("HardQCD:all = on");
   pythia.readString("PhaseSpace:pTHatMin = 100.");
   pythia.readString("PartonLevel:MPI = off");  // pure hadronization study
+  pythia.readString("Print:quiet = on");
+  if (!card.empty()) pythia.readFile(card);  // card overrides generator + analysis knobs
   pythia.readString("Random:setSeed = on");
   pythia.readString("Random:seed = " + std::to_string(seed % 900000000));
-  pythia.readString("Print:quiet = on");
   if (!pythia.init()) {
     std::cerr << "[write_lund_rntuple] PYTHIA init failed\n";
     return 1;
   }
+  jp = h2p::readJetParams(pythia);
+  g = h2p::readGroomParams(pythia);
+  generator = h2p::generatorTag(pythia);
   std::cout << "[write_lund_rntuple] PYTHIA source, " << nEvents << " events -> " << out << "\n";
 #else
-  const std::string generator = "toy-synthetic";
+  generator = "toy-synthetic";
   std::mt19937 rng(static_cast<unsigned>(seed));
   std::cout << "[write_lund_rntuple] toy source (no PYTHIA), " << nEvents << " events -> " << out
             << "\n";

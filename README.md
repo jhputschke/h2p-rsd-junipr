@@ -94,7 +94,7 @@ pairs with any decoder family.
 ```bash
 cmake -S cpp -B cpp/build && cmake --build cpp/build -j
 ctest --test-dir cpp/build           # Soft Drop boundary + matching unit tests
-./cpp/build/pythia_driver 100000 jets.root 1
+./cpp/build/pythia_driver 100000 jets.root 1 cpp/cards/pp_dijet.cmnd  # nEvents out seed card
 ./cpp/build/read_lund_rntuple jets.root Jets   # inspect: schema, provenance, #jets, first jet
 ```
 
@@ -102,6 +102,13 @@ Finds ROOT (≥6.36, RNTuple), FastJet, fjcontrib LundPlane, and PYTHIA 8 (optio
 falls back to a toy event source). The `pythia_driver` reads the pre-hadronization
 shower partons from the PYTHIA event record with MPI off (Bierlich et al.,
 arXiv:2203.11601); a parallel HERWIG driver powers the §8 generator systematic.
+
+**Configuration, not hardcoding.** Generation *and* the FastJet/grooming
+parameters are driven by a single PYTHIA command card (`cpp/cards/pp_dijet.cmnd`):
+the jet radius/ptMin/acceptance/match-cone and the Soft Drop `z_cut/beta/R0/kt`
+floor are registered as custom PYTHIA settings (`cpp/include/run_settings.hpp`), so
+one file sets everything and the grooming values are stamped into the RNTuple
+provenance. Omit the card to fall back to the built-in defaults.
 
 ## Layout
 

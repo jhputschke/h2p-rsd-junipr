@@ -66,6 +66,7 @@ target_link_libraries(read_lund_rntuple PRIVATE ROOT::RIO ROOT::Tree ROOT::ROOTN
 # ---- dedicated PYTHIA driver (only when PYTHIA is available) ------------------
 if(PYTHIA8_FOUND)
   add_executable(pythia_driver apps/pythia_driver.cpp)
+  target_compile_definitions(pythia_driver PRIVATE HAVE_PYTHIA8)
   target_include_directories(pythia_driver PRIVATE ${PYTHIA8_INCLUDE_DIRS})
   target_link_libraries(pythia_driver PRIVATE lund_io lund_writer ${LUNDPLANE_LIB}
                         ${FASTJET_CONFIGLIBS} ${PYTHIA8_LIBRARIES})

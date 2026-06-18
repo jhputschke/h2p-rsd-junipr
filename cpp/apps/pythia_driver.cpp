@@ -6,14 +6,17 @@
 // visible particles are the hadron level. Both levels are clustered with
 // anti-kt(R), matched, and primary-Lund-declustered into the shared schema.
 //
-// Built only when PYTHIA 8 is found. A parallel herwig_driver (cluster model;
-// Bellm et al., arXiv:1512.01178) emitting the identical schema powers the
-// dominant generator systematic of §8.
+// Configuration is a PYTHIA command card (run_settings.hpp): the same file sets
+// the generator AND the jet/grooming parameters (custom registered settings), so
+// nothing physics-related is hardcoded. Built-in defaults reproduce the previous
+// behaviour when no card is given. A parallel herwig_driver (cluster model; Bellm
+// et al., arXiv:1512.01178) would emit the identical schema for the §8 systematic.
 //
-// Usage:  pythia_driver [nEvents] [out.root] [seed] [pTHatMin]
+// Usage:  pythia_driver [nEvents] [out.root] [seed] [card.cmnd]
 
 #include "lund_io.hpp"
 #include "lund_writer.hpp"
+#include "run_settings.hpp"
 
 #include "Pythia8/Pythia.h"
 #include "fastjet/PseudoJet.hh"
@@ -28,26 +31,39 @@ int main(int argc, char** argv) {
   const std::uint64_t nEvents = (argc > 1) ? std::strtoull(argv[1], nullptr, 10) : 1000;
   const std::string out = (argc > 2) ? argv[2] : "jets.root";
   const int seed = (argc > 3) ? std::atoi(argv[3]) : 1;
-  const double pTHatMin = (argc > 4) ? std::atof(argv[4]) : 100.0;
+  const std::string card = (argc > 4) ? argv[4] : "";
 
-  const h2p::GroomParams g;
-  const h2p::JetParams jp;
   fastjet::contrib::LundGenerator lund;
-
   Pythia8::Pythia pythia;
+  h2p::registerAnalysisSettings(pythia);  // custom jet/grooming knobs + defaults
+
+  // Built-in generation defaults (overridable by the card below).
   pythia.readString("Beams:eCM = 13000.");
   pythia.readString("HardQCD:all = on");
-  pythia.readString("PhaseSpace:pTHatMin = " + std::to_string(pTHatMin));
+  pythia.readString("PhaseSpace:pTHatMin = 100.");
   pythia.readString("PartonLevel:MPI = off");
+  pythia.readString("Print:quiet = on");
+  if (!card.empty()) {
+    std::cout << "[pythia_driver] reading card " << card << "\n";
+    pythia.readFile(card);  // user card overrides any of the above + the analysis knobs
+  }
+  // CLI seed wins over the card, so sweeps can script reproducible seeds.
   pythia.readString("Random:setSeed = on");
   pythia.readString("Random:seed = " + std::to_string(seed % 900000000));
-  pythia.readString("Print:quiet = on");
+
   if (!pythia.init()) {
     std::cerr << "[pythia_driver] init failed\n";
     return 1;
   }
 
-  h2p::LundWriter writer(out, "Jets", g, "PYTHIA-8:tune-Monash");
+  const h2p::JetParams jp = h2p::readJetParams(pythia);
+  const h2p::GroomParams g = h2p::readGroomParams(pythia);
+  const std::string gen = h2p::generatorTag(pythia);
+  std::cout << "[pythia_driver] R=" << jp.R << " ptMin=" << jp.jet_ptmin
+            << " z_cut=" << g.z_cut << " beta=" << g.beta << " kt_floor=" << g.kt_floor
+            << " generator=" << gen << "\n";
+
+  h2p::LundWriter writer(out, "Jets", g, gen);
 
   for (std::uint64_t iev = 0; iev < nEvents; ++iev) {
     if (!pythia.next()) continue;
