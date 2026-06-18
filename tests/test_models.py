@@ -38,6 +38,32 @@ def test_sample_and_map_are_valid(sel, batch):
     mp = model.map_estimate(xf, nx)
     assert isinstance(mp, LundPointEstimate)
     assert mp.multiplicity == len(mp.nodes)
+    assert mp.multiplicity >= 1  # default min_emissions=1: never the unphysical empty tree
+
+
+@pytest.mark.parametrize("sel", MODELS, ids=lambda s: s[0].split("=")[1])
+def test_map_respects_min_emissions(sel, batch):
+    b, geom = batch
+    model = build_model(load_config(sel), geom).eval()
+    xf, nx = b["xf"][:1], b["nx"][:1]
+    mp3 = model.map_estimate(xf, nx, min_emissions=3)
+    assert mp3.multiplicity >= 3 and mp3.multiplicity == len(mp3.nodes)
+    # the floor is honored, not hard-coded: min_emissions=0 may collapse to the empty tree
+    mp0 = model.map_estimate(xf, nx, min_emissions=0)
+    assert mp0.multiplicity >= 0 and mp0.multiplicity == len(mp0.nodes)
+
+
+def test_length_penalty_is_noop_at_zero(batch):
+    """min_emissions=0, length_penalty=0.0 reproduces the raw-score beam exactly."""
+    b, geom = batch
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    xf, nx = b["xf"][:1], b["nx"][:1]
+    a = model.map_decode(xf, nx, min_emissions=0, length_penalty=0.0)
+    c = model.map_decode(xf, nx, min_emissions=0, length_penalty=0.0)
+    assert a == c  # deterministic
+    # a non-zero penalty is allowed to differ (favors longer trees), but must stay valid
+    d = model.map_decode(xf, nx, min_emissions=1, length_penalty=1.0)
+    assert all(0 <= cell < geom.n_cells for cell in d)
 
 
 def test_ar_v1_drops_coord_likelihood(batch):

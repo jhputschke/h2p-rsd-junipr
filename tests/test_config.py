@@ -1,7 +1,8 @@
 import pytest
+from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError, ValidationError
 
-from h2p_rsd_junipr.config import config_hash, load_config
+from h2p_rsd_junipr.config import config_hash, decode_params, load_config
 
 
 def test_defaults_load():
@@ -43,5 +44,30 @@ def test_run_name_interpolation():
 
 
 def test_config_hash_stable():
+    # NOTE: the hash value changed when min_emissions/length_penalty/cell_label_smoothing
+    # were added to the schema; this only asserts determinism + sensitivity, not a fixed value.
     assert config_hash(load_config([])) == config_hash(load_config([]))
     assert config_hash(load_config([])) != config_hash(load_config(["optim.lr=9e-3"]))
+
+
+def test_decode_config_has_new_fields():
+    cfg = load_config([])
+    assert cfg.decode.min_emissions == 1
+    assert cfg.decode.length_penalty == pytest.approx(0.0)
+
+
+def test_decode_params_full():
+    dec = decode_params(load_config([]))
+    assert set(dec) == {"beam_width", "topk_cells", "max_emissions", "n_posterior_samples",
+                        "cont_temperature", "min_emissions", "length_penalty"}
+    assert dec["min_emissions"] == 1
+
+
+def test_decode_params_tolerates_old_snapshot():
+    """An old checkpoint's decode block lacking the new keys must backfill, not raise."""
+    old = OmegaConf.create({"decode": {"beam_width": 8, "topk_cells": 6, "max_emissions": 25,
+                                       "n_posterior_samples": 500, "cont_temperature": 1.0}})
+    dec = decode_params(old)
+    assert dec["min_emissions"] == 1 and dec["length_penalty"] == pytest.approx(0.0)
+    # and a config with no decode block at all
+    assert decode_params(OmegaConf.create({}))["min_emissions"] == 1

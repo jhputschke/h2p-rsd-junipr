@@ -204,6 +204,8 @@ class DecodeConfig:
     max_emissions: int = 25
     n_posterior_samples: int = 500
     cont_temperature: float = 1.0          # exposure-bias remedy, sampling-time only
+    min_emissions: int = 1                 # MAP floor: never the unphysical empty tree
+    length_penalty: float = 0.0            # GNMT score/len**alpha at final beam rank; 0 == off
 ```
 
 OmegaConf schema conventions (assumes `from dataclasses import field`,
@@ -224,6 +226,14 @@ Notes tied to the model discussion:
 - `decode.cont_temperature` is the documented remedy for the over-counted
   multiplicity (exposure bias; Bengio et al., NeurIPS 2015, arXiv:1506.03099) —
   a *sampling-time* knob that never touches the trained likelihood.
+- `decode.min_emissions` (default 1) prevents the degenerate empty-tree MAP — the
+  brevity bias of an un-normalized argmax over the high-entropy cell head — and
+  `decode.length_penalty` (GNMT `score/len**alpha`) is the length-normalization knob.
+  Both are *decode-time* only; cINN/diffusion clamp their categorical multiplicity
+  head identically. These params are now read from `cfg.decode` end-to-end (eval CLI,
+  serving) via the `decode_params()` accessor, which tolerates pre-floor checkpoint
+  snapshots. **Reporting** carries the MAP, the posterior mean **and the posterior
+  median** (the recommended multiplicity point estimate).
 
 CLI override example (ergonomics identical across versions — here OmegaConf's
 dotted parsing, not Hydra, implements them):

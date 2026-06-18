@@ -218,7 +218,7 @@ val set** (from the snapshotted config), and runs the §8 validation suite:
 closure + calibration on held-out jets:
   mean multiplicity            :  true y = 5.30   hadron x = 5.15   posterior = 5.54
   leading-emission Lund distance to true y :  identity(x) = 0.558   posterior-mode = 1.745
-  multiplicity signed bias  <n - n_true>   :  identity(x) = -0.150   posterior-mean = +0.245
+  multiplicity signed bias  <n - n_true>   :  identity(x) = -0.150   posterior-mean = +0.245   posterior-median = +0.180
   posterior 68% coverage of true leading cell = 0.42   (target ~0.68; <0.68 => over-confident)
 
 posterior calibration (SBC / PIT / coverage):
@@ -226,13 +226,22 @@ posterior calibration (SBC / PIT / coverage):
   leading-cell 68% coverage = 0.37   (target ~0.68)
 
 per-jet point estimate q_phi(y | x) for one validation jet:
-  multiplicity:  truth y = 9   model MAP = 0   plain RSD (hadron x) = 7   posterior = 6.70 +/- 2.20
+  multiplicity:  truth y = 9   model MAP = 8   plain RSD (hadron x) = 7   posterior = 6.70 +/- 2.20 (median 7, ...)
   ...
 ```
 
 (Numbers above are from a deliberately under-trained 3-epoch demo; a fully trained
 `ar_junipr_v2` reaches val NLL ≈ 20.7 and ~0.68 coverage — see
 `scripts/verify_synthetic_result.txt`.)
+
+> **MAP multiplicity floor.** The MAP is the *joint mode* `argmax_y q_φ(y|x)`; for a
+> discrete autoregressive posterior it is length-biased and, un-floored, collapses to
+> the **unphysical empty tree** (0 splittings) for a large fraction of jets. The
+> decoder enforces `decode.min_emissions` (default **1**) so the MAP always has ≥1
+> splitting; `decode.length_penalty` (GNMT `score/len**α`, default 0) further counters
+> the brevity bias. For a *count*, prefer the **posterior median** — the MAP is the
+> wrong summary for multiplicity. See `notebooks/inference_demo.ipynb` §6a and
+> `scripts/probe_map_collapse.py`.
 
 What the metrics mean:
 - **leading-emission Lund distance** — how close the MAP's hardest splitting is to
@@ -335,8 +344,11 @@ xf = torch.tensor(node_features(x["lnInvDelta"], x["lnkt"], x["lnz"], x["psi"]))
 xf = xf.unsqueeze(0).to(device)                # (1, n_nodes, 5)
 nx = torch.tensor([xf.shape[1]], device=device)
 
-# MAP groomed parton tree: beam search + conditional coordinate modes
-mp = model.map_estimate(xf, nx)                # LundPointEstimate
+# MAP groomed parton tree: beam search + conditional coordinate modes.
+# min_emissions (default 1) floors the multiplicity so the MAP is never the unphysical
+# empty tree; length_penalty (GNMT score/len**alpha, default 0) counters the brevity
+# bias. Both default from cfg.decode; pass explicitly to override.
+mp = model.map_estimate(xf, nx, min_emissions=1, length_penalty=0.0)   # LundPointEstimate
 print(mp.pretty())                             # human-readable tree
 print("multiplicity:", mp.multiplicity, " log q(y_hat|x):", mp.logprob)
 for n in mp.nodes:                             # each node carries continuous coords
@@ -345,8 +357,10 @@ for n in mp.nodes:                             # each node carries continuous co
 # Posterior draws -> multiplicity band (ancestral sampling; returns cell-id chains)
 draws = model.sample(xf, nx, n=500)
 mult  = np.array([len(d) for d in draws])
-print(f"posterior multiplicity: mean={mult.mean():.2f} "
+print(f"posterior multiplicity: median={np.median(mult):.0f} mean={mult.mean():.2f} "
       f"68% CR=[{np.percentile(mult,16):.0f}, {np.percentile(mult,84):.0f}]")
+# the posterior median is the recommended multiplicity point estimate (the MAP is the
+# length-biased joint mode; see the MAP floor note in §4)
 ```
 
 ### 5.3 Batch inference over a `jets.root` file
@@ -379,7 +393,8 @@ for i in range(min(100, len(ds))):
     mp = model.map_estimate(xf, nx)
     mult = np.array([len(d) for d in model.sample(xf, nx, n=200)])
     records.append({"jet": i, "map_mult": mp.multiplicity, "map_logq": mp.logprob,
-                    "post_mult_mean": float(mult.mean())})
+                    "post_mult_mean": float(mult.mean()),
+                    "post_mult_median": float(np.median(mult))})
 # records -> pandas.DataFrame(records) for analysis
 ```
 
@@ -453,7 +468,8 @@ curl -s localhost:8000/predict -H 'content-type: application/json' -d '{
   "lnInvDelta":[0.3,1.3], "lnkt":[4.7,4.4], "lnz":[-1.1,-0.2], "psi":[-3.0,-2.8]
 }'
 # -> {"map_multiplicity":..,"map_logprob":..,"map_nodes":[...],
-#     "posterior_mult_mean":..,"posterior_mult_68CR":[..,..]}
+#     "posterior_mult_mean":..,"posterior_mult_median":..,"posterior_mult_68CR":[..,..]}
+# (map_multiplicity >= decode.min_emissions; the service reads the checkpoint's decode config)
 ```
 
 ---

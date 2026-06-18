@@ -104,11 +104,23 @@ configuration" means the **MAP estimate** $\hat y_{\rm MAP}(x)=\arg\max_y q_\phi
 Two consequences are built into the code:
 
 - **Report the width, not just the mode.** Every jet gets *both* a MAP/beam estimate
-  and a posterior summary (mean, 68% credible region, multiplicity distribution) —
-  `eval.closure.print_point_estimate`. In high dimensions the mode can be
-  unrepresentative (`amortized_posterior_hadronization.md` §6), so a regressor that
+  and a posterior summary (mean, **median**, 68% credible region, multiplicity
+  distribution) — `eval.closure.print_point_estimate`. In high dimensions the mode can
+  be unrepresentative (`amortized_posterior_hadronization.md` §6), so a regressor that
   learns only the conditional mean is the wrong tool: it blurs precisely where the
   inverse is ambiguous. This package models a density, never a point regression.
+- **The MAP is floored away from the empty tree.** The joint mode $\hat y_{\rm MAP}$ of
+  a discrete autoregressive posterior is **length-biased**: every emission pays the
+  Lund-cell head's categorical entropy while "stop" costs a roughly fixed amount, so
+  for high-multiplicity jets the single most-probable explicit tree scores *below* the
+  empty tree — and the un-floored argmax collapses to **0 splittings**, which is
+  unphysical (a groomed jet has $\ge 1$ primary splitting). The decoder enforces
+  `decode.min_emissions` (default 1) — a *constrained MAP under a minimum-emission
+  floor* — and an optional GNMT length penalty `decode.length_penalty`
+  ($\text{score}/\text{len}^{\alpha}$) to counter the brevity bias; cINN/diffusion clamp
+  their multiplicity head the same way. For a *count*, prefer the **posterior median**:
+  the MAP is the wrong summary for multiplicity. Quantified in
+  `notebooks/inference_demo.ipynb` §6a and `scripts/probe_map_collapse.py`.
 - **A direct conditional MLE.** A simpler MAP-on-a-tractable-likelihood precedent is
   the Ginkgo / Quantum-Trellis line (arXiv:2105.10512, arXiv:2112.12795); here the
   likelihood is the learned $q_\phi$.
@@ -258,7 +270,8 @@ decreasing affinity to the Lund-tree representation:
   $$
   with **v2** adding a continuous within-cell coordinate head (truncated normals on
   $\ln 1/\Delta R,\ln k_t$, a normal on $\ln z$, von Mises on $\psi$). **MAP** is beam
-  search over the decoded tree; the **posterior** is ancestral sampling. Variable
+  search over the decoded tree (floored at `decode.min_emissions`, with an optional
+  `decode.length_penalty`); the **posterior** is ancestral sampling. Variable
   multiplicity is handled natively; only jet-level pairing is needed; the likelihood
   is explicit.
 - **§5.2 Conditional normalizing flow / cINN** (`models/cinn.py`) — exact density,
