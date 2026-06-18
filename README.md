@@ -13,6 +13,10 @@ contract, many families behind a registry; config-first (OmegaConf, no Hydra); a
 lean custom Trainer with exact checkpoint/resume; a built+tested C++ data-generation
 stage (FastJet + fjcontrib LundPlane + PYTHIA 8); and a mandatory validation suite.
 
+> **Physics background:** [`README_PHYSICS.md`](README_PHYSICS.md) explains the QCD
+> setting (parton shower → Lund-string hadronization → grooming), why the inverse is
+> a posterior rather than a function, and how each physics choice maps onto the code.
+
 ## Why "h2p"
 
 The forward physics map is parton → hadron (showering then hadronization). This
