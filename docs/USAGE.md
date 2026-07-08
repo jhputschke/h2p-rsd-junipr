@@ -251,6 +251,20 @@ per-jet point estimate q_phi(y | x) for one validation jet:
 > the **posterior median** — the MAP is the wrong summary for multiplicity. See
 > `notebooks/inference_demo.ipynb` §6a and `scripts/probe_map_collapse.py`.
 
+> **MBR point estimator.** `decode.point_estimator=mbr` swaps the joint-mode MAP for the
+> **minimum-Bayes-risk** tree — the drawn tree of least expected perturbative-Lund EMD to
+> the posterior — which is *floor-free*: it never collapses to the empty tree even with
+> `decode.min_emissions=0` (an empty cloud pays the full mass-imbalance penalty). `eval`
+> adds an `MBR (<backend>)` series to the closure panels and the per-jet print, so you can
+> compare `dLund-to-truth` and `⟨n − n_true⟩` against the MAP:
+> ```bash
+> h2p-rsd-junipr eval runs/<id>/best.ckpt decode.point_estimator=mbr decode.mbr_backend=pot decode.min_emissions=0
+> ```
+> Needs the `[mbr]` extra (`pot`); `decode.mbr_backend=energyflow` (the `[energyflow]` extra)
+> selects the same tree. MBR closure is O(K²) EMD solves per jet — shrink it with
+> `experiment.closure_jets` / `decode.mbr_n_candidates`. Off by default; the `map` path is
+> unchanged and imports no OT backend.
+
 What the metrics mean:
 - **leading-emission Lund distance** — how close the MAP's hardest splitting is to
   the truth's (node-alignment-free); lower is better.
@@ -391,6 +405,39 @@ is the histogram of `mults`. Or, end-to-end, just set
 `decode.length_floor_quantile=0.15` and the eval CLI / `predict` / `serve` path applies
 it automatically (the posterior draws those code paths already take are reused).
 
+**MBR point estimate (perturbative-Lund, floor-free).** Instead of the joint-mode MAP,
+select the drawn tree of least *expected* perturbative-Lund EMD to the posterior
+(`decode.point_estimator="mbr"`). It reuses the same draws, returns the same
+`LundPointEstimate`, and — because an empty cloud pays the full mass-imbalance penalty —
+never collapses to the empty tree **with no floor** (`min_emissions=0`), unlike the MAP.
+It needs the optional `[mbr]` extra (the `pot` backend); `energyflow` is a separate,
+independently importable extra:
+
+```bash
+pip install -e ".[mbr]"          # default `pot` backend (self-contained, lazy-imported)
+pip install -e ".[energyflow]"   # optional reference EMD backend (needs a working wasserstein)
+```
+
+```python
+# MBR reusing your own draws (no second sample), via the base dispatch:
+draws = model.sample(xf, nx, n=200)                        # the draws from above
+mbr = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot")
+print("MBR multiplicity:", mbr.multiplicity, " risk:", mbr.risk)   # .risk is a score, NOT an NLL
+print(mbr.pretty())
+
+# the reference backend gives the SAME selected tree (its value differs by a 1/R scale):
+mbr_ef = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="energyflow")
+assert [n.cell for n in mbr_ef.nodes] == [n.cell for n in mbr.nodes]
+```
+
+`pot` and `energyflow` agree on the *argmin* (the selected tree) but not the numeric scale
+— EnergyFlow normalises ground distances by `R`, so pick **one backend per analysis** for
+comparable `risk` numbers. Tune the metric with `decode.mbr_R` (length↔kinematics
+trade-off, ≈ Lund-plane diameter), `decode.mbr_lnkt_cut` (perturbative support; `null`
+inherits the geometry cut), and `decode.mbr_weight`/`mbr_coords`/`mbr_beta`. See
+[`CONFIGURATION.md` §10](CONFIGURATION.md#10-inference-knobs-in-depth--the-map-floor-mincut--quantile-floor)
+for every knob and [`README_PHYSICS.md` §3](README_PHYSICS.md) for the physics.
+
 ### 5.3 Batch inference over a `jets.root` file
 
 Read the RNTuple your C++ stage produced, build the dataset, and run the model on
@@ -498,6 +545,8 @@ curl -s localhost:8000/predict -H 'content-type: application/json' -d '{
 # -> {"map_multiplicity":..,"map_logprob":..,"map_nodes":[...],
 #     "posterior_mult_mean":..,"posterior_mult_median":..,"posterior_mult_68CR":[..,..]}
 # (map_multiplicity >= decode.min_emissions; the service reads the checkpoint's decode config)
+# When the checkpoint's decode has point_estimator=mbr, the response additionally carries
+# "mbr_risk" and "mbr_backend" (the point estimate is then the MBR tree, floor-free).
 ```
 
 ---

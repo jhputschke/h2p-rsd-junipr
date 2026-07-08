@@ -22,13 +22,19 @@ stage (FastJet + fjcontrib LundPlane + PYTHIA 8); and a mandatory validation sui
 The forward physics map is parton → hadron (showering then hadronization). This
 repo learns the **inverse**: hadron → parton, as a calibrated posterior, not a
 point estimate — in high dimensions the mode can be unrepresentative, so every jet
-is reported with both a MAP/beam estimate and a posterior summary.
+is reported with both a MAP/beam estimate and a posterior summary. For the point
+estimate you can pick the joint-mode **MAP** (`decode.point_estimator=map`, floored
+away from the empty tree) or the mode-free, **floor-free MBR** — the drawn tree of
+least expected perturbative-Lund EMD to the posterior
+(`decode.point_estimator=mbr`, `[mbr]` extra; two backends, `pot` default and
+`energyflow`).
 
 ## Install
 
 ```bash
 pip install -e .                 # core: torch, numpy, omegaconf, uproot
 pip install -e ".[track,serve,dev]"   # optional extras
+pip install -e ".[mbr]"          # MBR point estimator (pot backend); add ".[energyflow]" for the reference EMD
 ```
 
 ## Quickstart
@@ -59,7 +65,7 @@ like `optim.lrr=1e-3` or `geometry.n_bins=ten` fails at load, not at hour three.
 > **Config knob reference:** [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) explains
 > every parameter field-by-field — geometry, data, encoder, model, optim, trainer, and
 > the inference/decode knobs (the MAP floor / mincut, the learned quantile floor, length
-> penalty, sampling temperature).
+> penalty, sampling temperature, and the `point_estimator` / `mbr_*` MBR knobs).
 
 ## Verification (this is the acceptance test)
 

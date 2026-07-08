@@ -4,7 +4,8 @@ This is the complete field-by-field reference for the config schema. It compleme
 [`USAGE.md`](USAGE.md) (which shows *how to run* the workflow) by explaining *what each
 parameter does* — including the inference-time **decode** knobs (`min_emissions`,
 `length_floor_quantile`, `length_penalty`, `cont_temperature`) that shape the MAP and
-the posterior. For the physics behind these choices see
+the posterior, and the **`point_estimator` / `mbr_*`** knobs that select and configure the
+minimum-Bayes-risk (MBR) point estimate. For the physics behind these choices see
 [`README_PHYSICS.md`](README_PHYSICS.md); the schema source of truth is
 [`src/h2p_rsd_junipr/config.py`](../src/h2p_rsd_junipr/config.py).
 
@@ -235,9 +236,21 @@ The serving layer reads the checkpoint's decode config. Source:
 | `min_emissions` | `1` | MAP | **hard floor** on MAP length — the "mincut" (never the unphysical empty tree) |
 | `length_penalty` | `0.0` | MAP | GNMT `score/len**α` at final beam rank; counters the brevity bias; `0` = off |
 | `length_floor_quantile` | `0.0` | MAP | **learned per-jet floor** at the α-quantile of `P(n|x)`; `0` = off |
+| `point_estimator` | `"map"` | point estimate | `map` (beam-search joint mode) or `mbr` (minimum-Bayes-risk tree; §10 MBR) |
+| `mbr_backend` | `"pot"` | MBR | OT backend: `pot` (default, self-contained) / `energyflow` (reference) / `surrogate` (fast χ²) |
+| `mbr_n_candidates` | `0` | MBR | `0` = every draw is a candidate; `k>0` = only the first `k` (asymmetric MBR, faster) |
+| `mbr_lnkt_cut` | `null` | MBR | drop emissions below this `ln k_t`; `null` inherits `geometry.ln_kt_range[0]` (the region cut) |
+| `mbr_weight` | `"kt"` | MBR | Lund-cloud point weights: `kt` (IRC-safe) / `z` / `unit` |
+| `mbr_coords` | `"lnDR_lnkt"` | MBR | ground-metric columns: `lnDR_lnkt` / `+lnz` / `+psi` (gdim 2/3/4; `+psi` engages periodicity) |
+| `mbr_R` | `8.485` | MBR | mass-imbalance penalty radius ≈ Lund-plane diameter (scale it with `geometry`) |
+| `mbr_beta` | `1.0` | MBR | ground-distance exponent; `1.0` = KMT 1-Wasserstein EMD |
+| `mbr_norm` | `False` | MBR | energyflow weight normalisation; **off** keeps the imbalance term (empty-tree-never-wins) |
+| `mbr_periodic_phi` | `False` | MBR | wrap the ψ column (only with `mbr_coords=+psi`) |
+| `mbr_phi_col` | `-1` | MBR | ψ column index for the periodic wrap; `-1` = last coordinate |
 
 `min_emissions`, `length_penalty`, and `length_floor_quantile` are explained in depth in
-§10 — they are the knobs that decide what multiplicity the **point estimate** reports.
+§10; `point_estimator` / `mbr_*` — the whole second point-estimate family — are covered in
+the §10 MBR subsection. All are inference-time only, so you can A/B them on a fixed checkpoint.
 
 ---
 
@@ -381,6 +394,76 @@ mp    = model.map_estimate(xf, nx, min_emissions=eff)   # eff = max(1, ⌊Q_0.15
 > length-biased joint mode; the posterior median sidesteps both the mode collapse and the
 > mean's tail sensitivity. The floor knobs make the MAP *usable*, not optimal, as a count.
 > Quantified in `notebooks/inference_demo.ipynb` §6a and `scripts/probe_map_collapse.py`.
+
+### `point_estimator` — MAP vs MBR (the perturbative-Lund minimum-Bayes-risk tree)
+
+`point_estimator="map"` (default) is everything above: the beam-search joint mode, made
+usable by the floors. `point_estimator="mbr"` selects a *different decision rule* on the
+**same posterior draws** — the drawn tree of least **expected perturbative-Lund distance**
+to the posterior (minimum Bayes risk; Kumar & Byrne 2004, Eikema & Aziz 2020/2022):
+
+```
+ŷ_MBR = argmin_{h ∈ C} (1/K) Σ_k d(h, y⁽ᵏ⁾),   C ⊆ {y⁽¹⁾…y⁽ᴷ⁾} ~ q_φ(·|x)
+```
+
+where `d` is the Energy Mover's Distance between the two draws as weighted Lund-plane point
+clouds (Komiske, Metodiev & Thaler, *PRL* **123** (2019) 041801, arXiv:1902.02346). It reuses
+the draws the caller already takes (no extra sampling), returns the **same `LundPointEstimate`
+type** as the MAP (a drop-in for every consumer), and additionally reports `.risk` — the
+achieved mean distance, a decision-theoretic score, **not** a likelihood (never feed it to
+anything expecting an NLL).
+
+**Why it exists — no floor needed.** The empty tree has large expected distance to typical
+non-empty draws (it pays the full mass-imbalance penalty `R·|Σw|`), so MBR **cannot select it**
+when the posterior is non-empty-dominated — the brevity bias is removed *structurally* rather
+than clamped. On a trained checkpoint, floor-free (`min_emissions=0`) MAP collapses to `n=0`
+for a large fraction of jets while MBR stays at 0% — the property the `min_emissions` /
+`length_floor_quantile` floors had to *enforce*. (Conversely, if a jet's draws are genuinely
+mostly empty, MBR picks a short/empty tree — that is *correct*, it reflects the honest
+posterior, unlike a floor that manufactures emissions.)
+
+**The metric knobs** (`mbr_lnkt_cut`, `mbr_weight`, `mbr_coords`, `mbr_R`, `mbr_beta`) shape
+`d`:
+
+- `mbr_lnkt_cut` is the **metric support** — emissions below it are dropped, so hadronization-
+  region jitter cannot dominate the risk. `null` inherits `geometry.ln_kt_range[0]` (the region
+  cut) rather than hard-coding a second physics constant.
+- `mbr_weight="kt"` weights each Lund point by its transverse momentum (IRC-safe, the KMT
+  choice); `z` / `unit` are alternatives.
+- `mbr_coords` chooses which columns enter the ground metric (`+psi` engages the periodic
+  wrap via `mbr_periodic_phi` / `mbr_phi_col`).
+- `mbr_R` sets the **length ↔ kinematics trade-off**: large `R` penalises multiplicity mismatch
+  heavily (MBR tracks the count); small `R` favours kinematic agreement of the shared hard
+  emissions. Default ≈ the Lund-plane diameter — **scale it with `geometry`** if you change the
+  ranges. Check closure-metric stability across `R` (unequal-mass EMD is known to depend on it).
+- `mbr_beta=1.0` is the true 1-Wasserstein EMD; `2.0` an energy-distance-like variant.
+
+**The two backends** (`mbr_backend`) implement the *same* mathematical object; the choice is
+provenance and batching, not semantics:
+
+- **`pot`** (default) builds the augmented cost by hand — pad the smaller cloud with a sink
+  particle of weight `|Σw − Σw'|` at ground distance `R`, then `ot.emd2`. Fewest dependencies
+  (`pip install -e ".[mbr]"`), the imbalance term written out to match the equation exactly.
+- **`energyflow`** calls the reference `energyflow.emd.emd`/`emds` (`pip install -e
+  ".[energyflow]"`). EnergyFlow normalises ground distances by `R` internally, so for `beta=1`
+  its value equals the `pot` value **divided by `R`** — the two agree on the **argmin** but not
+  the numeric scale. **Pick one backend per analysis** for comparable `risk` numbers; the value
+  is reported with its `mbr_backend` tag. (`mbr_norm=True` rescales weights to unit sum, which
+  *removes* the imbalance term and the empty-tree-never-wins guarantee — off by default.)
+- **`surrogate`** is a fully vectorised binned Lund-image χ² (no OT) — a fast ranker/pre-filter.
+
+Both `ot` and `energyflow` are **lazy, per-backend imports**, so `point_estimator="map"` (the
+default) pulls neither and likelihood **parity stays dependency-free**. Reproducing the KMT
+collider-event EMD *verbatim* (hadronic coordinates, their `R`, `beta`, `norm`, `periodic_phi`)
+is a configuration you dial in through the `mbr_*` knobs — the defaults here are tuned for the
+Lund-plane application, not pinned to the paper.
+
+```bash
+# A/B the point estimator on a fixed checkpoint (floor-free, to see the collapse contrast)
+h2p-rsd-junipr eval runs/<id>/best.ckpt decode.point_estimator=map  decode.min_emissions=0
+h2p-rsd-junipr eval runs/<id>/best.ckpt decode.point_estimator=mbr  decode.mbr_backend=pot decode.min_emissions=0
+h2p-rsd-junipr eval runs/<id>/best.ckpt decode.point_estimator=mbr  decode.mbr_backend=energyflow  # same tree
+```
 
 ### `cont_temperature` — posterior sampling temperature
 

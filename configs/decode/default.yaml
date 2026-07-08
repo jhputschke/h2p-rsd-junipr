@@ -6,3 +6,16 @@ cont_temperature: 1.0
 min_emissions: 1        # MAP floor: never the unphysical empty tree
 length_penalty: 0.0     # GNMT score/len**alpha at final rank; 0.0 == off
 length_floor_quantile: 0.0   # per-jet MAP floor max(min_emissions, Q_alpha(P(n|x))); 0.0 == off
+
+# --- MBR point estimator (opt-in; point_estimator=map reproduces today exactly) ---
+point_estimator: map         # map | mbr — mbr selects the drawn tree of least expected Lund-EMD
+mbr_backend: pot             # pot (default, self-contained) | energyflow (reference) | surrogate (fast chi^2)
+mbr_n_candidates: 0          # 0 == all draws are candidates (full O(K^2) MBR)
+mbr_lnkt_cut: null           # null == inherit the geometry ln_kt floor (perturbative metric support)
+mbr_weight: kt               # kt | z | unit — Lund-cloud point weights
+mbr_coords: lnDR_lnkt        # lnDR_lnkt | +lnz | +psi — which columns enter the ground metric
+mbr_R: 8.485                 # imbalance-penalty radius ~ Lund-plane diameter (scale with geometry)
+mbr_beta: 1.0                # ground-distance exponent (1.0 == KMT 1-Wasserstein EMD)
+mbr_norm: false              # energyflow weight normalisation; false keeps the empty-tree-never-wins term
+mbr_periodic_phi: false      # wrap the psi column (only when mbr_coords=+psi)
+mbr_phi_col: -1              # psi column index; -1 == last coordinate

@@ -149,6 +149,19 @@ class DecodeConfig:
     length_floor_quantile: float = 0.0 # per-jet MAP floor from the learned P(n|x): the
     #                                    effective floor is max(min_emissions, Q_alpha(P(n|x))).
     #                                    0.0 == off (short-circuits; merged behavior unchanged)
+    # --- MBR point estimator (docs/PLAN_MBR_PerturbativeLund.md). All default so
+    #     point_estimator="map" reproduces today exactly and imports no OT backend.
+    point_estimator: str = "map"        # map | mbr
+    mbr_backend: str = "pot"            # pot (default, self-contained) | energyflow | surrogate
+    mbr_n_candidates: int = 0           # 0 => every draw is a candidate (full O(K^2) MBR)
+    mbr_lnkt_cut: float | None = None   # None => inherit the geometry ln_kt floor (metric support)
+    mbr_weight: str = "kt"             # kt | z | unit — Lund-cloud point weights
+    mbr_coords: str = "lnDR_lnkt"      # lnDR_lnkt | +lnz | +psi — ground-metric columns (gdim follows)
+    mbr_R: float = 8.485               # imbalance-penalty radius ~ Lund-plane diameter (default geometry)
+    mbr_beta: float = 1.0              # ground-distance exponent (1.0 == KMT 1-Wasserstein EMD)
+    mbr_norm: bool = False             # energyflow weight normalisation; off keeps the imbalance term
+    mbr_periodic_phi: bool = False     # wrap the psi column (only when mbr_coords="+psi")
+    mbr_phi_col: int = -1              # psi column index; -1 => last coordinate
 
 
 @dataclass
@@ -272,6 +285,17 @@ _DECODE_DEFAULTS: dict = {
     "min_emissions": 1,
     "length_penalty": 0.0,
     "length_floor_quantile": 0.0,
+    "point_estimator": "map",
+    "mbr_backend": "pot",
+    "mbr_n_candidates": 0,
+    "mbr_lnkt_cut": None,
+    "mbr_weight": "kt",
+    "mbr_coords": "lnDR_lnkt",
+    "mbr_R": 8.485,
+    "mbr_beta": 1.0,
+    "mbr_norm": False,
+    "mbr_periodic_phi": False,
+    "mbr_phi_col": -1,
 }
 
 

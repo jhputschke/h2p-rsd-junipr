@@ -23,6 +23,14 @@ dependencies = [
 lundnet = ["torch-geometric>=2.4"]
 track = ["tensorboard>=2.14"]
 serve = ["fastapi>=0.110", "uvicorn>=0.27", "onnxruntime>=1.17"]
+# MBR point estimator (decode.point_estimator=mbr). `pot` is the DEFAULT backend and
+# the only one pulled by `[mbr]`; it is lazy-imported so the default point_estimator=map
+# path needs nothing. `energyflow` is the optional reference EMD backend
+# (decode.mbr_backend=energyflow) and lives in its own extra so the heavier
+# Wasserstein/POT stack is opt-in; `[mbr-all]` installs both.
+mbr = ["pot>=0.9"]
+energyflow = ["energyflow>=1.3"]
+mbr-all = ["pot>=0.9", "energyflow>=1.3"]
 dev = [
     "pytest>=7.4",
     "ruff>=0.4",

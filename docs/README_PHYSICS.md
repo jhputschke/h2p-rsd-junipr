@@ -130,6 +130,51 @@ Two consequences are built into the code:
   approaches a **length-conditioned MAP** at that quantile. For a *count*, still prefer
   the **posterior median**: the MAP is the wrong summary for multiplicity. Quantified in
   `notebooks/inference_demo.ipynb` §6a and `scripts/probe_map_collapse.py`.
+- **MBR — a floor-free alternative decision rule.** The floors above *mask* the
+  length bias of the joint mode; **minimum Bayes risk** removes it at the source by
+  changing the decision rule, not the density (`decode.point_estimator="mbr"`,
+  `inference/mbr.py`). From the same posterior draws the credible bands already use,
+  MBR returns the drawn tree of least *expected* distance to the posterior (Kumar &
+  Byrne, HLT-NAACL 2004; Eikema & Aziz, arXiv:2005.10283, who show the mode is
+  essentially arbitrary while the distribution is faithful — exactly the SBC picture):
+  $$
+  \hat y_{\rm MBR}=\arg\min_{h\in\mathcal C}\ \frac1K\sum_{k=1}^{K} d\big(h,y^{(k)}\big),\qquad \mathcal C\subseteq\{y^{(k)}\}\sim q_\phi(\cdot\mid x).
+  $$
+  Two properties make it the principled point estimate here. **(i) Alignment-free**:
+  the loss $d$ is a distance between two *radiation patterns*, not between paired
+  nodes, so it respects the hard **no per-node $x\leftrightarrow y$ correspondence**
+  constraint (§5) — only jet-level pairing is used. **(ii) The empty tree is never
+  selected, with no floor**: an empty cloud has large expected distance to typical
+  non-empty draws (it pays the full mass-imbalance penalty), so it can never minimise
+  the risk. On a trained checkpoint, floor-free (`min_emissions=0`) MAP collapses to
+  $n=0$ for a large fraction of jets while MBR stays at **0%** — the brevity bias is
+  removed *structurally* rather than clamped, so `min_emissions` is unnecessary for
+  this estimator. (If a jet's draws are *genuinely* mostly empty — honest high
+  uncertainty — MBR picks a short tree; that is correct, unlike a floor that would
+  manufacture emissions.) The winner is a genuine drawn tree, reported as the same
+  `LundPointEstimate` with an added decision-theoretic `.risk` (**not** a likelihood).
+
+  The metric $d$ is the **perturbative-Lund Energy Mover's Distance** (Komiske,
+  Metodiev & Thaler, *PRL* **123** (2019) 041801, arXiv:1902.02346): each draw becomes
+  a weighted point cloud in the Lund plane — one point per emission *above a $\ln k_t$
+  cut* (weight $k_t$, IRC-safe) — and clouds are compared by optimal transport,
+  $d(y,y')=\min_{f\ge0}\sum_{ij}f_{ij}\lVert p_i-p'_j\rVert^{\beta}+R\,|\sum_i w_i-\sum_j w'_j|$.
+  The **perturbative restriction enters as the support of the ground metric**
+  (`decode.mbr_lnkt_cut`, inheriting the geometry/grooming $\ln k_t$ floor of §4 — no
+  second physics constant), so hadronization-region jitter cannot dominate the risk;
+  the imbalance radius `R` sets the length↔kinematics trade-off (large $R$ tracks the
+  count) and defaults to $\approx$ the Lund-plane diameter; $\beta=1$ is the
+  1-Wasserstein EMD. The OT solve has **two interchangeable backends**
+  (`decode.mbr_backend`): a self-contained POT augmented-cost form (`pot`, default,
+  no physics package) and the reference `energyflow` implementation. They implement
+  the same object and agree on the **argmin**; because EnergyFlow normalises ground
+  distances by $R$, its numeric value equals the `pot` value $/R$ (for $\beta=1$) — so
+  pick **one backend per analysis** for comparable `risk` numbers, and `mbr_norm=True`
+  (unit-sum weights) *removes* the imbalance term and its empty-tree guarantee (off by
+  default). Reproducing the **KMT collider-event EMD verbatim** (hadronic
+  $(p_T,y,\phi)$ coordinates, their $R,\beta,\mathrm{norm},\texttt{periodic\_phi}$) is
+  a configuration the user dials in through the `mbr_*` knobs, not pinned to the paper.
+  Quantified in `notebooks/inference_demo.ipynb` §6.
 - **A direct conditional MLE.** A simpler MAP-on-a-tractable-likelihood precedent is
   the Ginkgo / Quantum-Trellis line (arXiv:2105.10512, arXiv:2112.12795); here the
   likelihood is the learned $q_\phi$.
@@ -332,6 +377,7 @@ Every physics choice is a versioned config field (`configs/`), never hard-coded:
 | generator / tune (systematic) | `experiment.generator_b` | — |
 | encoder over $x$ (gru / lundnet / deepsets) | `encoder.*` | gru |
 | posterior family (§5.1/5.2/5.3) | `model=…` | ar_junipr_v2 |
+| point estimator (MAP vs MBR) + EMD metric | `decode.point_estimator`, `decode.mbr_*` | map, pot |
 
 ```bash
 # train on PYTHIA, then quote the HERWIG spread as the systematic
