@@ -14,6 +14,9 @@ set(TEST_PYTHIA8_ROOT_DIR  "" ${PYTHIA8_ROOT_DIR})
 IF(TEST_PYTHIA8_ROOT_DIR STREQUAL "")
 IF(DEFINED ENV{PYTHIA8_ROOT_DIR})
 set(PYTHIA8_ROOT_DIR  $ENV{PYTHIA8_ROOT_DIR})
+elseif(DEFINED ENV{CONDA_PREFIX})
+# conda-forge "pythia8" package installs under the active env prefix.
+set(PYTHIA8_ROOT_DIR  $ENV{CONDA_PREFIX})
 else()
 set(PYTHIA8_ROOT_DIR  "/opt/homebrew")
 endif()
@@ -30,8 +33,10 @@ find_path(PYTHIA8_XMLDOC_DIR Version.xml
   HINTS  ${PYTHIA8_ROOT_DIR}/xmldoc  ${PYTHIA8_ROOT_DIR}/share/Pythia8/xmldoc ${PYTHIA8_ROOT_DIR}/share/pythia8-data/xmldoc)
 
 if(PYTHIA8_INCLUDE_DIR)
-  file(READ ${PYTHIA8_XMLDOC_DIR}/Version.xml versionstr)
-  string(REGEX REPLACE ".*Pythia:versionNumber.*default.*[0-9][.]([0-9]+).*" "\\1" PYTHIA8_VERSION "${versionstr}")
+  if(PYTHIA8_XMLDOC_DIR AND EXISTS "${PYTHIA8_XMLDOC_DIR}/Version.xml")
+    file(READ ${PYTHIA8_XMLDOC_DIR}/Version.xml versionstr)
+    string(REGEX REPLACE ".*Pythia:versionNumber.*default.*[0-9][.]([0-9]+).*" "\\1" PYTHIA8_VERSION "${versionstr}")
+  endif()
 
   find_library(PYTHIA8_LIBRARY NAMES pythia8 Pythia8
     HINTS ${PYTHIA8_ROOT_DIR}/lib

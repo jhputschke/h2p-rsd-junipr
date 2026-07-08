@@ -108,11 +108,20 @@ pairs with any decoder family.
 ## C++ data generation
 
 ```bash
+conda activate js_fno                # dependencies live in this env (see note below)
 cmake -S cpp -B cpp/build && cmake --build cpp/build -j
 ctest --test-dir cpp/build           # Soft Drop boundary + matching unit tests
 ./cpp/build/pythia_driver 100000 jets.root 1 cpp/cards/pp_dijet.cmnd  # nEvents out seed card
 ./cpp/build/read_lund_rntuple jets.root Jets   # inspect: schema, provenance, #jets, first jet
 ```
+
+> **Dependencies via conda.** ROOT, FastJet, fjcontrib, and PYTHIA 8 are provided by
+> the `js_fno` conda environment, so configure with that environment **activated** —
+> CMake keys off `$CONDA_PREFIX` to locate them. Note that the conda-forge
+> `fastjet-contrib` package ships LundPlane bundled inside `libfastjetcontribfragile`
+> (there is no standalone `libLundPlane`); the CMake accepts either layout, so
+> source/homebrew installs still work. If you switch environments, delete
+> `cpp/build/CMakeCache.txt` before reconfiguring.
 
 Finds ROOT (≥6.36, RNTuple), FastJet, fjcontrib LundPlane, and PYTHIA 8 (optional;
 falls back to a toy event source). The `pythia_driver` reads the pre-hadronization
