@@ -37,6 +37,20 @@ pip install -e ".[track,serve,dev]"   # optional extras
 pip install -e ".[mbr]"          # MBR point estimator (pot backend); add ".[energyflow]" for the reference EMD
 ```
 
+> **ARM64 (Dell GB10, Apple Silicon):** the `[energyflow]` extra pulls in
+> `wasserstein`, a C++ extension with no prebuilt ARM wheel, so pip compiles it
+> from source. Its headers declare `enum ... : char` members with value `-1`,
+> which is out of range because `char` is *unsigned* by default on ARM — the
+> build fails with `enumerator value '-1' is outside the range of underlying
+> type 'char'`. Force a signed `char` to fix it (works with both gcc and clang):
+>
+> ```bash
+> CFLAGS="-fsigned-char" CXXFLAGS="-fsigned-char" pip install -e ".[energyflow]"
+> ```
+>
+> The `[mbr]` default (`pot` backend) needs no compilation and is unaffected. On
+> x86-64 (`char` is signed there) no flag is needed.
+
 ## Quickstart
 
 ```bash
