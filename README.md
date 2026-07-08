@@ -42,14 +42,25 @@ pip install -e ".[mbr]"          # MBR point estimator (pot backend); add ".[ene
 > from source. Its headers declare `enum ... : char` members with value `-1`,
 > which is out of range because `char` is *unsigned* by default on ARM — the
 > build fails with `enumerator value '-1' is outside the range of underlying
-> type 'char'`. Force a signed `char` to fix it (works with both gcc and clang):
+> type 'char'`. `wasserstein` also `#include`s `<omp.h>`, which Apple clang does not
+> ship, so the build additionally needs an OpenMP include/lib (conda's `llvm-openmp`,
+> already present in most envs; `conda install -c conda-forge llvm-openmp` otherwise).
+> Force a signed `char` **and** point the compiler at conda's OpenMP:
 >
 > ```bash
-> CFLAGS="-fsigned-char" CXXFLAGS="-fsigned-char" pip install -e ".[energyflow]"
+> CFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
+> CXXFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
+> LDFLAGS="-L$CONDA_PREFIX/lib -lomp -Wl,-rpath,$CONDA_PREFIX/lib" \
+>   pip install --no-binary wasserstein -e ".[energyflow]"
 > ```
 >
-> The `[mbr]` default (`pot` backend) needs no compilation and is unaffected. On
-> x86-64 (`char` is signed there) no flag is needed.
+> Two *runtime* quirks on this platform are handled automatically by the package, so
+> no action is needed: PyTorch and `wasserstein` each link an OpenMP runtime (macOS
+> would abort with `OMP: Error #15`), so `inference.mbr` sets `KMP_DUPLICATE_LIB_OK=TRUE`
+> before first use; and `wasserstein`'s batched `emds` uses `np.array(..., copy=False)`,
+> which raises under NumPy ≥ 2, so the energyflow backend falls back to the (identical)
+> per-pair `emd`. The `[mbr]` default (`pot` backend) needs no compilation and none of
+> this applies. On x86-64 (`char` is signed there, OpenMP is found) no flags are needed.
 
 ## Quickstart
 

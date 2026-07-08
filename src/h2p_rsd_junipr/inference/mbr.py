@@ -36,6 +36,7 @@ neither and parity stays dependency-free.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 
@@ -172,6 +173,12 @@ def _emd_pot(pa, wa, pb, wb, *, R, beta, norm, periodic_phi, phi_col) -> float:
 
 
 def _import_ef():
+    # EnergyFlow's `wasserstein` OpenMP extension and PyTorch both link an OpenMP
+    # runtime; loading both in one process aborts with "OMP: Error #15 ... libomp
+    # already initialized" on macOS. Allow them to coexist (set before the first
+    # wasserstein call, which is where its runtime initialises). The MBR solves are
+    # independent LPs, so the duplicate-runtime caveat does not affect correctness.
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     try:
         import energyflow as ef  # lazy, per-backend
         return ef
@@ -252,11 +259,19 @@ def _matrix_ef(clouds_C, clouds_S, *, R, beta, norm, periodic_phi) -> np.ndarray
     if nzC and nzS:
         eventsC = [cloud_to_event(*clouds_C[i]) for i in nzC]
         eventsS = [cloud_to_event(*clouds_S[j]) for j in nzS]
-        sub = np.asarray(
-            ef.emd.emds(eventsC, eventsS, R=R, beta=beta, norm=norm,
-                        gdim=g, periodic_phi=periodic_phi),
-            dtype=float,
-        ).reshape(len(nzC), len(nzS))
+        try:  # one batched, multiprocessed call for the whole non-empty block
+            sub = np.asarray(
+                ef.emd.emds(eventsC, eventsS, R=R, beta=beta, norm=norm,
+                            gdim=g, periodic_phi=periodic_phi),
+                dtype=float,
+            ).reshape(len(nzC), len(nzS))
+        except (ValueError, TypeError):
+            # wasserstein's batched `_store_events` uses `np.array(..., copy=False)`,
+            # which raises under numpy>=2 ("Unable to avoid copy"). Fall back to the
+            # per-pair `emd` (unaffected, identical result), so the backend still works.
+            sub = np.array([[float(ef.emd.emd(ea, eb, R=R, beta=beta, norm=norm,
+                                              gdim=g, periodic_phi=periodic_phi))
+                             for eb in eventsS] for ea in eventsC])
         for a, i in enumerate(nzC):
             for b, j in enumerate(nzS):
                 D[i, j] = sub[a, b]

@@ -1,3 +1,11 @@
+import os
+
+# Allow PyTorch and energyflow's `wasserstein` OpenMP runtime to coexist in one
+# process (macOS aborts with "OMP: Error #15" otherwise). Set before torch is
+# imported so the optional energyflow MBR-backend tests can run; harmless when
+# wasserstein is absent. Mirrors inference.mbr._import_ef.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import pytest
 
 from h2p_rsd_junipr.config import load_config
