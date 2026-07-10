@@ -48,6 +48,10 @@ class LundPointEstimate:
     nodes: list
     logprob: float
     multiplicity: int
+    # Decision-theoretic MBR score (mean perturbative-Lund EMD to the posterior),
+    # set only by `inference.mbr.mbr_select`; None for MAP/mode estimates. This is
+    # NOT a likelihood — never feed it to anything expecting an NLL.
+    risk: float | None = None
 
     def pretty(self) -> str:
         head = (

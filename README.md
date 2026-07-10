@@ -22,14 +22,45 @@ stage (FastJet + fjcontrib LundPlane + PYTHIA 8); and a mandatory validation sui
 The forward physics map is parton → hadron (showering then hadronization). This
 repo learns the **inverse**: hadron → parton, as a calibrated posterior, not a
 point estimate — in high dimensions the mode can be unrepresentative, so every jet
-is reported with both a MAP/beam estimate and a posterior summary.
+is reported with both a MAP/beam estimate and a posterior summary. For the point
+estimate you can pick the joint-mode **MAP** (`decode.point_estimator=map`, floored
+away from the empty tree) or the mode-free, **floor-free MBR** — the drawn tree of
+least expected perturbative-Lund EMD to the posterior
+(`decode.point_estimator=mbr`, `[mbr]` extra; two backends, `pot` default and
+`energyflow`).
 
 ## Install
 
 ```bash
 pip install -e .                 # core: torch, numpy, omegaconf, uproot
 pip install -e ".[track,serve,dev]"   # optional extras
+pip install -e ".[mbr]"          # MBR point estimator (pot backend); add ".[energyflow]" for the reference EMD
 ```
+
+> **ARM64 (Dell GB10, Apple Silicon):** the `[energyflow]` extra pulls in
+> `wasserstein`, a C++ extension with no prebuilt ARM wheel, so pip compiles it
+> from source. Its headers declare `enum ... : char` members with value `-1`,
+> which is out of range because `char` is *unsigned* by default on ARM — the
+> build fails with `enumerator value '-1' is outside the range of underlying
+> type 'char'`. `wasserstein` also `#include`s `<omp.h>`, which Apple clang does not
+> ship, so the build additionally needs an OpenMP include/lib (conda's `llvm-openmp`,
+> already present in most envs; `conda install -c conda-forge llvm-openmp` otherwise).
+> Force a signed `char` **and** point the compiler at conda's OpenMP:
+>
+> ```bash
+> CFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
+> CXXFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
+> LDFLAGS="-L$CONDA_PREFIX/lib -lomp -Wl,-rpath,$CONDA_PREFIX/lib" \
+>   pip install --no-binary wasserstein -e ".[energyflow]"
+> ```
+>
+> Two *runtime* quirks on this platform are handled automatically by the package, so
+> no action is needed: PyTorch and `wasserstein` each link an OpenMP runtime (macOS
+> would abort with `OMP: Error #15`), so `inference.mbr` sets `KMP_DUPLICATE_LIB_OK=TRUE`
+> before first use; and `wasserstein`'s batched `emds` uses `np.array(..., copy=False)`,
+> which raises under NumPy ≥ 2, so the energyflow backend falls back to the (identical)
+> per-pair `emd`. The `[mbr]` default (`pot` backend) needs no compilation and none of
+> this applies. On x86-64 (`char` is signed there, OpenMP is found) no flags are needed.
 
 ## Quickstart
 
@@ -59,7 +90,7 @@ like `optim.lrr=1e-3` or `geometry.n_bins=ten` fails at load, not at hour three.
 > **Config knob reference:** [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) explains
 > every parameter field-by-field — geometry, data, encoder, model, optim, trainer, and
 > the inference/decode knobs (the MAP floor / mincut, the learned quantile floor, length
-> penalty, sampling temperature).
+> penalty, sampling temperature, and the `point_estimator` / `mbr_*` MBR knobs).
 
 ## Verification (this is the acceptance test)
 
@@ -102,11 +133,20 @@ pairs with any decoder family.
 ## C++ data generation
 
 ```bash
+conda activate js_fno                # dependencies live in this env (see note below)
 cmake -S cpp -B cpp/build && cmake --build cpp/build -j
 ctest --test-dir cpp/build           # Soft Drop boundary + matching unit tests
 ./cpp/build/pythia_driver 100000 jets.root 1 cpp/cards/pp_dijet.cmnd  # nEvents out seed card
 ./cpp/build/read_lund_rntuple jets.root Jets   # inspect: schema, provenance, #jets, first jet
 ```
+
+> **Dependencies via conda.** ROOT, FastJet, fjcontrib, and PYTHIA 8 are provided by
+> the `js_fno` conda environment, so configure with that environment **activated** —
+> CMake keys off `$CONDA_PREFIX` to locate them. Note that the conda-forge
+> `fastjet-contrib` package ships LundPlane bundled inside `libfastjetcontribfragile`
+> (there is no standalone `libLundPlane`); the CMake accepts either layout, so
+> source/homebrew installs still work. If you switch environments, delete
+> `cpp/build/CMakeCache.txt` before reconfiguring.
 
 Finds ROOT (≥6.36, RNTuple), FastJet, fjcontrib LundPlane, and PYTHIA 8 (optional;
 falls back to a toy event source). The `pythia_driver` reads the pre-hadronization

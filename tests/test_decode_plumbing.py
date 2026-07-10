@@ -1,6 +1,9 @@
-"""Decode-config plumbing + serving output: the MAP floor reaches the serving layer
-and the posterior summary now carries a median."""
+"""Decode-config plumbing + serving output: the MAP floor reaches the serving layer,
+the posterior summary carries a median, and the MBR estimator is selectable end-to-end."""
 
+import importlib.util
+
+import pytest
 import torch
 
 from h2p_rsd_junipr.config import decode_params, load_config
@@ -45,6 +48,23 @@ def test_predict_without_decode_still_floors():
     out = predict(model, geom, torch.device("cpu"), x)
     assert out["map_multiplicity"] >= 1
     assert "posterior_mult_median" in out
+
+
+@pytest.mark.skipif(importlib.util.find_spec("ot") is None, reason="POT not installed")
+def test_predict_mbr_selectable_and_map_unchanged():
+    """point_estimator='mbr' returns a tree plus additive mbr_risk/mbr_backend fields
+    (reusing the same draws); the default 'map' output carries no MBR fields."""
+    model, geom, cfg = _model(["model=ar_junipr_v2", "encoder=gru"])
+    x = {"lnInvDelta": [0.3, 1.3, 4.3], "lnkt": [4.7, 4.4, 3.6],
+         "lnz": [-1.1, -0.2, -0.9], "psi": [-3.0, -2.8, -0.3]}
+    dec = decode_params(cfg)
+    out_map = predict(model, geom, torch.device("cpu"), x, decode=dec)
+    assert "mbr_risk" not in out_map and "mbr_backend" not in out_map  # map path: no MBR fields
+    out_mbr = predict(model, geom, torch.device("cpu"), x,
+                      decode={**dec, "point_estimator": "mbr", "n_posterior_samples": 64})
+    assert "mbr_risk" in out_mbr and out_mbr["mbr_backend"] == "pot"    # additive, non-breaking
+    assert out_mbr["map_multiplicity"] == len(out_mbr["map_nodes"])     # a valid tree
+    assert "posterior_mult_median" in out_mbr
 
 
 def test_predict_learned_floor_only_raises_map():

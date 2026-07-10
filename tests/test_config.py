@@ -55,15 +55,24 @@ def test_decode_config_has_new_fields():
     assert cfg.decode.min_emissions == 1
     assert cfg.decode.length_penalty == pytest.approx(0.0)
     assert cfg.decode.length_floor_quantile == pytest.approx(0.0)
+    # MBR knobs: point_estimator=map reproduces today; pot is the default backend
+    assert cfg.decode.point_estimator == "map"
+    assert cfg.decode.mbr_backend == "pot"
+    assert cfg.decode.mbr_lnkt_cut is None
+    assert cfg.decode.mbr_norm is False
 
 
 def test_decode_params_full():
     dec = decode_params(load_config([]))
     assert set(dec) == {"beam_width", "topk_cells", "max_emissions", "n_posterior_samples",
                         "cont_temperature", "min_emissions", "length_penalty",
-                        "length_floor_quantile"}
+                        "length_floor_quantile", "point_estimator", "mbr_backend",
+                        "mbr_n_candidates", "mbr_lnkt_cut", "mbr_weight", "mbr_coords",
+                        "mbr_R", "mbr_beta", "mbr_norm", "mbr_periodic_phi", "mbr_phi_col"}
     assert dec["min_emissions"] == 1
     assert dec["length_floor_quantile"] == pytest.approx(0.0)
+    assert dec["point_estimator"] == "map" and dec["mbr_backend"] == "pot"
+    assert dec["mbr_lnkt_cut"] is None  # None default preserved through the tolerant read
 
 
 def test_decode_params_tolerates_old_snapshot():
@@ -73,6 +82,10 @@ def test_decode_params_tolerates_old_snapshot():
     dec = decode_params(old)
     assert dec["min_emissions"] == 1 and dec["length_penalty"] == pytest.approx(0.0)
     assert dec["length_floor_quantile"] == pytest.approx(0.0)
+    # the MBR keys backfill too (a snapshot predating them must not raise)
+    assert dec["point_estimator"] == "map" and dec["mbr_backend"] == "pot"
+    assert dec["mbr_lnkt_cut"] is None and dec["mbr_R"] == pytest.approx(8.485)
     # and a config with no decode block at all
     assert decode_params(OmegaConf.create({}))["min_emissions"] == 1
     assert decode_params(OmegaConf.create({}))["length_floor_quantile"] == pytest.approx(0.0)
+    assert decode_params(OmegaConf.create({}))["point_estimator"] == "map"

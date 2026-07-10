@@ -97,8 +97,9 @@ def cmd_eval(argv) -> int:
         dm_jets = LundDataModule(cfg2, geometry).setup().val_jets
         decode = decode_params(cfg2)  # follow the checkpoint's decode config (tolerant of old snapshots)
         # ...but an explicit CLI `decode.*` override still wins over the snapshot (decode is
-        # inference-time tuning, e.g. an A/B on decode.length_floor_quantile). Tokens were
-        # already schema-validated by load_config(argv) above, so they are safe to apply.
+        # inference-time tuning, e.g. an A/B on decode.length_floor_quantile, or selecting the
+        # MBR estimator with decode.point_estimator=mbr decode.mbr_backend=pot|energyflow).
+        # Tokens were already schema-validated by load_config(argv) above, so they are safe.
         cli_decode = [t for t in argv if t.startswith("decode.") and "=" in t]
         if cli_decode:
             ov = OmegaConf.to_container(OmegaConf.from_dotlist(cli_decode).decode, resolve=True)

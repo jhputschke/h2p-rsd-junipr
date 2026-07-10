@@ -21,15 +21,24 @@ find_package(ROOT CONFIG REQUIRED COMPONENTS RIO Tree ROOTNTuple)
 message(STATUS "ROOT ${ROOT_VERSION} found")
 
 # ---- FastJet + fjcontrib LundPlane ------------------------------------------
+# fjcontrib ships LundPlane in two layouts depending on how it was installed:
+#   * standalone  -> libLundPlane            (source builds, homebrew)
+#   * bundled     -> libfastjetcontribfragile (conda-forge "fastjet-contrib")
+# Accept either, and add the active conda env prefix to the search hints.
 find_package(FASTJET REQUIRED)
-find_library(LUNDPLANE_LIB NAMES LundPlane
-             HINTS ${FASTJET_LIBS_DIR} /opt/homebrew/lib /usr/local/lib)
+find_library(LUNDPLANE_LIB
+             NAMES LundPlane fastjetcontribfragile
+             HINTS ${FASTJET_LIBS_DIR} $ENV{CONDA_PREFIX}/lib
+                   /opt/homebrew/lib /usr/local/lib)
 if(NOT LUNDPLANE_LIB)
-  message(FATAL_ERROR "fjcontrib LundPlane library not found (libLundPlane).")
+  message(FATAL_ERROR "fjcontrib LundPlane not found "
+          "(looked for libLundPlane or libfastjetcontribfragile).")
 endif()
-# fjcontrib headers may live beside the lib (homebrew installs them in /opt/homebrew/include).
+# fjcontrib headers may live beside the lib (homebrew: /opt/homebrew/include,
+# conda: $CONDA_PREFIX/include).
 find_path(FJCONTRIB_INCLUDE_DIR fastjet/contrib/LundGenerator.hh
-          HINTS ${FASTJET_INCLUDE_DIR} /opt/homebrew/include /usr/local/include)
+          HINTS ${FASTJET_INCLUDE_DIR} $ENV{CONDA_PREFIX}/include
+                /opt/homebrew/include /usr/local/include)
 if(NOT FJCONTRIB_INCLUDE_DIR)
   message(FATAL_ERROR "fjcontrib LundPlane headers not found (LundGenerator.hh).")
 endif()

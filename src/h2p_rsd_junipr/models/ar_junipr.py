@@ -280,6 +280,12 @@ class ARJunipr(PosteriorModel):
         total += float(logp_stop[L])
         return LundPointEstimate(nodes=nodes, logprob=total, multiplicity=L)
 
+    def describe_cells(self, xf, nx, cells) -> LundPointEstimate:
+        """MBR winner -> LundPointEstimate. AR attaches the head-mode continuous
+        coordinates and the exact joint log-density (its staged decode), richer than
+        the base cell-centre fallback."""
+        return self.describe_sequence(xf, nx, cells)
+
     # beam-search keys map_estimate forwards to map_decode (sampling keys like
     # n_posterior_samples / cont_temperature are silently ignored, so a single
     # decode_params() dict can be splatted into both map_estimate and sample).

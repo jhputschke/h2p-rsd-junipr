@@ -208,6 +208,18 @@ class DecodeConfig:
     length_penalty: float = 0.0            # GNMT score/len**alpha at final beam rank; 0 == off
     length_floor_quantile: float = 0.0     # learned per-jet MAP floor: max(min_emissions,
     #                                        Q_alpha(P(n|x))); 0.0 == off (opt-in)
+    # --- MBR point estimator (opt-in; point_estimator=map reproduces today exactly) ---
+    point_estimator: str = "map"           # map | mbr
+    mbr_backend: str = "pot"               # pot (default, self-contained) | energyflow | surrogate
+    mbr_n_candidates: int = 0              # 0 == all draws are candidates
+    mbr_lnkt_cut: Optional[float] = None   # None inherits the geometry ln_kt floor (metric support)
+    mbr_weight: str = "kt"                 # kt | z | unit
+    mbr_coords: str = "lnDR_lnkt"          # lnDR_lnkt | +lnz | +psi
+    mbr_R: float = 8.485                   # imbalance-penalty radius ~ Lund-plane diameter
+    mbr_beta: float = 1.0                  # ground-distance exponent (1.0 == KMT EMD)
+    mbr_norm: bool = False                 # energyflow weight normalisation; off keeps the imbalance term
+    mbr_periodic_phi: bool = False         # wrap the psi column (mbr_coords=+psi)
+    mbr_phi_col: int = -1                  # psi column index; -1 == last coordinate
 ```
 
 OmegaConf schema conventions (assumes `from dataclasses import field`,
@@ -247,6 +259,18 @@ Notes tied to the model discussion:
   `inference/length.py`). The floor only ever *raises* the bound (n>=1 preserved), and
   `alpha=0` short-circuits to today's behavior (structural parity). `alpha->median`
   approaches a length-conditioned MAP at that quantile.
+- `decode.point_estimator` (default `map`) selects the point estimate. Beside the MAP
+  and the posterior mean/median, `mbr` returns the **minimum-Bayes-risk** tree — the
+  drawn tree of least expected perturbative-Lund EMD to the posterior (`inference/mbr.py`),
+  reusing the draws already taken. It is **floor-free** (an empty cloud pays the full
+  mass-imbalance penalty, so it never wins on a non-empty-dominated posterior — 0% `n=0`
+  with `min_emissions=0`, vs the MAP's collapse). The OT solve has **two interchangeable
+  backends** (`decode.mbr_backend`): a self-contained POT augmented-cost form (`pot`,
+  default) and the reference `energyflow` EMD (Komiske, Metodiev & Thaler, arXiv:1902.02346);
+  they agree on the argmin but differ by EnergyFlow's internal `1/R` scale, so quote one
+  backend per analysis. Both are lazy-imported (optional `[mbr]` / `[energyflow]` extras),
+  so the default `map` path and `per_jet_nll` parity stay dependency-free. The `.risk` is a
+  decision-theoretic score, reported separately from the NLL.
 
 CLI override example (ergonomics identical across versions — here OmegaConf's
 dotted parsing, not Hydra, implements them):

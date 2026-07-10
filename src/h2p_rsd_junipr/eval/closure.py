@@ -79,9 +79,19 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     """Closure + calibration on held-out jets (cell-level, as the v2 script). Returns
     a metrics dict and (optionally) prints the same summary lines. `decode` is a
     decode_params(cfg) dict threaded into sampling (n_posterior_samples ignored here;
-    K wins) — kept for a uniform call signature with print_point_estimate."""
+    K wins) — kept for a uniform call signature with print_point_estimate.
+
+    When `decode.point_estimator == "mbr"` an **MBR** series (minimum expected
+    perturbative-Lund EMD over the K draws, `inference.mbr`) is added beside the
+    posterior-mode estimator, so the leading-emission-distance and multiplicity-bias
+    panels can be compared MBR-vs-mode. This is O(K^2) EMD solves per jet — shrink it
+    with `decode.mbr_n_candidates` / a smaller `experiment.closure_jets`. The default
+    (`point_estimator="map"`) skips it entirely (no cost, no OT-backend import)."""
+    dec = dict(decode or {})
+    want_mbr = str(dec.get("point_estimator", "map")) == "mbr"
     d_id, d_mode = [], []
     n_id_bias, n_mean_bias, n_median_bias = [], [], []
+    d_mbr, n_mbr_bias = [], []
     covered = []
     n_closure = min(n_closure, len(val_ds))
     for i in range(n_closure):
@@ -109,6 +119,13 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         n_mean_bias.append(mults.mean() - ny_true)
         n_median_bias.append(np.median(mults) - ny_true)
 
+        if want_mbr:  # MBR reuses the same draws (no resample); O(K^2) EMD per jet
+            mbr_hat = model.map_or_mbr(xf, nx, draws=draws, **dec)
+            lead_mbr = leading_emission_cell([n.cell for n in mbr_hat.nodes], geometry)
+            if lead_mbr is not None:
+                d_mbr.append(lund_distance(lead_mbr, ly, geometry))
+            n_mbr_bias.append(mbr_hat.multiplicity - ny_true)
+
         order = np.argsort(-counts)
         cum = np.cumsum(counts[order]) / counts.sum()
         k68 = int(np.searchsorted(cum, 0.68)) + 1
@@ -129,6 +146,10 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         "mult_bias_posterior_median": float(np.mean(n_median_bias)),
         "coverage_68": float(np.mean(covered)),
     }
+    if want_mbr:
+        metrics["dlund_mbr"] = float(np.nanmean(d_mbr)) if d_mbr else float("nan")
+        metrics["mult_bias_mbr"] = float(np.mean(n_mbr_bias)) if n_mbr_bias else float("nan")
+        metrics["mbr_backend"] = str(dec.get("mbr_backend", "pot"))
     if verbose:
         print("\nclosure + calibration on held-out jets:")
         print(
@@ -149,6 +170,13 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
             f"  posterior 68% coverage of true leading cell = {metrics['coverage_68']:.2f}"
             f"   (target ~0.68; <0.68 => over-confident)"
         )
+        if want_mbr:
+            print(
+                f"  MBR ({metrics['mbr_backend']}) vs true y :"
+                f"  leading-emission Lund distance = {metrics['dlund_mbr']:.3f}"
+                f"   multiplicity bias <n - n_true> = {metrics['mult_bias_mbr']:+.3f}"
+                f"   (floor-free; compare to posterior-mode / mean above)"
+            )
     return metrics
 
 
@@ -158,6 +186,7 @@ def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=50
     When `decode.length_floor_quantile > 0` the MAP multiplicity is floored per jet at
     the learned quantile of P(n|x), reusing the posterior draws below."""
     dec = dict(decode or {})
+    want_mbr = str(dec.get("point_estimator", "map")) == "mbr"
     item = val_ds[0]
     xf = item["xf"].unsqueeze(0).to(device)
     nx = torch.tensor([item["nx"]], device=device)
@@ -169,7 +198,9 @@ def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=50
             model, xf, nx, quantile=alpha,
             base_floor=int(dec.get("min_emissions", 1)), mults=mults,
         )
-    y_hat = model.map_estimate(xf, nx, **dec)
+    # the MAP is always shown; MBR (floor-free) is shown beside it when opted in
+    y_hat = model.map_estimate(xf, nx, **{k: v for k, v in dec.items() if k != "point_estimator"})
+    mbr_hat = model.map_or_mbr(xf, nx, draws=draws, **dec) if want_mbr else None
 
     x_raw = node_raw(*val_jets[0]["x"])
     y_truth = item["yraw"]
@@ -193,6 +224,17 @@ def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=50
         f"  leading-emission Lund distance to truth:  plain RSD = {d_rsd:.3f}   "
         f"model MAP = {d_map:.3f}   (lower is better)"
     )
+    if mbr_hat is not None:
+        d_mbr = lund_distance(
+            leading_emission_cell([n.cell for n in mbr_hat.nodes], geometry), lead_truth, geometry
+        )
+        print(
+            f"  MBR ({dec.get('mbr_backend', 'pot')}, floor-free):  multiplicity = {mbr_hat.multiplicity}"
+            f"   leading-emission Lund distance = {d_mbr:.3f}"
+            f"   risk = {mbr_hat.risk:.3f}   (mean expected Lund-EMD to the posterior; not an NLL)"
+        )
     print("\n" + lund_tree_str(y_hat, "model MAP groomed shower", geometry, ref=y_truth))
+    if mbr_hat is not None:
+        print("\n" + lund_tree_str(mbr_hat, "model MBR groomed shower (perturbative Lund)", geometry, ref=y_truth))
     print("\n" + lund_tree_str(x_raw, "plain RSD groomed shower (hadron-level x)", geometry, ref=y_truth))
     print("\n" + lund_tree_str(y_truth, "true groomed shower", geometry))
