@@ -24,7 +24,7 @@ from ..encoders.base import build_encoder
 from ..features import N_NODE_FEAT
 from ..geometry import Geometry
 from ..inference.point_estimate import LundNode, LundPointEstimate, beam_search_cells
-from ..inference.sampling import ancestral_sample_cells
+from ..inference.sampling import ancestral_sample_cells, ancestral_sample_cells_fixed_length
 from .base import PosteriorModel, register_model
 
 
@@ -41,7 +41,7 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_layers: int) -> nn.Module:
     return nn.Sequential(*layers)
 
 
-@register_model("ar_junipr_v1", "ar_junipr_v2", "ar_junipr")
+@register_model("ar_junipr_v1", "ar_junipr_v2", "ar_junipr_v3", "ar_junipr")
 class ARJunipr(PosteriorModel):
     def __init__(self, cfg, geometry: Geometry):
         super().__init__()
@@ -57,6 +57,10 @@ class ARJunipr(PosteriorModel):
         self.kappa_max = float(m.kappa_max)
         # default 0.0 == off; getattr tolerates old checkpoint configs lacking the field
         self.cell_label_smoothing = float(getattr(m, "cell_label_smoothing", 0.0))
+        # first-class multiplicity head (q(y|x) = q(N|x) q(y|N,x)); getattr-tolerant so
+        # old checkpoint configs (no field) load as the implicit continue/stop model.
+        self.use_multiplicity_head = bool(getattr(m, "use_multiplicity_head", False))
+        self.max_emissions = int(getattr(m, "max_emissions", 25))
         self.half_u = geometry.half_u
         self.half_v = geometry.half_v
 
@@ -73,7 +77,16 @@ class ARJunipr(PosteriorModel):
         self.h0_proj = nn.Linear(self.ctx_dim, self.dec_dim * self.dec_layers)
 
         # ---- heads ----------------------------------------------------------
-        self.cont_head = nn.Linear(self.dec_dim + self.ctx_dim, 1)
+        # Length model: an explicit categorical q(N|x) head (v3) OR the implicit
+        # per-step continue/stop Bernoulli (default). Exactly one is built, so the
+        # off-path state_dict is byte-identical to today and old checkpoints load.
+        if self.use_multiplicity_head:
+            self.n_head = nn.Sequential(
+                nn.Linear(self.ctx_dim, self.ctx_dim), nn.ReLU(),
+                nn.Linear(self.ctx_dim, self.max_emissions + 1),
+            )
+        else:
+            self.cont_head = nn.Linear(self.dec_dim + self.ctx_dim, 1)
         self.split_head = _mlp(
             self.dec_dim + self.ctx_dim, self.dec_dim, self.n_cells, int(m.split_head_layers)
         )
@@ -145,14 +158,20 @@ class ARJunipr(PosteriorModel):
         dev = yc.device
 
         eh = torch.cat([out, e.unsqueeze(1).expand(-1, Lp1, -1)], dim=-1)
-        cont_logit = self.cont_head(eh).squeeze(-1)  # (B, L+1)
-
-        idx = torch.arange(Lp1, device=dev).unsqueeze(0)
         n = ny.unsqueeze(1)
-        cont_mask = (idx <= n).float()
-        cont_tgt = (idx < n).float()
-        cont_ll = -F.binary_cross_entropy_with_logits(cont_logit, cont_tgt, reduction="none")
-        cont_ll = (cont_ll * cont_mask).sum(1)
+
+        # length term: explicit categorical q(N|x) (v3) or the implicit continue/stop
+        # product (default). The off-branch is unchanged, so -per_jet_nll matches today.
+        if self.use_multiplicity_head:
+            n_lp = F.log_softmax(self.n_head(e), dim=-1)  # (B, max+1)
+            length_ll = n_lp.gather(-1, ny.clamp(max=self.max_emissions).unsqueeze(-1)).squeeze(-1)
+        else:
+            cont_logit = self.cont_head(eh).squeeze(-1)  # (B, L+1)
+            idx = torch.arange(Lp1, device=dev).unsqueeze(0)
+            cont_mask = (idx <= n).float()
+            cont_tgt = (idx < n).float()
+            cont_ll = -F.binary_cross_entropy_with_logits(cont_logit, cont_tgt, reduction="none")
+            length_ll = (cont_ll * cont_mask).sum(1)
 
         split_ll = torch.zeros(B, device=dev)
         coord_ll = torch.zeros(B, device=dev)
@@ -176,7 +195,7 @@ class ARJunipr(PosteriorModel):
                 )
                 coord_ll = (coord_per * split_mask).sum(1)
 
-        return -(cont_ll + split_ll + coord_ll)
+        return -(length_ll + split_ll + coord_ll)
 
     def log_prob(self, batch) -> torch.Tensor:
         return -self.per_jet_nll(batch)
@@ -198,6 +217,14 @@ class ARJunipr(PosteriorModel):
         split_logits = self.split_head(hv)
         return p_cont, split_logits, h
 
+    def _step_cells(self, tok: torch.Tensor, e: torch.Tensor, h):
+        """cont_head-free batched decoder step (multiplicity-head model): returns
+        ``(split_logits (K, n_cells), h)``. Length is set externally by q(N|x)."""
+        inp = self.dec_in(torch.cat([self.y_embed(tok), e.unsqueeze(1)], dim=-1))
+        out, h = self.decoder(inp, h)
+        hv = torch.cat([out[:, -1, :], e], dim=-1)
+        return self.split_head(hv), h
+
     # -- contract: sample ----------------------------------------------------
     @torch.inference_mode()
     def sample(self, xf, nx, n, max_emissions: int = 25, cont_temperature: float = 1.0):
@@ -205,6 +232,14 @@ class ARJunipr(PosteriorModel):
         dev = xf.device
         e = self.encode(xf, nx).expand(n, -1).contiguous()
         h0 = self._init_hidden(e)
+        if self.use_multiplicity_head:
+            # first-class factorization: N_k ~ q(N|x), then decode exactly N_k cells.
+            n_probs = F.softmax(self.n_head(e[:1]), dim=-1).squeeze(0)  # (max+1,)
+            lengths = torch.multinomial(n_probs, n, replacement=True).clamp(max=max_emissions)
+            return ancestral_sample_cells_fixed_length(
+                self._step_cells, e, h0, self.start_token, lengths, dev,
+                cont_temperature=cont_temperature,
+            )
         return ancestral_sample_cells(
             self._step_batched, e, h0, self.start_token, n, dev,
             max_emissions=max_emissions, cont_temperature=cont_temperature,
@@ -221,11 +256,33 @@ class ARJunipr(PosteriorModel):
         self.eval()
         e = self.encode(xf, nx)
         h0 = self._init_hidden(e)
+        if self.use_multiplicity_head:
+            return self._map_decode_fixed_length(
+                e, h0, min_emissions=min_emissions, max_emissions=max_emissions
+            )
         return beam_search_cells(
             self._step, e, h0, self.start_token, xf.device,
             beam_width=beam_width, topk_cells=topk_cells, max_emissions=max_emissions,
             min_emissions=min_emissions, length_penalty=length_penalty,
         )
+
+    def _map_decode_fixed_length(self, e, h0, *, min_emissions: int, max_emissions: int):
+        """q(N|x)-head MAP: N* = clamp(argmax q(N|x), min_emissions, max_emissions),
+        then greedily decode exactly N* cells (argmax split per step; no stop head).
+        With the default `min_emissions=1` the estimate is never the empty tree."""
+        dev = e.device
+        n_lp = F.log_softmax(self.n_head(e), dim=-1).squeeze(0)
+        n_star = int(n_lp.argmax().item())
+        n_star = max(n_star, int(min_emissions))
+        n_star = min(n_star, int(max_emissions), self.max_emissions)
+        tok = torch.full((1, 1), self.start_token, dtype=torch.long, device=dev)
+        h, cells = h0, []
+        for _ in range(n_star):
+            split_logits, h = self._step_cells(tok, e, h)
+            c = int(split_logits.argmax(dim=-1).item())
+            cells.append(c)
+            tok = torch.tensor([[c]], dtype=torch.long, device=dev)
+        return cells
 
     @torch.inference_mode()
     def describe_sequence(self, xf, nx, cells) -> LundPointEstimate:
@@ -240,9 +297,15 @@ class ARJunipr(PosteriorModel):
         yc = torch.tensor([list(cells)], dtype=torch.long, device=dev)
         out = self._decode_states(yc, e)
         eh = torch.cat([out, e.unsqueeze(1).expand(-1, L + 1, -1)], dim=-1)
-        cont_logit = self.cont_head(eh).squeeze(-1).squeeze(0)
-        logp_cont = F.logsigmoid(cont_logit)
-        logp_stop = F.logsigmoid(-cont_logit)
+        if self.use_multiplicity_head:
+            # length log-density = log q(N=L | x); no per-node continue/stop terms.
+            n_lp = F.log_softmax(self.n_head(e), dim=-1).squeeze(0)
+            length_logp = float(n_lp[min(L, self.max_emissions)])
+            logp_cont = torch.zeros(L + 1, device=dev)
+        else:
+            cont_logit = self.cont_head(eh).squeeze(-1).squeeze(0)
+            logp_cont = F.logsigmoid(cont_logit)
+            length_logp = float(F.logsigmoid(-cont_logit)[L])  # log P(stop at L)
 
         nodes, total = [], 0.0
         if L > 0:
@@ -277,7 +340,7 @@ class ARJunipr(PosteriorModel):
                         logp_split=ls, logp_coord=lk, logp_cont=lc,
                     )
                 )
-        total += float(logp_stop[L])
+        total += length_logp
         return LundPointEstimate(nodes=nodes, logprob=total, multiplicity=L)
 
     def describe_cells(self, xf, nx, cells) -> LundPointEstimate:
@@ -285,6 +348,16 @@ class ARJunipr(PosteriorModel):
         coordinates and the exact joint log-density (its staged decode), richer than
         the base cell-centre fallback."""
         return self.describe_sequence(xf, nx, cells)
+
+    @torch.inference_mode()
+    def length_pmf(self, xf, nx, mults=None, n_samples: int = 500):
+        """P(n|x): exact `softmax(n_head(e))` when the multiplicity head is on;
+        otherwise the base sampler histogram (the implicit continue/stop belief)."""
+        if not self.use_multiplicity_head:
+            return super().length_pmf(xf, nx, mults=mults, n_samples=n_samples)
+        self.eval()
+        e = self.encode(xf, nx)
+        return F.softmax(self.n_head(e), dim=-1).squeeze(0).cpu().numpy()
 
     # beam-search keys map_estimate forwards to map_decode (sampling keys like
     # n_posterior_samples / cont_temperature are silently ignored, so a single

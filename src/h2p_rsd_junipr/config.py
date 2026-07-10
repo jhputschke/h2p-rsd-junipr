@@ -90,6 +90,12 @@ class ARJuniprConfig:
     kappa_max: float = 50.0
     cell_label_smoothing: float = 0.0  # split-head label smoothing; 0.0 == off (likelihood
     #                                    parity preserved). Probe knob for the MAP collapse.
+    use_multiplicity_head: bool = False  # False == today's implicit continue/stop length model
+    #                                      (bit-parity preserved; no n_head built). True promotes
+    #                                      length to a first-class categorical head realizing
+    #                                      q(y|x) = q(N|x) q(y|N,x) (docs/PLAN_MultHead.md).
+    max_emissions: int = 25            # categorical size of the multiplicity head (n = 0..max);
+    #                                    only used when use_multiplicity_head=True. Mirrors CINN.
 
 
 @dataclass
@@ -162,6 +168,8 @@ class DecodeConfig:
     mbr_norm: bool = False             # energyflow weight normalisation; off keeps the imbalance term
     mbr_periodic_phi: bool = False     # wrap the psi column (only when mbr_coords="+psi")
     mbr_phi_col: int = -1              # psi column index; -1 => last coordinate
+    mbr_resample_to_qn: bool = False   # reweight the MBR support to the calibrated q(N|x) marginal
+    #                                    (decode-layer exposure-bias fix; off keeps the plain mean risk)
 
 
 @dataclass
@@ -190,6 +198,7 @@ class Config:
 MODEL_SCHEMA = {
     "ar_junipr_v2": ARJuniprConfig,
     "ar_junipr_v1": ARJuniprConfig,
+    "ar_junipr_v3": ARJuniprConfig,   # v2 backbone + first-class multiplicity head
     "cinn": CINNConfig,
     "diffusion": DiffusionConfig,
 }
@@ -296,6 +305,7 @@ _DECODE_DEFAULTS: dict = {
     "mbr_norm": False,
     "mbr_periodic_phi": False,
     "mbr_phi_col": -1,
+    "mbr_resample_to_qn": False,
 }
 
 

@@ -130,6 +130,25 @@ Two consequences are built into the code:
   approaches a **length-conditioned MAP** at that quantile. For a *count*, still prefer
   the **posterior median**: the MAP is the wrong summary for multiplicity. Quantified in
   `notebooks/inference_demo.ipynb` §6a and `scripts/probe_map_collapse.py`.
+- **Length as a first-class factor — the multiplicity head.** The learned floor above is
+  a *decoding* trick built on $P(n\mid x)$; `model=ar_junipr_v3` (opt-in
+  `use_multiplicity_head`, off by default) promotes it to **model structure**, factorizing
+  $$
+  q_\phi(y\mid x) = q_\phi(N\mid x)\,\; q_\phi(y\mid N,x)
+  $$
+  with a dedicated categorical multiplicity head $q_\phi(N\mid x)$ (the same head cINN and
+  diffusion carry) in place of the autoregressive continue/stop product. The kinematics
+  $q_\phi(y\mid N,x)$ are the unchanged JUNIPR cell/coordinate heads, run for exactly $N$
+  steps. Two consequences: **(i)** the length is now a calibrated, low-dimensional marginal,
+  so the argmax over $N$ is over a well-behaved categorical rather than an implicit product of
+  continue-probabilities — the short-sequence MAP degeneracy is killed *at its source*, not
+  clamped, and $P(n\mid x)$ is read **exactly** from the head; **(ii)** ancestral draws then
+  inherit a calibrated multiplicity marginal, giving a clean handle on the sampler's
+  exposure bias (below). This mirrors the first high-precision generative-unfolding framework
+  for jet substructure, a staged pipeline whose first stage unfolds the multiplicity with the
+  kinematics generated conditional on it (arXiv:2510.19906). Because it is a
+  bool switch, `ar_junipr_v2` stays bit-for-bit identical when off. See
+  [`PLAN_MultHead.md`](PLAN_MultHead.md).
 - **MBR — a floor-free alternative decision rule.** The floors above *mask* the
   length bias of the joint mode; **minimum Bayes risk** removes it at the source by
   changing the decision rule, not the density (`decode.point_estimator="mbr"`,
@@ -174,7 +193,15 @@ Two consequences are built into the code:
   default). Reproducing the **KMT collider-event EMD verbatim** (hadronic
   $(p_T,y,\phi)$ coordinates, their $R,\beta,\mathrm{norm},\texttt{periodic\_phi}$) is
   a configuration the user dials in through the `mbr_*` knobs, not pinned to the paper.
-  Quantified in `notebooks/inference_demo.ipynb` §6.
+  Quantified in `notebooks/inference_demo.ipynb` §6. One caveat inherited from the sampler:
+  MBR candidates are ancestral draws, so the candidate pool carries the posterior's
+  marginal-multiplicity bias. The un-normalized EMD partially self-corrects (mass imbalance is
+  penalized), but the residual is empirical — the closure suite reports the signed
+  multiplicity bias of the MBR estimate **stratified by true $N$** to expose it. If it
+  survives, `decode.mbr_resample_to_qn` reweights the candidate pool to the calibrated
+  $q_\phi(N\mid x)$ marginal — a **decoding-layer** correction that leaves the likelihood (and
+  thus any likelihood-ratio analysis) intact, unlike minimum-risk / sequence fine-tuning.
+  It is most effective with a calibrated head (`ar_junipr_v3`, cINN, diffusion).
 - **A direct conditional MLE.** A simpler MAP-on-a-tractable-likelihood precedent is
   the Ginkgo / Quantum-Trellis line (arXiv:2105.10512, arXiv:2112.12795); here the
   likelihood is the learned $q_\phi$.
@@ -327,7 +354,11 @@ decreasing affinity to the Lund-tree representation:
   search over the decoded tree (floored at `decode.min_emissions`, with an optional
   `decode.length_penalty`); the **posterior** is ancestral sampling. Variable
   multiplicity is handled natively; only jet-level pairing is needed; the likelihood
-  is explicit.
+  is explicit. **v3** (`use_multiplicity_head`) replaces the continue/stop product
+  $\prod_t P_{\rm cont}\,P_{\rm cont}^{\rm stop}$ with an explicit categorical
+  $q_\phi(N\mid x)$, giving the first-class factorization $q_\phi(y\mid x)=q_\phi(N\mid
+  x)\,q_\phi(y\mid N,x)$ (§3, "Length as a first-class factor") while keeping the same
+  cell/coordinate heads.
 - **§5.2 Conditional normalizing flow / cINN** (`models/cinn.py`) — exact density,
   trivial sampling; variable multiplicity via a multiplicity head + structured latent
   (Bellagente et al., arXiv:2006.06685; Backes et al., arXiv:2212.08674).

@@ -1,0 +1,14 @@
+# §5.1 autoregressive JUNIPR (v2 backbone) with a first-class multiplicity head.
+# Realizes q(y|x) = q(N|x) q(y|N,x): length is a calibrated categorical q(N|x)
+# instead of the implicit per-step continue/stop product. See docs/PLAN_MultHead.md.
+ctx_dim: 64
+dec_dim: 64
+dec_layers: 1
+split_head_layers: 2
+coord_head_layers: 2
+continuous_coords: true
+sigma_floor: 0.01
+kappa_max: 50.0
+cell_label_smoothing: 0.0
+use_multiplicity_head: true   # the v3 switch: build n_head, drop cont_head
+max_emissions: 25             # categorical support n = 0..max_emissions
