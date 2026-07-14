@@ -68,6 +68,9 @@ pip install -e ".[mbr]"          # MBR point estimator (pot backend); add ".[ene
 # train the §5.1 autoregressive JUNIPR (v2, continuous coords) on synthetic data
 h2p-rsd-junipr train model=ar_junipr_v2 encoder=gru trainer.max_epochs=20
 
+# v3 = v2 + a first-class multiplicity head q(N|x): q(y|x) = q(N|x)·q(y|N,x)
+h2p-rsd-junipr train model=ar_junipr_v3 encoder=gru trainer.max_epochs=20
+
 # swap the model family or encoder — drop-in, no code changes
 h2p-rsd-junipr train model=cinn encoder=lundnet encoder.num_layers=3 geometry.n_bins=16
 
@@ -123,12 +126,15 @@ so the objective and all closure observables are jet-level.
 
 | family | module | status |
 |---|---|---|
-| §5.1 autoregressive JUNIPR (v1 cells / v2 +continuous coords) | `models/ar_junipr.py` | primary, verified |
+| §5.1 autoregressive JUNIPR (v1 cells / v2 +continuous coords / v3 +multiplicity head) | `models/ar_junipr.py` | primary, verified |
 | §5.2 conditional normalizing flow (cINN) | `models/cinn.py` | functional baseline |
 | §5.3 conditional diffusion / bridge | `models/diffusion.py` | functional baseline |
 
 Encoders (`gru`, `lundnet`, `deepsets`) are independently pluggable; any encoder
-pairs with any decoder family.
+pairs with any decoder family. `ar_junipr_v3` promotes the sequence length to a
+first-class categorical `q(N|x)` head — the factorization `q(y|x) = q(N|x)·q(y|N,x)`,
+opt-in via `use_multiplicity_head` and off by default (v2 stays bit-for-bit unchanged);
+see [`docs/PLAN_MultHead.md`](docs/PLAN_MultHead.md).
 
 ## C++ data generation
 

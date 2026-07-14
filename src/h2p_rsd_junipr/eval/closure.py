@@ -19,6 +19,9 @@ from ..geometry import Geometry
 from ..inference.length import learned_min_emissions
 from ..inference.point_estimate import LundPointEstimate
 
+# True-multiplicity strata for the signed-bias breakdown (label, lo, hi inclusive).
+_N_BINS = [("1-3", 1, 3), ("4-6", 4, 6), ("7-10", 7, 10), ("11+", 11, 10**9)]
+
 
 def leading_emission_cell(cells, geometry: Geometry):
     """Hardest (largest ln kt) primary emission cell — the most perturbative,
@@ -92,6 +95,7 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     d_id, d_mode = [], []
     n_id_bias, n_mean_bias, n_median_bias = [], [], []
     d_mbr, n_mbr_bias = [], []
+    true_ns = []  # true N per kept jet, aligned with the bias lists (for the per-N table)
     covered = []
     n_closure = min(n_closure, len(val_ds))
     for i in range(n_closure):
@@ -118,6 +122,7 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         n_id_bias.append(len(x_cells) - ny_true)
         n_mean_bias.append(mults.mean() - ny_true)
         n_median_bias.append(np.median(mults) - ny_true)
+        true_ns.append(ny_true)
 
         if want_mbr:  # MBR reuses the same draws (no resample); O(K^2) EMD per jet
             mbr_hat = model.map_or_mbr(xf, nx, draws=draws, **dec)
@@ -150,6 +155,25 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         metrics["dlund_mbr"] = float(np.nanmean(d_mbr)) if d_mbr else float("nan")
         metrics["mult_bias_mbr"] = float(np.mean(n_mbr_bias)) if n_mbr_bias else float("nan")
         metrics["mbr_backend"] = str(dec.get("mbr_backend", "pot"))
+
+    # Signed multiplicity bias stratified by true N: does the marginal-multiplicity bias
+    # (posterior-mean/median) survive in MBR, and does it vary with the true length?
+    tn = np.array(true_ns, dtype=int)
+    mean_arr, median_arr = np.array(n_mean_bias), np.array(n_median_bias)
+    mbr_arr = np.array(n_mbr_bias) if (want_mbr and n_mbr_bias) else None
+    mult_bias_by_N = {}
+    for label, lo, hi in _N_BINS:
+        sel = (tn >= lo) & (tn <= hi)
+        entry = {
+            "n_jets": int(sel.sum()),
+            "posterior_mean": float(mean_arr[sel].mean()) if sel.any() else float("nan"),
+            "posterior_median": float(median_arr[sel].mean()) if sel.any() else float("nan"),
+        }
+        if mbr_arr is not None:
+            entry["mbr"] = float(mbr_arr[sel].mean()) if sel.any() else float("nan")
+        mult_bias_by_N[label] = entry
+    metrics["mult_bias_by_N"] = mult_bias_by_N
+
     if verbose:
         print("\nclosure + calibration on held-out jets:")
         print(
@@ -177,6 +201,17 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
                 f"   multiplicity bias <n - n_true> = {metrics['mult_bias_mbr']:+.3f}"
                 f"   (floor-free; compare to posterior-mode / mean above)"
             )
+        print("  multiplicity signed bias stratified by true N (mean over jets in bin):")
+        head = f"    {'true N':>7} {'jets':>6} {'post-mean':>11} {'post-median':>12}"
+        if mbr_arr is not None:
+            head += f" {'MBR':>9}"
+        print(head)
+        for label, _lo, _hi in _N_BINS:
+            e = mult_bias_by_N[label]
+            row = f"    {label:>7} {e['n_jets']:>6} {e['posterior_mean']:>+11.3f} {e['posterior_median']:>+12.3f}"
+            if mbr_arr is not None:
+                row += f" {e['mbr']:>+9.3f}"
+            print(row)
     return metrics
 
 

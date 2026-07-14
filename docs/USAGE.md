@@ -86,12 +86,20 @@ never straddle train/val); otherwise it is a deterministic trailing split.
 
 ```bash
 h2p-rsd-junipr train model=ar_junipr_v1            # discrete cells only (no continuous coords)
+h2p-rsd-junipr train model=ar_junipr_v3            # v2 backbone + first-class multiplicity head q(N|x)
 h2p-rsd-junipr train model=cinn   encoder=lundnet  # conditional flow + graph encoder
 h2p-rsd-junipr train model=diffusion encoder=deepsets
 ```
 
-Models: `ar_junipr_v2` (recommended), `ar_junipr_v1`, `cinn`, `diffusion`.
+Models: `ar_junipr_v2` (recommended), `ar_junipr_v1`, `ar_junipr_v3`, `cinn`, `diffusion`.
 Encoders: `gru`, `lundnet`, `deepsets`.
+
+`ar_junipr_v3` is the v2 backbone with the length promoted to a first-class categorical
+`q(N|x)` head — the factorization `q(y|x)=q(N|x)·q(y|N,x)`. It is the same head cINN/diffusion
+carry; equivalently `model=ar_junipr_v2 model.use_multiplicity_head=true`. Use it when the MAP
+short-sequence collapse or the posterior multiplicity bias matters (it makes the length a
+calibrated marginal and gives an exact `length_pmf`); `ar_junipr_v2` (the default) stays
+bit-for-bit unchanged.
 
 ### Key knobs
 
@@ -223,6 +231,12 @@ closure + calibration on held-out jets:
   leading-emission Lund distance to true y :  identity(x) = 0.558   posterior-mode = 1.745
   multiplicity signed bias  <n - n_true>   :  identity(x) = -0.150   posterior-mean = +0.245   posterior-median = +0.180
   posterior 68% coverage of true leading cell = 0.42   (target ~0.68; <0.68 => over-confident)
+  multiplicity signed bias stratified by true N (mean over jets in bin):
+     true N   jets   post-mean  post-median
+        1-3     29      +2.517       +2.379
+        4-6     65      +0.990       +0.969
+       7-10     26      -1.325       -1.308
+        11+      0        +nan         +nan
 
 posterior calibration (SBC / PIT / coverage):
   SBC rank-uniformity chi^2 (10 bins) = 20.00   SBC mean rank = 0.437   PIT mean = 0.518
@@ -263,7 +277,19 @@ per-jet point estimate q_phi(y | x) for one validation jet:
 > Needs the `[mbr]` extra (`pot`); `decode.mbr_backend=energyflow` (the `[energyflow]` extra)
 > selects the same tree. MBR closure is O(K²) EMD solves per jet — shrink it with
 > `experiment.closure_jets` / `decode.mbr_n_candidates`. Off by default; the `map` path is
-> unchanged and imports no OT backend.
+> unchanged and imports no OT backend. When MBR is on, the per-N stratified table gains an
+> `MBR` column, so you can see whether the marginal-multiplicity bias survives into the MBR
+> estimate. If it does, `decode.mbr_resample_to_qn=true` reweights the candidate pool to the
+> calibrated `q(N|x)` marginal (decode-layer only — the likelihood is untouched); it is most
+> effective with a calibrated head (`ar_junipr_v3`, cINN, diffusion) and a no-op for
+> `ar_junipr_v2`.
+
+> **Per-N stratified multiplicity bias.** The closure suite always breaks the signed bias
+> `⟨n − n_true⟩` down by true multiplicity N (the table above), because a single scalar hides
+> the shape: a length-biased model is typically *positive* at low N and *negative* at high N
+> (regression toward the mean). This is the headline diagnostic for whether the posterior /
+> MBR multiplicity bias is real or just an averaging artifact, and for judging `ar_junipr_v3`
+> vs `ar_junipr_v2`. (Empty bins print `+nan` — no jets fell in that stratum.)
 
 What the metrics mean:
 - **leading-emission Lund distance** — how close the MAP's hardest splitting is to
@@ -399,11 +425,12 @@ mp_floored = model.map_estimate(xf, nx, min_emissions=eff)   # eff = max(1, ⌊Q
 print("learned floor:", eff, " MAP multiplicity:", mp_floored.multiplicity)
 ```
 
-`quantile=0` short-circuits to `base_floor` (today's behavior). For cINN/diffusion the
-`P(n|x)` is read exactly from the multiplicity head (the `mults` are ignored); for AR it
-is the histogram of `mults`. Or, end-to-end, just set
-`decode.length_floor_quantile=0.15` and the eval CLI / `predict` / `serve` path applies
-it automatically (the posterior draws those code paths already take are reused).
+`quantile=0` short-circuits to `base_floor` (today's behavior). For cINN/diffusion **and
+`ar_junipr_v3`** the `P(n|x)` is read exactly from the multiplicity head (the `mults` are
+ignored); for the implicit-length `ar_junipr_v2`/`v1` it is the histogram of `mults`. Or,
+end-to-end, just set `decode.length_floor_quantile=0.15` and the eval CLI / `predict` /
+`serve` path applies it automatically (the posterior draws those code paths already take
+are reused).
 
 **MBR point estimate (perturbative-Lund, floor-free).** Instead of the joint-mode MAP,
 select the drawn tree of least *expected* perturbative-Lund EMD to the posterior
@@ -428,6 +455,11 @@ print(mbr.pretty())
 # the reference backend gives the SAME selected tree (its value differs by a 1/R scale):
 mbr_ef = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="energyflow")
 assert [n.cell for n in mbr_ef.nodes] == [n.cell for n in mbr.nodes]
+
+# optional: correct the candidate pool's multiplicity marginal to the calibrated q(N|x)
+# (decode-layer only; meaningful with a calibrated head, e.g. ar_junipr_v3 / cinn / diffusion)
+mbr_q = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr",
+                         mbr_backend="pot", mbr_resample_to_qn=True)
 ```
 
 `pot` and `energyflow` agree on the *argmin* (the selected tree) but not the numeric scale

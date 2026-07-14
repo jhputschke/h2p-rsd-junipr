@@ -47,9 +47,9 @@ Adding/altering any field changes the hash for *new* runs; old checkpoints still
 the tolerant `decode_params()` / `OmegaConf.select` backfill.
 
 > **Three different `max_emissions`.** They are independent caps — don't confuse them:
-> `data.max_emissions` (synthetic *truth* length cap), `model.max_emissions` (cINN/diffusion
-> multiplicity-head width), and `decode.max_emissions` (beam/sample length cap). Each is
-> documented in its own section.
+> `data.max_emissions` (synthetic *truth* length cap), `model.max_emissions` (multiplicity-head
+> width for cINN / diffusion / `ar_junipr_v3`), and `decode.max_emissions` (beam/sample length
+> cap). Each is documented in its own section.
 
 ---
 
@@ -127,12 +127,12 @@ Per-encoder:
 
 ## 4. `model` — the posterior family
 
-The polymorphic group: `model=ar_junipr_v2|ar_junipr_v1|cinn|diffusion` binds a specific
-schema. All families expose the same `log_prob`/`sample`/`map_estimate` contract.
+The polymorphic group: `model=ar_junipr_v2|ar_junipr_v1|ar_junipr_v3|cinn|diffusion` binds a
+specific schema. All families expose the same `log_prob`/`sample`/`map_estimate` contract.
 `ctx_dim` is the context width the encoder must produce (the encoder is built with this as
 its output dim). Sources: [`models/`](../src/h2p_rsd_junipr/models/).
 
-### `ar_junipr_v2` (recommended) / `ar_junipr_v1`
+### `ar_junipr_v2` (recommended) / `ar_junipr_v1` / `ar_junipr_v3`
 
 Autoregressive RSD-JUNIPR: a 3-head decoder (continue/stop, cell, and — v2 only —
 continuous coordinates) over the parton tree.
@@ -148,9 +148,21 @@ continuous coordinates) over the parton tree.
 | `sigma_floor` | `1e-2` | floor added to the predicted std of the truncated-normal / normal coordinate densities (stability) |
 | `kappa_max` | `50.0` | cap on the von Mises concentration κ for the periodic ψ coordinate |
 | `cell_label_smoothing` | `0.0` | label smoothing on the split-head target; `0.0` keeps likelihood parity (a probe knob for the MAP collapse) |
+| `use_multiplicity_head` | `False` | **v3** ⇒ `True`: promote length to a first-class categorical `q(N\|x)` head (drops the continue/stop head); `False` keeps the implicit per-step continue/stop length model (bit-parity with today) |
+| `max_emissions` | `25` | multiplicity-head width (categorical over `n=0..max_emissions`); only used when `use_multiplicity_head=True` |
 
-`ar_junipr_v2` vs `ar_junipr_v1` is exactly `continuous_coords` True vs False — v1 drops
+**`ar_junipr_v2` vs `ar_junipr_v1`** is exactly `continuous_coords` True vs False — v1 drops
 the coordinate density and is the categorical-cell-only backbone.
+
+**`ar_junipr_v3`** is the v2 backbone with `use_multiplicity_head=True`: it factorizes
+`q(y|x) = q(N|x)·q(y|N,x)` with a dedicated categorical multiplicity head (the same head cINN
+and diffusion carry) instead of the implicit per-step continue/stop product. This makes the
+length a calibrated, low-dimensional marginal — killing the short-sequence MAP collapse at its
+source and giving `length_pmf` an *exact* `softmax(n_head(e))` (no sampler histogram). The kinematics
+(cells + coordinates) are the unchanged autoregressive JUNIPR heads, run for exactly `N` steps.
+The switch is a plain bool, so `model=ar_junipr_v3` and `model=ar_junipr_v2 model.use_multiplicity_head=true`
+are equivalent, and `False` (the default) leaves the model byte-identical to today (old AR
+checkpoints load unchanged). See [`docs/PLAN_MultHead.md`](PLAN_MultHead.md) and README_PHYSICS §"Length as a first-class factor".
 
 ### `cinn` — conditional normalizing flow
 
@@ -247,6 +259,7 @@ The serving layer reads the checkpoint's decode config. Source:
 | `mbr_norm` | `False` | MBR | energyflow weight normalisation; **off** keeps the imbalance term (empty-tree-never-wins) |
 | `mbr_periodic_phi` | `False` | MBR | wrap the ψ column (only with `mbr_coords=+psi`) |
 | `mbr_phi_col` | `-1` | MBR | ψ column index for the periodic wrap; `-1` = last coordinate |
+| `mbr_resample_to_qn` | `False` | MBR | reweight the candidate/support pool to the calibrated `q(N\|x)` marginal (decode-layer exposure-bias fix; `False` = plain mean risk) |
 
 `min_emissions`, `length_penalty`, and `length_floor_quantile` are explained in depth in
 §10; `point_estimator` / `mbr_*` — the whole second point-estimate family — are covered in
@@ -457,6 +470,19 @@ default) pulls neither and likelihood **parity stays dependency-free**. Reproduc
 collider-event EMD *verbatim* (hadronic coordinates, their `R`, `beta`, `norm`, `periodic_phi`)
 is a configuration you dial in through the `mbr_*` knobs — the defaults here are tuned for the
 Lund-plane application, not pinned to the paper.
+
+**`mbr_resample_to_qn` — the q(N|x) exposure-bias correction.** MBR candidates are ancestral
+draws, so the candidate pool inherits the sampler's marginal-multiplicity bias. With
+`mbr_resample_to_qn=True`, each support draw is importance-weighted by
+`q(N=|y^(k)| | x) / p_emp(N=|y^(k)|)` — the model's calibrated `length_pmf` over the draws'
+empirical multiplicity histogram — so the Monte-Carlo risk expectation matches the calibrated
+`q(N|x)` marginal. This is a **decode-layer** fix only: the trained likelihood is untouched
+(unlike minimum-risk / sequence fine-tuning, which would distort the ratio you want to preserve).
+It is most meaningful with a calibrated head (`ar_junipr_v3`, cINN, diffusion, where `length_pmf`
+is exact); for the implicit-length `ar_junipr_v2` the weights collapse to uniform (a no-op),
+since `length_pmf` there is the same draw histogram. Off by default. To *measure* whether the
+bias survives into MBR before switching it on, the closure suite prints the signed multiplicity
+bias of the MBR estimate **stratified by true N** (see USAGE closure output).
 
 ```bash
 # A/B the point estimator on a fixed checkpoint (floor-free, to see the collapse contrast)

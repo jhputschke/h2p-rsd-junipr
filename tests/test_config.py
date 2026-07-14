@@ -68,7 +68,8 @@ def test_decode_params_full():
                         "cont_temperature", "min_emissions", "length_penalty",
                         "length_floor_quantile", "point_estimator", "mbr_backend",
                         "mbr_n_candidates", "mbr_lnkt_cut", "mbr_weight", "mbr_coords",
-                        "mbr_R", "mbr_beta", "mbr_norm", "mbr_periodic_phi", "mbr_phi_col"}
+                        "mbr_R", "mbr_beta", "mbr_norm", "mbr_periodic_phi", "mbr_phi_col",
+                        "mbr_resample_to_qn"}
     assert dec["min_emissions"] == 1
     assert dec["length_floor_quantile"] == pytest.approx(0.0)
     assert dec["point_estimator"] == "map" and dec["mbr_backend"] == "pot"

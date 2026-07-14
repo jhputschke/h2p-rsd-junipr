@@ -9,6 +9,7 @@ from h2p_rsd_junipr.models.base import build_model
 MODELS = [
     ["model=ar_junipr_v2", "encoder=gru"],
     ["model=ar_junipr_v1", "encoder=gru"],
+    ["model=ar_junipr_v3", "encoder=gru"],
     ["model=cinn", "encoder=deepsets"],
     ["model=diffusion", "encoder=lundnet"],
 ]

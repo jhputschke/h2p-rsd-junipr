@@ -51,3 +51,44 @@ def ancestral_sample_cells(
     cells_np = cells.cpu().numpy()
     emitted_np = emitted.cpu().numpy()
     return [cells_np[k, emitted_np[k]].tolist() for k in range(K)]
+
+
+CellStep = Callable[[torch.Tensor, torch.Tensor, object], tuple]
+
+
+@torch.inference_mode()
+def ancestral_sample_cells_fixed_length(
+    step_cells: CellStep,
+    e: torch.Tensor,
+    h0,
+    start_token: int,
+    lengths,
+    device: torch.device,
+    cont_temperature: float = 1.0,
+) -> list[list[int]]:
+    """Draw one CELL chain per prescribed length, for ONE jet in parallel.
+
+    Companion to `ancestral_sample_cells` for the first-class factorization
+    q(y|x) = q(N|x) q(y|N,x): the caller has already drawn per-chain lengths
+    `lengths[k] = N_k ~ q(N|x)`, so there is NO continue/stop draw — chain `k`
+    emits cells while `t < N_k` and is inert afterwards. `step_cells(tok, e, h)
+    -> (split_logits (K, n_cells), h)` is the cont_head-free decoder step.
+    `cont_temperature` keeps the same softmax-temperature meaning on the cell logits."""
+    lengths_t = torch.as_tensor(list(lengths), dtype=torch.long, device=device)
+    K = int(lengths_t.shape[0])
+    L = int(lengths_t.max().item()) if K > 0 else 0
+    if K == 0 or L == 0:
+        return [[] for _ in range(K)]
+    tok = torch.full((K, 1), start_token, dtype=torch.long, device=device)
+    cells = torch.zeros(K, L, dtype=torch.long, device=device)
+    emitted = torch.arange(L, device=device).unsqueeze(0) < lengths_t.unsqueeze(1)  # (K, L)
+    h = h0
+    for t in range(L):
+        split_logits, h = step_cells(tok, e, h)  # (K, n_cells)
+        probs = F.softmax(split_logits / cont_temperature, dim=-1)
+        draw = torch.multinomial(probs, 1).squeeze(-1)
+        cells[:, t] = draw
+        tok = draw.unsqueeze(1)
+    cells_np = cells.cpu().numpy()
+    emitted_np = emitted.cpu().numpy()
+    return [cells_np[k, emitted_np[k]].tolist() for k in range(K)]

@@ -61,6 +61,7 @@ def mbr_kwargs_from_decode(decode: dict) -> dict:
         periodic_phi=bool(decode.get("mbr_periodic_phi", False)),
         phi_col=int(decode.get("mbr_phi_col", -1)),
         backend=str(decode.get("mbr_backend", "pot")),
+        resample_to_qn=bool(decode.get("mbr_resample_to_qn", False)),
     )
 
 
@@ -310,11 +311,41 @@ def lund_emd_matrix(clouds_C, clouds_S, *, R=8.485, beta=1.0, norm=False,
 
 
 # ---------------------------------------------------------------------------
+# q(N|x) exposure-bias correction (decode layer only)
+# ---------------------------------------------------------------------------
+def _qn_importance_weights(model, xf, nx, draws) -> np.ndarray:
+    """Importance weights over the support draws that reweight the empirical
+    posterior multiplicity marginal to the model's calibrated ``q(N|x)``:
+
+        w_k = q(N=|y^(k)| | x) / p_emp(N=|y^(k)|).
+
+    Corrects the Monte-Carlo risk's multiplicity marginal at the decoding layer
+    only — the trained likelihood is untouched (contrast: minimum-risk / sequence
+    fine-tuning). For a family without an explicit head, ``length_pmf`` reuses these
+    same draws, so ``p_emp == q(N|x)`` and the weights collapse to uniform (a no-op)."""
+    mults = np.array([len(d) for d in draws], dtype=int)
+    K = len(mults)
+    if K == 0:
+        return np.ones(0, dtype=float)
+    pmf = np.asarray(model.length_pmf(xf, nx, mults=mults.tolist()), dtype=float)
+    p_emp = np.bincount(mults) / K
+    w = np.array(
+        [(float(pmf[n]) if n < pmf.size else 0.0) / p_emp[n] if p_emp[n] > 0 else 0.0
+         for n in mults],
+        dtype=float,
+    )
+    if w.sum() <= 0:  # calibrated pmf disjoint from the draws -> fall back to uniform
+        return np.ones(K, dtype=float)
+    return w
+
+
+# ---------------------------------------------------------------------------
 # The estimator
 # ---------------------------------------------------------------------------
 def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
                lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
-               norm=False, periodic_phi=False, phi_col=-1, backend="pot"):
+               norm=False, periodic_phi=False, phi_col=-1, backend="pot",
+               resample_to_qn=False):
     """Sampling-based MBR (Eikema & Aziz, EMNLP 2022): pick the drawn tree of least
     mean perturbative-Lund EMD to the ``K`` draws.
 
@@ -323,7 +354,9 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     = the model's joint log-density of the selected tree. ``draws`` are reused when
     given (no resample — same pattern as ``learned_min_emissions(..., mults=)``);
     ``n_candidates>0`` shrinks the candidate set ``C`` (asymmetric MBR) while the
-    expectation still runs over all ``K`` draws."""
+    expectation still runs over all ``K`` draws. ``resample_to_qn=True`` reweights the
+    support to the calibrated ``q(N|x)`` marginal (``_qn_importance_weights``), an
+    opt-in decode-layer exposure-bias correction; off keeps the plain mean risk."""
     if draws is None:
         draws = model.sample_batch(xf, nx, n_samples)
     K = len(draws)
@@ -341,7 +374,11 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     clouds_C = [clouds_S[i] for i in cand_idx]
     D = lund_emd_matrix(clouds_C, clouds_S, R=R, beta=beta, norm=norm,
                         periodic_phi=periodic_phi, phi_col=phi_col, backend=backend, geom=geom)
-    risk = D.mean(axis=1)
+    if resample_to_qn:  # match the support's multiplicity marginal to calibrated q(N|x)
+        w = _qn_importance_weights(model, xf, nx, draws)
+        risk = (D * w[None, :]).sum(axis=1) / w.sum()
+    else:
+        risk = D.mean(axis=1)
     best = int(np.argmin(risk))
     winner = draws[cand_idx[best]]
     pe = model.describe_cells(xf, nx, winner)  # genuine drawn tree -> LundPointEstimate
