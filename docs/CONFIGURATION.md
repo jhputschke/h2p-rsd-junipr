@@ -94,6 +94,10 @@ run_root: runs/mbr_study
 h2p-rsd-junipr train base=presets/mbr_study.yaml optim.lr=1e-3
 ```
 
+That exact pair ships in the repo — [`presets/mbr_study.yaml`](../presets/mbr_study.yaml) with
+its group file [`presets/decode/mbr_study.yaml`](../presets/decode/mbr_study.yaml) — as a
+working template to copy.
+
 It is layered **over** `configs/config.yaml`, so unlisted groups keep the repo default, and
 its directory becomes a group-file root searched **before** `configs/` — a `presets/<group>/`
 subdir can add new names or shadow existing ones while everything else is inherited. Only the

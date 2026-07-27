@@ -2,7 +2,9 @@ import pytest
 from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError, ValidationError
 
-from h2p_rsd_junipr.config import config_hash, decode_params, load_config
+from h2p_rsd_junipr.config import CONFIGS, config_hash, decode_params, load_config
+
+PRESETS = CONFIGS.parent / "presets"
 
 
 def test_defaults_load():
@@ -124,6 +126,19 @@ def test_base_file_cannot_pick_the_model_family_inline(tmp_path):
     half-applied family) — documented in CONFIGURATION.md §0."""
     base = _write(tmp_path / "my_config.yaml", "model:\n  name: cinn\n")
     assert load_config([f"base={base}"]).model.name == "ar_junipr_v2"
+
+
+def test_shipped_preset_loads():
+    """presets/mbr_study.yaml is the template CONFIGURATION.md §0 points at — keep it valid
+    (a renamed decode/model field must not leave the documented example broken)."""
+    cfg = load_config([f"base={PRESETS / 'mbr_study.yaml'}"])
+    assert cfg.model.name == "ar_junipr_v3" and cfg.model.use_multiplicity_head is True
+    assert cfg.encoder.name == "lundnet"
+    dec = decode_params(cfg)
+    assert dec["point_estimator"] == "mbr" and dec["mbr_backend"] == "pot"
+    assert dec["mbr_lnkt_cut"] == pytest.approx(cfg.geometry.ln_kt_range[0])  # interpolated
+    assert cfg.model.dec_dim == 128            # inline override
+    assert cfg.model.max_emissions == 25       # from configs/model/ar_junipr_v3.yaml
 
 
 def test_missing_base_file_raises(tmp_path):
