@@ -77,10 +77,17 @@ cross-group setup a single group file cannot express:
 
 ```yaml
 # presets/mbr_study.yaml — only what differs from configs/config.yaml
-defaults:
+defaults:                  # picks WHICH group files to load
   model: ar_junipr_v3
   encoder: lundnet
   decode: mbr_study        # resolved from presets/decode/ first, then configs/decode/
+
+model:                     # sets VALUES — a patch, like a group file, no file needed
+  dec_dim: 128
+optim:
+  lr: 1.0e-3
+geometry:                  # a group you did not re-select can be tuned too
+  n_bins: 16
 run_root: runs/mbr_study
 ```
 ```bash
@@ -91,11 +98,25 @@ It is layered **over** `configs/config.yaml`, so unlisted groups keep the repo d
 its directory becomes a group-file root searched **before** `configs/` — a `presets/<group>/`
 subdir can add new names or shadow existing ones while everything else is inherited. Only the
 **first** match is loaded, so a shadowing file replaces the repo file of the same name rather
-than merging on top of it. CLI tokens still win. Precedence, per field:
+than merging on top of it.
+
+Every top-level block other than `defaults:` is deep-merged into the config as a **value
+override**, schema-checked like everything else (`optim: {lrr: …}` fails at load, and
+`dec_dim` under a `model: cinn` preset fails as `Key 'dec_dim' not in 'CINNConfig'`). Untouched
+fields keep the group file's value, so the block above still gets `optim.weight_decay` from
+`configs/optim/default.yaml`. A `defaults:` block is optional. CLI tokens still win. Precedence,
+per field:
 
 ```
-dataclass default → the winning <group>/<name>.yaml (base dir before configs/) → CLI a.b=v
+dataclass default → the winning <group>/<name>.yaml (base dir before configs/)
+                  → inline block in the base file → CLI a.b=v
 ```
+
+> **Pick families through `defaults:`, never inline.** `model: {name: cinn}` in a base file is
+> silently ignored — `cfg.model.name` is re-set from the selector after the merge. An inline
+> `encoder: {name: deepsets}` is worse: it changes which class `build_encoder` constructs while
+> the schema stays bound to the *selector's* encoder, so you get one encoder's knobs on another's
+> implementation. Selector picks the family; inline blocks tune values.
 
 > **Three different `max_emissions`.** They are independent caps — don't confuse them:
 > `data.max_emissions` (synthetic *truth* length cap), `model.max_emissions` (multiplicity-head

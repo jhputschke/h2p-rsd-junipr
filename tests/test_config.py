@@ -85,6 +85,47 @@ def test_cli_still_beats_the_base_file(tmp_path):
     assert cfg.trainer.max_epochs == 7               # dotted override merged last
 
 
+def test_base_file_inline_group_overrides(tmp_path):
+    """Top-level blocks other than `defaults:` are value overrides: a patch on the group
+    file, merged after it and before the CLI. Pins the behaviour of the globals merge."""
+    base = _write(tmp_path / "my_config.yaml", """
+defaults:
+  model: ar_junipr_v3
+  encoder: lundnet
+model:
+  dec_dim: 128
+optim:
+  lr: 1.0e-3
+geometry:
+  n_bins: 16
+""")
+    cfg = load_config([f"base={base}"])
+    assert cfg.model.dec_dim == 128
+    assert cfg.model.use_multiplicity_head is True     # group file still applied underneath
+    assert cfg.optim.lr == pytest.approx(1e-3)
+    assert cfg.optim.weight_decay == pytest.approx(3e-4)  # untouched field keeps the group value
+    assert cfg.geometry.n_bins == 16                   # a group not re-selected can be tuned
+    assert cfg.encoder.k == 4                          # configs/encoder/lundnet.yaml untouched
+    # the CLI is merged last
+    assert load_config([f"base={base}", "optim.lr=5e-4"]).optim.lr == pytest.approx(5e-4)
+
+
+def test_base_file_inline_overrides_are_schema_checked(tmp_path):
+    bad_key = _write(tmp_path / "bad_key.yaml", "optim:\n  lrr: 1.0e-3\n")
+    wrong_family = _write(tmp_path / "wrong_family.yaml",
+                          "defaults:\n  model: cinn\nmodel:\n  dec_dim: 128\n")
+    for path in (bad_key, wrong_family):
+        with pytest.raises(ConfigKeyError):
+            load_config([f"base={path}"])
+
+
+def test_base_file_cannot_pick_the_model_family_inline(tmp_path):
+    """`model.name` is re-set from the selector, so an inline name is a no-op (not a
+    half-applied family) — documented in CONFIGURATION.md §0."""
+    base = _write(tmp_path / "my_config.yaml", "model:\n  name: cinn\n")
+    assert load_config([f"base={base}"]).model.name == "ar_junipr_v2"
+
+
 def test_missing_base_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_config([f"base={tmp_path / 'nope.yaml'}"])
