@@ -30,7 +30,9 @@ Config is **OmegaConf** (no Hydra). Two kinds of CLI token:
 
 - **Group selectors** `group=name` pick a YAML file from `configs/<group>/<name>.yaml`
   and (for `model`/`encoder`) bind a specific schema. Groups:
-  `geometry data model encoder optim trainer decode experiment`.
+  `geometry data model encoder optim trainer decode experiment`. A name with no matching
+  file is a **hard error** (`FileNotFoundError`, listing what is available) — silently
+  falling back to the schema defaults would turn `model=ar_junipr_v3` into a plain v2.
 - **Dotted overrides** `a.b.c=value` set an individual field. Everything is
   **type-checked against the schema** and **unknown keys are rejected at load** (a typo
   like `optim.lrr=1e-3` fails immediately, not three hours in).
@@ -45,6 +47,80 @@ The resolved config is hashed (`config_hash`, 10 chars) into the run-dir name an
 in every checkpoint, so the architecture is reproducible and resume refuses silent drift.
 Adding/altering any field changes the hash for *new* runs; old checkpoints still load via
 the tolerant `decode_params()` / `OmegaConf.select` backfill.
+
+### Custom setups without a long CLI chain
+
+Two ways to keep a run configuration in YAML instead of retyping overrides.
+
+**Your own group file.** Every group YAML is a *patch* on the dataclass defaults, not a full
+config — write only the fields you change, drop it in `configs/<group>/`, and select it:
+
+```yaml
+# configs/decode/mbr_study.yaml
+point_estimator: mbr
+mbr_backend: pot
+mbr_lnkt_cut: ${geometry.ln_kt_range[0]}   # interpolation across groups works
+beam_width: 16
+```
+```bash
+h2p-rsd-junipr train decode=mbr_study decode.beam_width=4   # CLI still wins per field
+```
+
+The file may only contain that group's own fields (`optim:` inside an `experiment/` file is
+rejected), lists replace wholesale, and interpolations resolve *after* the CLI, so
+`data.max_emissions=12` propagates into a `${data.max_emissions}` reference. `model` and
+`encoder` are polymorphic: a new file there also needs an entry in `MODEL_SCHEMA` /
+`ENCODER_SCHEMA` (and, for a model, a name in `@register_model`).
+
+**A custom top-level config, `base=<path>`.** Selects several groups at once — the
+cross-group setup a single group file cannot express:
+
+```yaml
+# presets/mbr_study.yaml — only what differs from configs/config.yaml
+defaults:                  # picks WHICH group files to load
+  model: ar_junipr_v3
+  encoder: lundnet
+  decode: mbr_study        # resolved from presets/decode/ first, then configs/decode/
+
+model:                     # sets VALUES — a patch, like a group file, no file needed
+  dec_dim: 128
+optim:
+  lr: 1.0e-3
+geometry:                  # a group you did not re-select can be tuned too
+  n_bins: 16
+run_root: runs/mbr_study
+```
+```bash
+h2p-rsd-junipr train base=presets/mbr_study.yaml optim.lr=1e-3
+```
+
+That exact pair ships in the repo — [`presets/mbr_study.yaml`](../presets/mbr_study.yaml) with
+its group file [`presets/decode/mbr_study.yaml`](../presets/decode/mbr_study.yaml) — as a
+working template to copy.
+
+It is layered **over** `configs/config.yaml`, so unlisted groups keep the repo default, and
+its directory becomes a group-file root searched **before** `configs/` — a `presets/<group>/`
+subdir can add new names or shadow existing ones while everything else is inherited. Only the
+**first** match is loaded, so a shadowing file replaces the repo file of the same name rather
+than merging on top of it.
+
+Every top-level block other than `defaults:` is deep-merged into the config as a **value
+override**, schema-checked like everything else (`optim: {lrr: …}` fails at load, and
+`dec_dim` under a `model: cinn` preset fails as `Key 'dec_dim' not in 'CINNConfig'`). Untouched
+fields keep the group file's value, so the block above still gets `optim.weight_decay` from
+`configs/optim/default.yaml`. A `defaults:` block is optional. CLI tokens still win. Precedence,
+per field:
+
+```
+dataclass default → the winning <group>/<name>.yaml (base dir before configs/)
+                  → inline block in the base file → CLI a.b=v
+```
+
+> **Pick families through `defaults:`, never inline.** `model: {name: cinn}` in a base file is
+> silently ignored — `cfg.model.name` is re-set from the selector after the merge. An inline
+> `encoder: {name: deepsets}` is worse: it changes which class `build_encoder` constructs while
+> the schema stays bound to the *selector's* encoder, so you get one encoder's knobs on another's
+> implementation. Selector picks the family; inline blocks tune values.
 
 > **Three different `max_emissions`.** They are independent caps — don't confuse them:
 > `data.max_emissions` (synthetic *truth* length cap), `model.max_emissions` (multiplicity-head

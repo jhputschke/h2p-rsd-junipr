@@ -196,6 +196,7 @@ def main(argv=None) -> int:
             "  serve      FastAPI: x -> {MAP, posterior summary}\n\n"
             "example:\n"
             "  h2p-rsd-junipr train model=ar_junipr_v2 encoder=gru trainer.max_epochs=20\n"
+            "  h2p-rsd-junipr train base=presets/mbr_study.yaml   # custom top-level config\n"
         )
         return 0
     cmd, rest = argv[0], argv[1:]

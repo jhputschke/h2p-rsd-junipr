@@ -217,6 +217,35 @@ def _register_resolvers() -> None:
         OmegaConf.register_new_resolver("sq", lambda x: x * x)
 
 
+def _pop_base(argv: list[str]) -> tuple[Path | None, list[str]]:
+    """Split out an optional `base=<path>` token — a custom top-level config file
+    (own `defaults:` block + globals). Last one wins; everything else passes through."""
+    base_path: Path | None = None
+    rest: list[str] = []
+    for tok in argv:
+        if tok.startswith("base="):
+            base_path = Path(tok.split("=", 1)[1]).expanduser().resolve()
+        else:
+            rest.append(tok)
+    return base_path, rest
+
+
+def _group_file(roots: tuple[Path, ...], group: str, name: str) -> Path:
+    """First `<root>/<group>/<name>.yaml` that exists, custom roots before `configs/`.
+
+    A missing file is a hard error: silently falling back to the schema defaults turns
+    e.g. `model=ar_junipr_v3` into a plain v2 with no warning."""
+    for root in roots:
+        path = root / group / f"{name}.yaml"
+        if path.exists():
+            return path
+    avail = sorted({p.stem for root in roots for p in (root / group).glob("*.yaml")})
+    raise FileNotFoundError(
+        f"no {group} config {name!r} in {[str(r / group) for r in roots]}"
+        + (f"; available: {avail}" if avail else "")
+    )
+
+
 def _split_args(argv: list[str], groups: tuple[str, ...]):
     """Partition CLI tokens into group selectors (group=name) and dotted value
     overrides (a.b.c=value)."""
@@ -236,10 +265,22 @@ def _split_args(argv: list[str], groups: tuple[str, ...]):
 def load_config(argv: list[str] | None = None) -> DictConfig:
     """Compose the validated, struct-mode run config: base selectors + globals,
     CLI group picks, per-group YAML, then dotted value overrides. Every merge is
-    type-checked against the schema and rejects unknown keys."""
+    type-checked against the schema and rejects unknown keys.
+
+    `base=<path>` layers a custom top-level config file over `configs/config.yaml`
+    (it need only list what it changes) and adds its own directory as a group-file
+    root, searched before `configs/` — so a custom tree can shadow `<group>/<name>.yaml`
+    while inheriting every file it does not ship."""
     _register_resolvers()
     argv = list(argv or [])
+    base_path, argv = _pop_base(argv)
     base = OmegaConf.load(CONFIGS / "config.yaml")          # selectors + globals
+    roots: tuple[Path, ...] = (CONFIGS,)
+    if base_path is not None:
+        if not base_path.is_file():
+            raise FileNotFoundError(f"base config not found: {base_path}")
+        base = OmegaConf.merge(base, OmegaConf.load(base_path))
+        roots = tuple(dict.fromkeys((base_path.parent, CONFIGS)))
     selectors_cli, dotlist = _split_args(argv, GROUPS)
     selectors = OmegaConf.merge(base.defaults, selectors_cli)   # CLI picks override base
 
@@ -251,9 +292,7 @@ def load_config(argv: list[str] | None = None) -> DictConfig:
         name = selectors.get(group)
         if name is None:
             continue
-        path = CONFIGS / group / f"{name}.yaml"
-        if path.exists():
-            cfg[group] = OmegaConf.merge(cfg[group], OmegaConf.load(path))
+        cfg[group] = OmegaConf.merge(cfg[group], OmegaConf.load(_group_file(roots, group, name)))
 
     # global top-level fields (everything in base except the defaults block)
     globals_ = {k: v for k, v in OmegaConf.to_container(base).items() if k != "defaults"}

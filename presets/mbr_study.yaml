@@ -1,0 +1,33 @@
+# Custom top-level config (`base=`) — the MBR point-estimator study.
+#
+#   h2p-rsd-junipr train base=presets/mbr_study.yaml
+#   h2p-rsd-junipr train base=presets/mbr_study.yaml trainer=fast_dev data.n_jets=256   # smoke
+#
+# Layered over configs/config.yaml, so any group not named below keeps the repo
+# default (geometry, data, experiment here). `presets/` is searched for group files
+# before `configs/`, which is how `decode: mbr_study` finds presets/decode/mbr_study.yaml.
+# See docs/CONFIGURATION.md §0.
+
+defaults:                 # which group FILES to load
+  model: ar_junipr_v3     # first-class q(N|x) head — decode.mbr_resample_to_qn is a
+                          # no-op without one (v2's length_pmf is the draw histogram)
+  encoder: lundnet
+  trainer: default
+  decode: mbr_study       # presets/decode/mbr_study.yaml — no such file in configs/
+
+model:                    # VALUE overrides — a patch on configs/model/ar_junipr_v3.yaml;
+  dec_dim: 128            # fields left out (max_emissions, sigma_floor, …) keep its values
+  dec_layers: 2
+
+encoder:
+  num_layers: 5           # deeper LundNet; `k: 4` still comes from configs/encoder/lundnet.yaml
+
+optim:
+  lr: 1.0e-3
+  eta_min: 1.0e-4
+
+trainer:
+  max_epochs: 40
+  batch_size: 128
+
+run_root: runs/mbr_study

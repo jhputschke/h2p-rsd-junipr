@@ -1,0 +1,19 @@
+# Group file selected by presets/mbr_study.yaml as `decode: mbr_study`. Like every
+# group YAML it is a patch on DecodeConfig — beam_width, topk_cells, cont_temperature
+# and the other unlisted fields keep their schema defaults.
+# Field-by-field meaning: docs/CONFIGURATION.md §7 and §10.
+
+point_estimator: mbr
+mbr_backend: pot                            # self-contained; `pip install -e ".[mbr]"`
+mbr_lnkt_cut: ${geometry.ln_kt_range[0]}    # metric support follows the grid, not a second constant
+mbr_weight: kt                              # IRC-safe Lund-cloud weights (the KMT choice)
+mbr_coords: lnDR_lnkt
+mbr_R: 8.485                                # ≈ Lund-plane diameter — rescale if geometry changes
+mbr_beta: 1.0                               # 1-Wasserstein EMD
+mbr_resample_to_qn: true                    # reweight the support to the calibrated q(N|x)
+n_posterior_samples: 500                    # MBR reuses these draws; no extra sampling
+
+# min_emissions stays at its default 1: MBR never reads it (the imbalance penalty already
+# rules out the empty tree), it only floors the MAP series the closure suite reports
+# alongside. For the floor-free contrast, A/B it on the CLI instead:
+#   h2p-rsd-junipr eval runs/<id>/best.ckpt decode.point_estimator=map decode.min_emissions=0
