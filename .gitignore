@@ -15,6 +15,7 @@ venv/
 runs/
 *.root
 !cpp/test_data/jets.root
+!cpp/test_data/jets_aux.root
 *.pt
 cache/
 data_cache/
