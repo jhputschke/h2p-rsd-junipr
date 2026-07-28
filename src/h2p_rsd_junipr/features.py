@@ -27,6 +27,8 @@ N_NODE_FEAT = 5
 # when the jet spectrum changes.
 MG_EPS = 1e-3   # GeV; a single-prong groomed jet has m_g == 0 exactly -> log floor
 PT_REF = 100.0  # GeV; ln(pt/PT_REF) centres the scale feature on the card's pTHatMin
+ETA_REF = 2.0   # the standard |y| acceptance; a FIXED constant, never read from data,
+#                 so |eta|/ETA_REF means the same thing across samples and checkpoints
 
 # Source RNTuple columns each aux feature reads. Used to fail loud, early, with a
 # message naming the missing column rather than a NaN surfacing 200 epochs later.
@@ -34,6 +36,15 @@ AUX_SOURCES: dict[str, tuple[str, ...]] = {
     "ln_mg_pt": ("x_mg", "jet_pt"),
     "nsec": ("x_nsec",),
     "ln_pt": ("jet_pt",),
+    # --- groomed momentum, the in-scope partner of ln_mg_pt ---
+    "ln_ptg_pt": ("x_ptg", "jet_pt"),
+    # --- jet-level context ---
+    "abs_eta": ("jet_eta",),
+    # --- secondary-plane KINEMATICS (gate on has_sec; see AUX_FEATURES) ---
+    "has_sec": ("x_nsec",),
+    "ln_kt_sec": ("x_kt_sec_max", "x_nsec"),
+    "ln_kt_sec_sum": ("x_kt_sec_sum", "x_nsec"),
+    "sec_depth": ("x_sec_attach", "x_nsec"),
 }
 
 
@@ -61,6 +72,31 @@ def _nsec(jet: dict) -> float:
     return nsec
 
 
+def _ptg(jet: dict) -> float:
+    ptg = _finite(jet, "x_ptg")
+    if ptg <= 0.0:
+        raise ValueError(f"aux feature needs x_ptg > 0, got {ptg!r}")
+    return ptg
+
+
+def _sec(jet: dict, name: str) -> float:
+    """A secondary-plane quantity, validated and gated on `x_nsec`.
+
+    When `x_nsec == 0` the C++ side writes 0 and the value is UNDEFINED, not measured —
+    return 0 so the log1p transform maps it to exactly 0 and `has_sec` carries the
+    distinction. When there IS a secondary the value must be a real non-negative number;
+    a sentinel or a missing column raises, as everywhere else."""
+    if _nsec(jet) == 0:
+        return 0.0
+    value = _finite(jet, name)
+    if value < 0.0:  # -1 is the reader's "column absent" sentinel
+        raise ValueError(
+            f"aux feature needs {name} >= 0, got {value!r} (-1 is the sentinel for a "
+            "jets.root written before the aux columns existed)"
+        )
+    return value
+
+
 def _finite(jet: dict, name: str) -> float:
     if name not in jet:
         raise ValueError(
@@ -82,6 +118,35 @@ AUX_FEATURES = {
     "nsec": lambda j: math.log1p(_nsec(j)),
     # the scale anchor; already written per jet, never previously read.
     "ln_pt": lambda j: math.log(_jet_pt(j) / PT_REF),
+    # ln(pt_g / pt): how much MOMENTUM grooming removed. The in-scope partner of
+    # ln_mg_pt, and deliberately not the mass-drop ratio ln(m_g/m): combined with
+    # ln_mg_pt that would be an invertible reparameterization giving the encoder
+    # ln(m/pt) -- the UNGROOMED mass, which grooming-first design excludes. With
+    # ln_pt this instead yields ln(pt_g), a groomed quantity. Negative, ~0 when
+    # grooming removed nothing.
+    "ln_ptg_pt": lambda j: math.log(min(_ptg(j) / _jet_pt(j), 1.0)),
+    # |eta| / 2 (the standard acceptance). At fixed pt the quark/gluon fraction varies
+    # strongly with rapidity (valence PDFs -> forward jets are quark-enriched), and the
+    # posterior over y is implicitly a flavour mixture. NOTE this is a PRIOR handle, not
+    # a measurement one: it works by telling the model which mixture it is in, so it
+    # carries more generator-composition dependence than the groomed observables.
+    "abs_eta": lambda j: abs(_finite(j, "jet_eta")) / ETA_REF,
+    # --- secondary-plane kinematics -------------------------------------------------
+    # These are UNDEFINED when there is no off-spine splitting (82.6% of the reference
+    # sample), so they ship with an explicit presence indicator and take a neutral 0 when
+    # absent. `has_sec` lets the encoder gate them instead of reading 0 as a measurement;
+    # log1p is used precisely so "absent" maps to 0 and any real value is bounded away
+    # from it (kt >= kt_floor => log1p(kt) >= log(1 + kt_floor)).
+    "has_sec": lambda j: 1.0 if _nsec(j) > 0 else 0.0,
+    # hardest off-spine splitting: separates ONE hard secondary prong (a genuinely
+    # three-pronged jet) from several soft ones -- same n_sec, different physics.
+    "ln_kt_sec": lambda j: math.log1p(_sec(j, "x_kt_sec_max")),
+    # total off-spine hardness; differs from the above only when n_sec > 1.
+    "ln_kt_sec_sum": lambda j: math.log1p(_sec(j, "x_kt_sec_sum")),
+    # which primary node the hardest secondary hangs off (0 == the widest-angle
+    # splitting). A secondary off the first emission is a different topology from one
+    # deep in the shower.
+    "sec_depth": lambda j: math.log1p(_sec(j, "x_sec_attach")),
 }
 
 

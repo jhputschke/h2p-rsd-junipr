@@ -47,8 +47,15 @@ def load_rntuple(path: str = "jets.root", ntuple: str = "Jets"):
                 kt_floor=float(scalar("kt_floor", i, float("nan"))),
                 # aux conditioning sources (sentinels when the columns are absent)
                 jet_pt=float(scalar("jet_pt", i, float("nan"))),
+                jet_eta=float(scalar("jet_eta", i, float("nan"))),
                 x_mg=float(scalar("x_mg", i, float("nan"))),
+                x_ptg=float(scalar("x_ptg", i, float("nan"))),
                 x_nsec=int(scalar("x_nsec", i, -1)),
+                # secondary-plane kinematics: 0 is a LEGITIMATE value ("no secondary"),
+                # so the absent-column sentinel has to be negative, not 0 or NaN.
+                x_kt_sec_max=float(scalar("x_kt_sec_max", i, -1.0)),
+                x_kt_sec_sum=float(scalar("x_kt_sec_sum", i, -1.0)),
+                x_sec_attach=int(scalar("x_sec_attach", i, -1)),
                 x=(seq("x_lnInvDelta", i), seq("x_lnkt", i), seq("x_lnz", i), seq("x_psi", i)),
                 y=(seq("y_lnInvDelta", i), seq("y_lnkt", i), seq("y_lnz", i), seq("y_psi", i)),
             )

@@ -11,6 +11,7 @@
 #include "fastjet/ClusterSequence.hh"
 #include "fastjet/JetDefinition.hh"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
@@ -80,6 +81,20 @@ static std::uint32_t refCountAll(const fastjet::PseudoJet& jet,
     n += refCountAll(d.softer(), lund, g);      // ...and everything inside the softer prong
   }
   return n;
+}
+
+// Same independent construction for the hardest OFF-SPINE kt. `on_spine` is true only at
+// the top level: everything reached through a `softer()` prong is secondary by definition.
+static double refSecKtMax(const fastjet::PseudoJet& jet,
+                          const fastjet::contrib::LundGenerator& lund,
+                          const h2p::GroomParams& g, bool on_spine) {
+  double best = 0.0;
+  for (const fastjet::contrib::LundDeclustering& d : lund(jet)) {
+    if (!h2p::passesGroom(d.Delta(), d.kt(), d.z(), g)) continue;
+    if (!on_spine) best = std::max(best, d.kt());
+    best = std::max(best, refSecKtMax(d.softer(), lund, g, false));
+  }
+  return best;
 }
 
 int main() {
@@ -152,6 +167,19 @@ int main() {
   CHECK(a3.n_all > a3.n_primary, "hard secondary splitting -> n_all > n_primary");
   CHECK(a3.mg > 0.0f, "resolved two-prong substructure -> m_g > 0");
 
+  // groomed pt (the ln(pt_g/pt) aux source): nothing is dropped in this fixture
+  CHECK(a3.ptg > 0.0f, "groomed pt is positive");
+  CHECK(a3.ptg <= static_cast<float>(three.pt()) + 1e-3f, "pt_g <= ungroomed jet pt");
+  CHECK(std::abs(a3.ptg - static_cast<float>(three.pt())) < 1e-2f,
+        "nothing groomed away -> pt_g == pt");
+
+  // secondary KINEMATICS, not just the count: the b/c splitting is the only off-spine
+  // one, so kt_max == kt_sum, and it hangs off primary node 0 (the a/bc splitting).
+  CHECK(a3.kt_sec_max > 0.0f, "hard secondary -> kt_sec_max > 0");
+  CHECK(std::abs(a3.kt_sec_max - a3.kt_sec_sum) < 1e-3f,
+        "single secondary -> kt_sec_max == kt_sec_sum");
+  CHECK(a3.sec_attach == 0, "the secondary hangs off primary node 0");
+
   // Raising z_cut can only remove splittings and momentum: both are weakly decreasing.
   h2p::GroomParams tight = g;
   tight.z_cut = 0.4;
@@ -160,10 +188,17 @@ int main() {
   CHECK(a3_tight.mg <= a3.mg, "raising z_cut weakly decreases m_g");
 
   // Nothing survives grooming -> the jet is its hard prong: massless, no splittings.
-  const h2p::JetAux a_groomed = h2p::fullLundAux(pairJet(100.0, 5.0, 0.3), g);
+  const fastjet::PseudoJet dropped = pairJet(100.0, 5.0, 0.3);
+  const h2p::JetAux a_groomed = h2p::fullLundAux(dropped, g);
   CHECK(a_groomed.n_all == 0, "fully-groomed jet -> n_all == 0");
   CHECK(a_groomed.mg == 0.0f, "fully-groomed jet (massless prong) -> m_g == 0");
   CHECK(a_groomed.n_primary == 0, "fully-groomed jet -> n_primary == 0");
+  CHECK(a_groomed.kt_sec_max == 0.0f && a_groomed.kt_sec_sum == 0.0f,
+        "no secondary -> kt_sec_* are 0 (undefined, gate on n_sec)");
+  // the soft prong was dropped, so pt_g is the hard prong alone -- strictly below pt
+  CHECK(a_groomed.ptg < static_cast<float>(dropped.pt()) - 1.0f,
+        "grooming removed momentum -> pt_g < pt");
+  CHECK(std::abs(a_groomed.ptg - 100.0f) < 1.0f, "pt_g == the surviving hard prong");
 
   // The four fixtures above are shallow by construction. Real jets have deep, wide C/A
   // trees, which is where a spine/predicate drift would actually show up — so replay the
@@ -186,11 +221,16 @@ int main() {
     ens_order = ens_order && (a.n_all >= a.n_primary);
     // grooming only ever REMOVES momentum, so the groomed mass cannot exceed the jet's
     ens_mass = ens_mass && (a.mg <= static_cast<float>(jet.m()) + 1e-3f);
+    // grooming only removes momentum, and the secondary summaries stay self-consistent
+    ens_mass = ens_mass && (a.ptg <= static_cast<float>(jet.pt()) + 1e-2f);
+    ens_mass = ens_mass && (a.kt_sec_sum >= a.kt_sec_max - 1e-3f);
+    ens_mass = ens_mass && ((a.n_all > a.n_primary) == (a.kt_sec_max > 0.0f));
+    ens_mass = ens_mass && (a.n_primary == 0 || a.sec_attach < a.n_primary);
     if (a.n_all > a.n_primary) ++n_with_secondary;
   }
   CHECK(ens_primary, "n_primary == primaryLund size on 200 deep 31-particle jets");
   CHECK(ens_order, "n_all >= n_primary on the ensemble");
-  CHECK(ens_mass, "m_g <= ungroomed jet mass on the ensemble");
+  CHECK(ens_mass, "m_g/pt_g bounded + secondary summaries self-consistent on the ensemble");
   CHECK(n_with_secondary > 20, "the ensemble actually exercises secondary planes");
 
   // Cross-check the traversal against the independent LundGenerator-based reference,
@@ -213,11 +253,13 @@ int main() {
       const h2p::JetAux a = h2p::fullLundAux(jet, gg);
       const std::uint32_t ref = refCountAll(jet, lund, gg);
       ens_ref = ens_ref && (a.n_all == ref);
+      // ...and the secondary hardness, against the same independent construction
+      ens_ref = ens_ref && (std::abs(a.kt_sec_max - refSecKtMax(jet, lund, gg, true)) < 1e-3);
       ref_total += ref;
       off_spine_total += a.n_all - a.n_primary;
     }
   }
-  CHECK(ens_ref, "n_all matches the independent LundGenerator-based count exactly");
+  CHECK(ens_ref, "n_all AND kt_sec_max match the independent LundGenerator construction");
   CHECK(off_spine_total > 0, "the count genuinely leaves the hardest branch (n_sec > 0 somewhere)");
   std::printf("        (reference counted %u passing splittings, %u of them off-spine)\n",
               ref_total, off_spine_total);

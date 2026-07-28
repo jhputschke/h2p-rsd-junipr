@@ -224,8 +224,9 @@ massless) and `x_nsec` (grooming-passing splittings on *non-primary* branches).
 `fullLundAux` computes them by recursing over the whole C/A tree under the same
 `passesGroom` predicate the sequences use, so `n_primary` provably equals the primary
 sequence length (`cpp/tests/test_lund_io.cpp`). They are opt-in on the Python side via
-`encoder.aux_features` and **off by default — the A/B did not clear its adoption bar on
-the reference sample** (−0.029 nat/jet against a 0.029 seed spread, because 82.6 % of
+`encoder.aux_features` (nine registered features; `pt_g`, `|eta|` and the secondary-plane
+kinematics are implemented but not yet A/B'd) and **off by default — the A/B of the
+original triple did not clear its adoption bar on the reference sample** (−0.029 nat/jet against a 0.029 seed spread, because 82.6 % of
 those jets have no secondary-plane activity at all to exploit); see
 [`docs/PLAN_Input.md`](docs/PLAN_Input.md) and
 [`notebooks/aux_input_ab.ipynb`](notebooks/aux_input_ab.ipynb) for the numbers and for

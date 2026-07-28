@@ -18,6 +18,8 @@ import torch
 from h2p_rsd_junipr.config import load_config
 from h2p_rsd_junipr.data.dataset import MatchedLundDataset, collate
 from h2p_rsd_junipr.features import (
+    AUX_FEATURES,
+    ETA_REF,
     MG_EPS,
     N_NODE_FEAT,
     PT_REF,
@@ -31,16 +33,29 @@ from h2p_rsd_junipr.geometry import Geometry
 from h2p_rsd_junipr.models.base import build_model
 
 AUX = ["ln_mg_pt", "nsec", "ln_pt"]
+# the full registry: the original triple + groomed momentum, |eta|, and the
+# secondary-plane kinematics with their presence indicator
+ALL_AUX = sorted(AUX_FEATURES)
 
 
-def _with_aux_columns(jets, *, mg=5.0, nsec=2, pt=120.0):
+def _with_aux_columns(jets, *, mg=5.0, nsec=2, pt=120.0, ptg=110.0, eta=0.7,
+                      kt_max=3.0, kt_sum=4.5, attach=1):
     """Inject the C++-written aux source columns onto fixture jets."""
     out = []
     for j in jets:
         k = dict(j)
-        k.update(jet_pt=pt, x_mg=mg, x_nsec=nsec, generator="pythia-fixture")
+        k.update(jet_pt=pt, jet_eta=eta, x_mg=mg, x_ptg=ptg, x_nsec=nsec,
+                 x_kt_sec_max=kt_max, x_kt_sec_sum=kt_sum, x_sec_attach=attach,
+                 generator="pythia-fixture")
         out.append(k)
     return out
+
+
+def _full_jet(**over):
+    jet = {"jet_pt": 200.0, "jet_eta": -1.0, "x_mg": 20.0, "x_ptg": 180.0, "x_nsec": 3,
+           "x_kt_sec_max": 4.0, "x_kt_sec_sum": 9.0, "x_sec_attach": 2}
+    jet.update(over)
+    return jet
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +112,85 @@ def test_configured_aux_names_defaults_off_and_is_getattr_tolerant():
 
 def test_aux_source_fields_dedupes():
     assert aux_source_fields(AUX) == ("x_mg", "jet_pt", "x_nsec")
+    assert aux_source_fields(["ln_mg_pt", "ln_ptg_pt"]) == ("x_mg", "jet_pt", "x_ptg")
+
+
+def test_groomed_momentum_feature():
+    """ln(pt_g/pt): the in-scope partner of ln_mg_pt, negative and ~0 when nothing
+    was groomed away."""
+    v = aux_vector(_full_jet(), ["ln_ptg_pt"])
+    assert v[0] == pytest.approx(math.log(180.0 / 200.0), rel=1e-6)
+    assert aux_vector(_full_jet(x_ptg=200.0), ["ln_ptg_pt"])[0] == pytest.approx(0.0)
+    # pt_g can exceed pt only by float rounding; the feature must stay <= 0
+    assert aux_vector(_full_jet(x_ptg=200.001), ["ln_ptg_pt"])[0] <= 0.0
+
+
+def test_ln_ptg_pt_does_not_reconstruct_the_ungroomed_mass():
+    """The whole reason ln(pt_g/pt) is shipped instead of the mass drop ln(m_g/m).
+
+    {ln_mg_pt, ln_ptg_pt, ln_pt} must not span ln(m/pt) -- were it the mass ratio, the
+    encoder would get the UNGROOMED mass for free as ln_mg_pt - ln(m_g/m)."""
+    a = _full_jet(jet_m=40.0)
+    b = _full_jet(jet_m=5.0)           # same groomed quantities, very different m
+    names = ["ln_mg_pt", "ln_ptg_pt", "ln_pt"]
+    assert np.allclose(aux_vector(a, names), aux_vector(b, names))
+    # ...and no aux feature reads jet_m at all
+    assert "jet_m" not in aux_source_fields(ALL_AUX)
+
+
+def test_abs_eta_is_symmetric_and_scaled():
+    assert aux_vector(_full_jet(jet_eta=1.0), ["abs_eta"])[0] == pytest.approx(1.0 / ETA_REF)
+    assert aux_vector(_full_jet(jet_eta=-1.0), ["abs_eta"])[0] == pytest.approx(1.0 / ETA_REF)
+    assert aux_vector(_full_jet(jet_eta=0.0), ["abs_eta"])[0] == pytest.approx(0.0)
+
+
+SEC = ["has_sec", "ln_kt_sec", "ln_kt_sec_sum", "sec_depth"]
+
+
+def test_secondary_kinematics_when_present():
+    v = aux_vector(_full_jet(), SEC)
+    assert v[0] == 1.0
+    assert v[1] == pytest.approx(math.log1p(4.0), rel=1e-6)
+    assert v[2] == pytest.approx(math.log1p(9.0), rel=1e-6)
+    assert v[3] == pytest.approx(math.log1p(2), rel=1e-6)
+
+
+def test_secondary_kinematics_absent_is_gated_not_faked():
+    """n_sec == 0: the C++ side writes 0 and the values are UNDEFINED. They must map to
+    exactly 0 with the indicator off, so the encoder can gate rather than read 0 as a
+    measurement -- and any real value stays bounded away from that neutral point."""
+    v = aux_vector(_full_jet(x_nsec=0, x_kt_sec_max=0.0, x_kt_sec_sum=0.0,
+                             x_sec_attach=0), SEC)
+    assert v[0] == 0.0                      # indicator off
+    assert np.allclose(v[1:], 0.0)          # neutral
+    present = aux_vector(_full_jet(x_kt_sec_max=1.0), SEC)
+    assert present[0] == 1.0 and present[1] > 0.5   # log1p(kt>=kt_floor) is well clear of 0
+
+
+def test_secondary_sentinels_rejected_only_when_a_secondary_exists():
+    """A jet WITH a secondary but a -1 column is an old file -> raise. A jet with no
+    secondary never reads those columns, so it must not raise on their sentinels."""
+    with pytest.raises(ValueError):
+        aux_vector(_full_jet(x_nsec=2, x_kt_sec_max=-1.0), ["ln_kt_sec"])
+    ok = aux_vector(_full_jet(x_nsec=0, x_kt_sec_max=-1.0, x_kt_sec_sum=-1.0,
+                              x_sec_attach=-1), SEC)
+    assert np.allclose(ok, 0.0)
+
+
+@pytest.mark.parametrize("bad", [
+    {"x_ptg": float("nan")}, {"x_ptg": 0.0}, {"x_ptg": -5.0},
+    {"jet_eta": float("nan")},
+])
+def test_new_sources_reject_sentinels(bad):
+    with pytest.raises(ValueError):
+        aux_vector(_full_jet(**bad), ["ln_ptg_pt", "abs_eta"])
+
+
+def test_every_registered_feature_is_finite_and_declared():
+    v = aux_vector(_full_jet(), ALL_AUX)
+    assert np.all(np.isfinite(v)) and len(v) == len(ALL_AUX)
+    for name in ALL_AUX:
+        assert aux_source_fields([name]), f"{name} declares no source columns"
 
 
 # ---------------------------------------------------------------------------

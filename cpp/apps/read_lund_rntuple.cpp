@@ -115,6 +115,19 @@ int main(int argc, char** argv) {
     auto vXnsec = reader->GetView<std::uint32_t>("x_nsec");
     std::cout << "  aux (hadron-level, conditioning side): x_mg=" << vXmg(0)
               << " GeV  x_nsec=" << vXnsec(0) << " secondary passing splittings\n";
+    if (present.count("x_ptg")) {
+      auto vXptg = reader->GetView<float>("x_ptg");
+      std::cout << "       x_ptg=" << vXptg(0) << " GeV  (groomed pt; pt_g/pt="
+                << (vPt(0) > 0.f ? vXptg(0) / vPt(0) : 0.f) << ")\n";
+    }
+    if (present.count("x_kt_sec_max")) {
+      auto vMax = reader->GetView<float>("x_kt_sec_max");
+      auto vSum = reader->GetView<float>("x_kt_sec_sum");
+      auto vAtt = reader->GetView<std::uint32_t>("x_sec_attach");
+      std::cout << "       secondary kinematics: kt_max=" << vMax(0) << " GeV  kt_sum="
+                << vSum(0) << " GeV  attached at primary node " << vAtt(0)
+                << (vXnsec(0) == 0 ? "   (x_nsec==0: all three undefined)" : "") << "\n";
+    }
   } else {
     std::cout << "  aux: none (pre-PLAN_Input file: no x_mg / x_nsec columns)\n";
   }

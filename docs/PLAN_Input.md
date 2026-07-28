@@ -56,14 +56,53 @@ bit-identical (`PARITY PASSED`, max |delta| = 0.000e+00).
 |---|---|
 | Stage 1 — groom predicate | `passesGroom` in `cpp/include/lund_io.hpp`; `primaryLund` rewritten to call it |
 | Stage 1 — all-branch traversal | `JetAux` / `fullLundAux` (`cpp/src/lund_io.cpp`) |
-| Stage 1 — schema | `x_mg`, `x_nsec` in `LundWriter`; both drivers fill them; `read_lund_rntuple` guards on the descriptor |
+| Stage 1 — schema | `x_mg`, `x_nsec`, `x_ptg`, `x_kt_sec_max`, `x_kt_sec_sum`, `x_sec_attach` in `LundWriter`; both drivers fill them; `read_lund_rntuple` guards on the descriptor |
 | Stage 2 — registry | `AUX_FEATURES`, `aux_vector`, `with_aux`, `aux_source_fields`, `configured_aux_names` (`features.py`) |
 | Stage 2 — data | `rntuple.py` sentinel reads; `MatchedLundDataset(..., aux_features)`; width-inferring `collate` |
 | Stage 2 — config | `aux_features` on all three encoder schemas + YAMLs; in `_fingerprint`; `nx == 0` coverage report |
 | Stage 2 — models / serving | four `build_encoder` sites; `PosteriorModel.aux_feature_names`; `predict` requires `x_seq["aux"]`; `cmd_export` trace width |
-| Tests | `cpp/tests/test_lund_io.cpp` (fixtures + a 200-jet ensemble), `tests/test_aux_features.py` (44 cases) |
-| Data | `cpp/test_data/jets_aux.root` — the **same card and the same 25 000 events** as `jets.root` (identical 54 007 jets), plus the two columns |
+| Tests | `cpp/tests/test_lund_io.cpp` (fixtures, a 200-jet ensemble, and an independent `LundGenerator`-based cross-check), `tests/test_aux_features.py` (55 cases) |
+| Data | `cpp/test_data/jets_aux.root` — the **same card and the same 25 000 events** as `jets.root` (identical 54 007 jets), plus the six aux columns |
 | A/B | [`notebooks/aux_input_ab.ipynb`](../notebooks/aux_input_ab.ipynb) |
+
+### Registry extension beyond the plan's three features
+
+The plan scopes `[ln_mg_pt, nsec, ln_pt]`. Six more are implemented and tested, all
+still opt-in and **none yet A/B'd** — the A/B result below covers the original triple
+only.
+
+- **`ln_ptg_pt` = ln(pt_g/pt)**, from a new `x_ptg` column. The in-scope way to express
+  "how much did grooming remove". Deliberately **not** the mass drop `ln(m_g/m)`: since
+  the encoder already sees `ln(m_g/pt)`, that ratio would be an invertible
+  reparameterization handing it `ln(m/pt)` — the ungroomed mass this design excludes.
+  `ln(pt_g/pt)` with `ln_pt` yields `ln(pt_g)`, a groomed quantity. Pinned by
+  `test_ln_ptg_pt_does_not_reconstruct_the_ungroomed_mass`, which varies `jet_m` by 8×
+  and asserts no aux feature moves.
+  Measured UE response (medians, 3 000 events, MPI off → on): `pt` **+0.4 %** vs `m`
+  **+9.7 %** as a normalizer; at ratio level `pt_g/pt` **−1.6 %**, `m_g/pt` **+6.1 %**,
+  `m_g/m` **−5.3 %**. The new feature is the most UE-robust of the three.
+  *Note* `pt_g/pt` ≈ 0.40 on this sample, not ≈ 0.95: RSD with no iteration limit plus
+  the `k_t` floor discards collinear-but-hard prongs that textbook mMDT would keep. Same
+  predicate as `m_g`, by design — but it means the quantity is governed by drops near the
+  1 GeV floor (the NP boundary), so it is more NP- than UE-sensitive, and the MPI test
+  above does not probe that.
+- **`abs_eta` = |eta|/2** (`ETA_REF` is a fixed constant, never read from the data). At
+  fixed `pt` the q/g fraction varies strongly with rapidity, and the posterior is
+  implicitly a flavour mixture. Honest caveat: this is a **prior** handle, not a
+  measurement one — it carries more generator-composition dependence than the groomed
+  observables.
+- **`has_sec`, `ln_kt_sec`, `ln_kt_sec_sum`, `sec_depth`** — secondary-plane
+  *kinematics* rather than just the count, from new `x_kt_sec_max` / `x_kt_sec_sum` /
+  `x_sec_attach` columns. One hard off-spine splitting and several soft ones give the
+  same `n_sec` but different physics. These are **undefined** when `n_sec == 0`, so they
+  ship with an explicit presence indicator and a neutral 0, and `log1p` is chosen so the
+  neutral point is exactly 0 with any real value bounded away from it. Their
+  absent-column sentinel is `-1`, not `0`, because `0` is legitimate. `kt_sec_max` is
+  cross-checked against the independent `LundGenerator`-based reference alongside
+  `n_all`.
+  **They inherit the sparsity that made `nsec` unmeasurable** (17.4 % of jets have any
+  secondary at all) and are worth evaluating only together with a working point that
+  raises `⟨n_sec⟩` — see the grooming scan below.
 
 ### Deviations from the plan as written, and why
 
@@ -110,7 +149,8 @@ tensors and `log_prob` identical; on-path costs 96 of 117 190 parameters and cha
 no other shape. 268 tests pass.
 
 **Physics A/B — the adoption gate FAILS on criterion (i), so aux is NOT adopted.**
-`ar_junipr_v3 + gru`, 15 epochs, 3 seeds, `cpp/test_data/jets_aux.root`:
+`ar_junipr_v3 + gru`, 15 epochs, 3 seeds, `cpp/test_data/jets_aux.root`. Covers the
+plan's original triple only; the six later registry entries are not yet A/B'd:
 
 | arm | held-out NLL/jet | Δ vs baseline |
 |---|---|---|

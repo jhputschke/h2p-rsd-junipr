@@ -45,6 +45,17 @@ LundWriter::LundWriter(const std::string& path, const std::string& ntuple, const
   // splittings living on those discarded prongs. See docs/PLAN_Input.md.
   fXmg_ = model->MakeField<float>("x_mg");
   fXnsec_ = model->MakeField<std::uint32_t>("x_nsec");
+  // `x_ptg` pairs with `x_mg` on purpose: groomed mass AND groomed momentum, both
+  // normalizable by the already-written `jet_pt`. Shipping a mass-drop ratio m_g/m
+  // instead would, combined with the ln(m_g/pt) the encoder already sees, be an
+  // invertible reparameterization handing it the UNGROOMED mass.
+  fXptg_ = model->MakeField<float>("x_ptg");
+  // Secondary-plane KINEMATICS, not just the count: one hard off-spine splitting and
+  // several soft ones give the same x_nsec but different physics. All three are 0 when
+  // x_nsec == 0 — gate on x_nsec, do not read 0 as a measurement.
+  fXktSecMax_ = model->MakeField<float>("x_kt_sec_max");
+  fXktSecSum_ = model->MakeField<float>("x_kt_sec_sum");
+  fXsecAttach_ = model->MakeField<std::uint32_t>("x_sec_attach");
 
   writer_ = RNTupleWriter::Recreate(std::move(model), ntuple, path);
 }
@@ -76,9 +87,13 @@ void LundWriter::fill(std::uint64_t event, std::uint32_t jet_index, double weigh
   *fYp_ = y.psi;
 
   *fXmg_ = aux.mg;
+  *fXptg_ = aux.ptg;
   // n_all >= n_primary by construction (the spine is a subset of all branches); the
   // guard keeps a hypothetical inconsistency from wrapping around in unsigned arithmetic.
   *fXnsec_ = (aux.n_all >= aux.n_primary) ? (aux.n_all - aux.n_primary) : 0u;
+  *fXktSecMax_ = aux.kt_sec_max;
+  *fXktSecSum_ = aux.kt_sec_sum;
+  *fXsecAttach_ = aux.sec_attach;
 
   writer_->Fill();
   ++n_written_;

@@ -218,8 +218,39 @@ back in (see [`PLAN_Input.md`](PLAN_Input.md)):
 | Name | Value | Why it is not a function of `x` |
 |---|---|---|
 | `ln_mg_pt` | `ln(max(x_mg, 1e-3) / jet_pt)` | every primary node is recorded **massless**; the subjet masses making up `m_g` live in the discarded prongs |
+| `ln_ptg_pt` | `ln(min(x_ptg / jet_pt, 1))` | how much **momentum** grooming removed; `x` records `z` only at the *kept* splittings, so the dropped fraction is unreconstructable |
 | `nsec` | `log1p(x_nsec)` | grooming-passing splittings on **non-primary** branches; secondary-plane density carries quark/gluon information (arXiv:2112.09140) |
 | `ln_pt` | `ln(jet_pt / 100)` | the scale anchor — already written per jet, never previously read |
+| `abs_eta` | `abs(jet_eta) / 2` | at fixed `pt` the q/g fraction varies strongly with rapidity; `x` is entirely intra-jet |
+| `has_sec` | `1` if `x_nsec > 0` else `0` | presence indicator gating the four below (see *undefined vs zero*) |
+| `ln_kt_sec` | `log1p(x_kt_sec_max)` | hardest **off-spine** splitting — separates one hard secondary prong from several soft ones at equal `n_sec` |
+| `ln_kt_sec_sum` | `log1p(x_kt_sec_sum)` | total off-spine hardness; differs from the above only when `n_sec > 1` |
+| `sec_depth` | `log1p(x_sec_attach)` | which primary node the hardest secondary hangs off (`0` = widest-angle) |
+
+**Why `ln_ptg_pt` and not the mass drop `ln(m_g/m)`.** The encoder already sees
+`ln(m_g/pt)`, so adding `ln(m_g/m)` would be an invertible reparameterization handing it
+`ln(m/pt)` — the **ungroomed** mass, exactly what the grooming-first design excludes.
+`ln(pt_g/pt)` combined with `ln_pt` instead yields `ln(pt_g)`, a groomed quantity;
+nothing ungroomed becomes reconstructable. Measured (medians, 3 000 events, MPI off → on):
+`pt` shifts **+0.4 %** as a normalizer where `m` shifts **+9.7 %**, and at ratio level
+`pt_g/pt` shifts **−1.6 %** against `m_g/pt` **+6.1 %** and `m_g/m` **−5.3 %** — i.e. the
+new feature is the most UE-robust of the three. (That test probes UE only; hadronization
+robustness is criterion (iv), still blocked on WP5.)
+
+> **`pt_g/pt` ≈ 0.4, not ≈ 0.95.** This is the *pipeline*-groomed momentum: recursive
+> Soft Drop with **no iteration limit** and the `k_t` floor applied, so a collinear-but-hard
+> prong (e.g. `z = 0.4` at `ΔR = 0.02` → `k_t = 0.8 GeV`) is discarded where textbook mMDT
+> would stop and keep it. Same predicate as `m_g` and as the persisted sequences — one
+> grooming definition per file. Consequence worth knowing: the quantity is governed by
+> drops near the 1 GeV floor, i.e. the NP boundary, so it is more NP- than UE-sensitive.
+
+**Undefined vs zero.** `x_kt_sec_max` / `x_kt_sec_sum` / `x_sec_attach` are meaningless
+when `x_nsec == 0` (82.6 % of the reference sample). The C++ side writes `0`, and the
+Python registry maps them to exactly `0` while `has_sec` goes to `0` — so the encoder can
+**gate** them rather than read `0` as a measurement. `log1p` is chosen precisely so the
+neutral point is `0` and any real value is bounded away from it
+(`k_t ≥ k_t^floor ⇒ log1p(k_t) ≥ log(1 + k_t^floor)`). Ship the indicator whenever you
+ship any of the three. Their absent-column sentinel is `-1`, not `0`, for the same reason.
 
 All three are **groomed**, so they keep the NP/UE suppression that motivates the pipeline
 and stay usable in a heavy-ion environment. Ungroomed observables (constituent
@@ -247,6 +278,10 @@ h2p-rsd-junipr train model=ar_junipr_v3 encoder=gru \
   `LundDataModule.setup` prints that fraction whenever aux is on.
 - **Serving.** A model built with aux requires `aux` in the request body — a dict of the
   raw source columns. The response echoes `aux_features`.
+- **A/B coverage.** The measured result below is for the original triple
+  `[ln_mg_pt, nsec, ln_pt]` only. `ln_ptg_pt`, `abs_eta` and the four secondary-plane
+  features are implemented, tested and available but **have not been through an A/B** —
+  treat them as untested until one is run.
 - **Status: measured, and NOT adopted.** On `cpp/test_data/jets_aux.root`
   (`ar_junipr_v3 + gru`, 15 epochs, 3 seeds) the held-out NLL/jet goes 4.6136 ± 0.0205 →
   4.5848 ± 0.0202: a −0.029 nat gain against a 0.029 seed spread, with one of three seeds

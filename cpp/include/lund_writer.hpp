@@ -43,8 +43,8 @@ class LundWriter {
   std::shared_ptr<std::string> fGen_;
   std::shared_ptr<std::vector<float>> fXi_, fXk_, fXz_, fXp_;
   std::shared_ptr<std::vector<float>> fYi_, fYk_, fYz_, fYp_;
-  std::shared_ptr<float> fXmg_;
-  std::shared_ptr<std::uint32_t> fXnsec_;
+  std::shared_ptr<float> fXmg_, fXptg_, fXktSecMax_, fXktSecSum_;
+  std::shared_ptr<std::uint32_t> fXnsec_, fXsecAttach_;
 };
 
 }  // namespace h2p
