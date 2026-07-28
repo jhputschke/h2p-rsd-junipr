@@ -9,6 +9,13 @@ minimum-Bayes-risk (MBR) point estimate. For the physics behind these choices se
 [`README_PHYSICS.md`](README_PHYSICS.md); the schema source of truth is
 [`src/h2p_rsd_junipr/config.py`](../src/h2p_rsd_junipr/config.py).
 
+> **New in the post-review update** ([`PLAN_UPDATES.md`](PLAN_UPDATES.md)): the exact-likelihood
+> `model=cfm` family and the `exact_likelihood` flag (§4), the calibration suite v2 switches
+> `experiment.pit_coords` / `.stratify_regions` / `.tarp` (§8), the `model.max_emissions`
+> support guard (§4), the v3 knob-semantics table (§7), and cross-attention conditioning
+> `model.use_cross_attention` / `model=ar_junipr_v4` (§4). Everything defaults off or absent,
+> so existing runs and numbers are unchanged.
+
 - [0. How configuration works](#0-how-configuration-works)
 - [1. `geometry` — the Lund-plane grid](#1-geometry--the-lund-plane-grid)
 - [2. `data` — dataset & split](#2-data--dataset--split)
@@ -124,8 +131,9 @@ dataclass default → the winning <group>/<name>.yaml (base dir before configs/)
 
 > **Three different `max_emissions`.** They are independent caps — don't confuse them:
 > `data.max_emissions` (synthetic *truth* length cap), `model.max_emissions` (multiplicity-head
-> width for cINN / diffusion / `ar_junipr_v3`), and `decode.max_emissions` (beam/sample length
-> cap). Each is documented in its own section.
+> width for cINN / diffusion / `cfm` / `ar_junipr_v3+`, and the one the §4 **support guard**
+> checks the data against), and `decode.max_emissions` (beam/sample length cap). Each is
+> documented in its own section.
 
 ---
 
@@ -203,12 +211,32 @@ Per-encoder:
 
 ## 4. `model` — the posterior family
 
-The polymorphic group: `model=ar_junipr_v2|ar_junipr_v1|ar_junipr_v3|cinn|diffusion` binds a
+The polymorphic group:
+`model=ar_junipr_v2|ar_junipr_v1|ar_junipr_v3|ar_junipr_v4|cinn|diffusion|cfm` binds a
 specific schema. All families expose the same `log_prob`/`sample`/`map_estimate` contract.
 `ctx_dim` is the context width the encoder must produce (the encoder is built with this as
 its output dim). Sources: [`models/`](../src/h2p_rsd_junipr/models/).
 
-### `ar_junipr_v2` (recommended) / `ar_junipr_v1` / `ar_junipr_v3`
+### Is `log_prob` a density? — `exact_likelihood`
+
+Every family exposes `log_prob`, but they do not all mean the same thing by it. The class
+attribute `exact_likelihood` says which:
+
+| Family | `exact_likelihood` | What `log_prob` returns |
+|---|---|---|
+| `ar_junipr_v1/v2/v3/v4` | `True` | exact: categorical terms + closed-form coordinate densities |
+| `cinn` | `True` | exact: change of variables through the RealNVP |
+| `cfm` | `True` | exact: probability-flow ODE with an exact 4-VJP divergence |
+| `diffusion` | **`False`** | a denoising-score-matching **surrogate** with an unknown offset |
+
+**Only compare NLLs, and only form likelihood ratios, across the `True` rows.** `train`,
+`eval`, and `serve` each print a one-line warning when they report a number from a
+surrogate family, so this cannot go unnoticed — but nothing stops you plotting two
+incomparable numbers side by side, so it is on you. `diffusion` is kept as the registry's
+cheap-sampler baseline; `cfm` is the exact-likelihood member of the same continuous-time
+family and is what you want for model selection.
+
+### `ar_junipr_v2` (recommended) / `ar_junipr_v1` / `ar_junipr_v3` / `ar_junipr_v4`
 
 Autoregressive RSD-JUNIPR: a 3-head decoder (continue/stop, cell, and — v2 only —
 continuous coordinates) over the parton tree.
@@ -225,7 +253,9 @@ continuous coordinates) over the parton tree.
 | `kappa_max` | `50.0` | cap on the von Mises concentration κ for the periodic ψ coordinate |
 | `cell_label_smoothing` | `0.0` | label smoothing on the split-head target; `0.0` keeps likelihood parity (a probe knob for the MAP collapse) |
 | `use_multiplicity_head` | `False` | **v3** ⇒ `True`: promote length to a first-class categorical `q(N\|x)` head (drops the continue/stop head); `False` keeps the implicit per-step continue/stop length model (bit-parity with today) |
-| `max_emissions` | `25` | multiplicity-head width (categorical over `n=0..max_emissions`); only used when `use_multiplicity_head=True` |
+| `max_emissions` | `25` | multiplicity-head width (categorical over `n=0..max_emissions`); only used when `use_multiplicity_head=True`. **Guarded**: see "the support guard" below |
+| `use_cross_attention` | `False` | **v4** ⇒ `True`: the decoder attends to the encoder's *per-node* hadron states instead of only the pooled `e(x)`; `False` is byte-identical to today |
+| `xattn_heads` | `4` | attention heads when `use_cross_attention=True`; must divide `dec_dim` |
 
 **`ar_junipr_v2` vs `ar_junipr_v1`** is exactly `continuous_coords` True vs False — v1 drops
 the coordinate density and is the categorical-cell-only backbone.
@@ -240,6 +270,33 @@ The switch is a plain bool, so `model=ar_junipr_v3` and `model=ar_junipr_v2 mode
 are equivalent, and `False` (the default) leaves the model byte-identical to today (old AR
 checkpoints load unchanged). See [`docs/PLAN_MultHead.md`](PLAN_MultHead.md) and README_PHYSICS §"Length as a first-class factor".
 
+**The support guard.** A categorical `q(N|x)` has *finite* support `N = 0..max_emissions`;
+the v2 continue/stop head had none. A truth sequence past the support is clamped into the
+last bin, so it receives the **wrong likelihood** — silently, with no signature in the loss
+curve. `train` therefore checks `P_data(N > model.max_emissions)` against the data actually
+loaded and **hard-errors above `1e-3`** (warns above `1e-4`); `eval` reports it without
+refusing. The message quotes the offending `z_cut` / `β` / `k_t`-floor and the bound to
+raise `max_emissions` to. Grooming parameters move this tail, so it is checked per run, not
+once at design time. Source: [`data/stats.py`](../src/h2p_rsd_junipr/data/stats.py).
+
+**`ar_junipr_v4`** is v3 plus `use_cross_attention=true`. v1–v3 hand the decoder one pooled
+`ctx_dim` vector, tiled at every step: every hadron-level node reaches the parton-level
+decoder only through that vector — the classic fixed-length bottleneck, and the reason
+LundNet's graph structure is flattened before the decoder sees it. v4 lets the decoder
+additionally cross-attend to the encoder's per-node states
+(`Encoder.forward_seq`; `gru`, `lundnet` and `deepsets` all provide them — an encoder that
+does not is a hard config error, never a silent fallback). The attention is applied as a
+**residual**, so no head's input width changes: with the switch off the module list and
+`state_dict` are byte-identical and existing checkpoints load strictly. Attention is over
+`x` only, so the autoregressive factorization over `y` stays causal and the sampling/beam
+paths inherit the change unmodified.
+
+> **Compare at matched parameter count.** Cross-attention adds `kv_proj` + `xattn`
+> (~25k params at `dec_dim=64`), so shrink `dec_dim` to compensate before drawing any
+> conclusion. On synthetic data at 15 epochs with `encoder=gru`, v4 at `dec_dim=52`
+> (118.5k params) reaches **val NLL/jet 17.85** against v3 at `dec_dim=64` (117.2k params)
+> at **21.68**. Adoption for physics runs goes through the WP4 A/B, not that number alone.
+
 ### `cinn` — conditional normalizing flow
 
 `P(n|e)·∏P(cell|e)·∏p_flow(coords|e,cell)` with a RealNVP over the 4 coordinates.
@@ -252,7 +309,7 @@ checkpoints load unchanged). See [`docs/PLAN_MultHead.md`](PLAN_MultHead.md) and
 | `max_emissions` | `25` | multiplicity-head width (categorical over `n=0..max_emissions`) |
 | `sigma_floor`, `kappa_max` | `1e-2`, `50.0` | carried for schema symmetry; **not used** by the RealNVP flow (see §11) |
 
-### `diffusion` — conditional diffusion
+### `diffusion` — conditional diffusion (surrogate likelihood)
 
 Categorical `n`/cell heads + a variance-preserving diffusion over the 4 coordinates.
 
@@ -262,6 +319,50 @@ Categorical `n`/cell heads + a variance-preserving diffusion over the 4 coordina
 | `hidden_dim` | `64` | denoiser MLP width |
 | `n_steps` | `50` | diffusion (DDPM) steps for the reverse process |
 | `max_emissions` | `25` | multiplicity-head width (categorical over `n=0..max_emissions`) |
+
+> **`exact_likelihood = False`.** The coordinate term of `log_prob` is the
+> denoising-score-matching residual used as a *proxy* — not the ELBO, not the
+> probability-flow-ODE likelihood — so it carries an unknown, context-dependent offset.
+> Its NLL is a relative score **within this family only**, and its log-ratios are not
+> likelihood ratios. Use `cfm` when you need the density. `diffusion` remains the
+> registry's cheap-sampler baseline.
+
+### `cfm` — conditional flow matching (exact ODE likelihood)
+
+The exact-likelihood member of the continuous-time family (Lipman et al., ICLR 2023,
+arXiv:2210.02747; FMPE, arXiv:2305.17161; probability-flow ODE, arXiv:2011.13456). Same
+factorization as `cinn` — `q(N|x)·∏q(cell|x)·∏p_cfm(coords|x,cell)` — with the coordinate
+density given by a conditional vector field.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `ctx_dim` | `64` | context width |
+| `hidden_dim` | `64` | vector-field MLP width |
+| `n_ode_steps` | `32` | fixed-step ODE steps, for both the likelihood and sampling |
+| `ode_solver` | `"rk4"` | `rk4` (4 field evals/step) or `heun` (2 — ~2× cheaper, same object) |
+| `max_emissions` | `25` | multiplicity-head width |
+| `time_features` | `16` | Fourier time features fed to the field |
+| `sigma_min` | `1e-3` | OT-path terminal width (Lipman Eq. 20) |
+| `cfm_map` | `"ode_mode"` | MAP coordinates: `ode_mode` (push the base mode through the ODE — cheap, deterministic) or `ascent` (gradient ascent on the exact density — the true conditional mode, costs `ascent_steps` ODE likelihood evaluations) |
+
+Two things worth knowing before using it:
+
+- **Training minimizes a different objective than it reports.** The vector field is trained
+  by flow-matching regression (no ODE in the loop); the ODE runs only at evaluation. So the
+  logged `train_nll` is that regression objective while `val_nll` is the exact NLL — the two
+  are on different scales, and `train` says so once at startup. This is what lets `log_prob`
+  stay an honest density instead of becoming a training proxy.
+- **`n_ode_steps` is an accuracy knob, `ode_solver` is a cost knob.** Both solvers integrate
+  the same ODE and agree to `1e-4` at fine steps; the divergence is exact (4 vector-Jacobian
+  products for a 4-dimensional state, so no Hutchinson estimator and no stochastic
+  likelihood). Coordinates live on the physical support via fixed tanh-box / angle-wrap
+  bijections with closed-form log-Jacobians, so the density integrates to 1 *on the box* —
+  the property a discretized grid head cannot have.
+
+> **Known limitation.** Unlike the AR von Mises head, the ψ map is not periodic across the
+> branch cut at ±π: the density is exactly normalized on `(-π, π)` but the seam is not
+> closed structurally (the model can learn to match across it, but nothing enforces it).
+> Fixing that needs Riemannian flow matching, deliberately out of scope.
 
 ---
 
@@ -408,8 +509,79 @@ Controls the §8 closure / calibration / systematic run (`h2p-rsd-junipr eval`).
 | `closure_jets` | `300` | held-out jets evaluated in the closure/calibration loop |
 | `n_closure_samples` | `200` | posterior draws **per jet** inside that loop |
 | `generator_b` | `null` | a second generator/checkpoint for the PYTHIA-vs-HERWIG systematic (the dominant uncertainty) |
+| `pit_coords` | `False` | per-coordinate PITs (calibration suite v2) |
+| `stratify_regions` | `False` | bin every metric by the leading emission's Lund quadrant |
+| `tarp` | `False` | TARP expected-coverage curve on tree-valued posteriors |
+| `tarp_refs` | `100` | size of the TARP reference pool |
+| `tarp_reference` | `"pooled"` | `pooled` (posterior draws of other jets) or `prior` (their truth trees) |
 
 Trade cost vs. precision with `closure_jets` and `n_closure_samples`.
+
+### The mandatory validation — and why SBC-on-N is not it
+
+The v1 statistic is the SBC rank of the **multiplicity** `n`. That is a real test for the
+implicit continue/stop length model (`ar_junipr_v2`) — but `ar_junipr_v3` trains `q(N|x)` by
+direct NLL on `N`, so SBC-on-N certifies *the very marginal the model optimizes*, near
+tautologically. **A v2-vs-v3 comparison judged on SBC-N is biased toward v3 by
+construction.** That is why the WP4 A/B is gated on the three switches below, not on SBC-N.
+
+All three default **off**, so the reported metric dict is bit-for-bit the pre-v2 dict until
+you opt in and existing tables do not move. Source:
+[`eval/calibration.py`](../src/h2p_rsd_junipr/eval/calibration.py).
+
+**`pit_coords` — the kinematics, coordinate by coordinate.** Teacher-forces the truth and
+evaluates each coordinate's conditional CDF at it. For the AR heads that transform is exact
+and *physical* — truncated-normal for the within-cell offsets `du, dv` (the same normalizer
+the likelihood divides by), normal for `ln z`, von Mises for `ψ`. For `cinn` / `cfm` it is
+the flow's **base space** (a base dimension is not one Lund coordinate, but every base
+marginal is exactly `N(0,1)` under a calibrated flow, so each histogram is still a genuine
+per-dimension test); the report tags which space it is in so the physical reading is never
+implied. `diffusion` and `ar_junipr_v1` have no exact coordinate density and **opt out**
+rather than fake one.
+
+Read the shape, not just the number: a **U-shaped** histogram (mass at 0 and 1) means the
+head is *over-confident* — too narrow for the data it sees; a **dome** means over-dispersed.
+The headline is the KS distance to `Uniform(0,1)`, whose 95% critical value is `1.36/√n` at
+the emission count printed beside it. Two breakdowns come with it: `by_emission_index`
+(is the *late* emission calibrated, or only the first? — the exposure-bias signature) and,
+with `stratify_regions`, `by_region`.
+
+**`stratify_regions` — where calibration holds.** Bins SBC, PIT and coverage by the Lund
+quadrant of the leading emission (`wide_soft`, `wide_hard`, `narrow_soft`, `narrow_hard`;
+`wide/narrow` split on `ln 1/ΔR`, `soft/hard` on `ln k_t`). Calibration that only holds on
+average over the plane cannot pass this — which is the precondition for any *localized*
+claim, heavy-ion included.
+
+**`tarp` — the whole tree, in the physics metric.** TARP expected coverage (Lemos et al.,
+ICML 2023, arXiv:2302.03026) on tree-valued posteriors, with distance the perturbative-Lund
+EMD the MBR estimator already minimizes (so it inherits your `mbr_*` metric configuration).
+Per jet, draw a reference tree `r` and compute the credibility level
+
+```
+f = (1/K) [ #{k : d(r, y_k) < d(r, y_true)} + ½ #{k : d(r, y_k) = d(r, y_true)} ]
+```
+
+(the half-weight on ties is the mid-rank convention the SBC statistic uses; without it the
+discrete cell chains tie often enough to fake over-dispersion). Under a calibrated posterior
+each `f` is uniform, so `ECP(α) = α`. Reported: the curve, `tarp_max_dev = max|ECP(α) − α|`,
+and `ecp_at` — the quotable form, "at 90% credibility the posterior actually covered X%".
+**The sign is the diagnosis**: ECP below the diagonal ⇒ over-confident, above ⇒
+over-dispersed. This is a *joint* test, which neither SBC-on-N nor the per-coordinate
+marginals can be.
+
+`tarp_reference` picks the reference distribution — TARP's guarantee holds for any whose
+support covers the posterior's, and the two differ in variance and in which failure they
+are most sensitive to, so the choice is recorded in the output. Cost is `n_jets × (K+1)` EMD
+solves and it needs the `pot` extra.
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt \
+    experiment.pit_coords=true experiment.stratify_regions=true experiment.tarp=true
+```
+
+`eval` writes `eval_metrics.json` plus `calibration_pit_coords.png`,
+`calibration_tarp.png` and `calibration_by_region.png` beside the checkpoint (figures need
+matplotlib, which is not a package dependency — without it you still get the JSON).
 
 ---
 

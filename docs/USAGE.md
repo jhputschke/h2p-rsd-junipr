@@ -87,12 +87,14 @@ never straddle train/val); otherwise it is a deterministic trailing split.
 ```bash
 h2p-rsd-junipr train model=ar_junipr_v1            # discrete cells only (no continuous coords)
 h2p-rsd-junipr train model=ar_junipr_v3            # v2 backbone + first-class multiplicity head q(N|x)
+h2p-rsd-junipr train model=ar_junipr_v4            # v3 + decoder cross-attention over the hadron nodes
 h2p-rsd-junipr train model=cinn   encoder=lundnet  # conditional flow + graph encoder
+h2p-rsd-junipr train model=cfm    encoder=gru      # flow matching, EXACT ODE likelihood
 h2p-rsd-junipr train model=diffusion encoder=deepsets
 ```
 
-Models: `ar_junipr_v2` (recommended), `ar_junipr_v1`, `ar_junipr_v3`, `cinn`, `diffusion`.
-Encoders: `gru`, `lundnet`, `deepsets`.
+Models: `ar_junipr_v2` (recommended), `ar_junipr_v1`, `ar_junipr_v3`, `ar_junipr_v4`,
+`cinn`, `cfm`, `diffusion`. Encoders: `gru`, `lundnet`, `deepsets`.
 
 `ar_junipr_v3` is the v2 backbone with the length promoted to a first-class categorical
 `q(N|x)` head — the factorization `q(y|x)=q(N|x)·q(y|N,x)`. It is the same head cINN/diffusion
@@ -100,6 +102,19 @@ carry; equivalently `model=ar_junipr_v2 model.use_multiplicity_head=true`. Use i
 short-sequence collapse or the posterior multiplicity bias matters (it makes the length a
 calibrated marginal and gives an exact `length_pmf`); `ar_junipr_v2` (the default) stays
 bit-for-bit unchanged.
+
+`ar_junipr_v4` adds decoder **cross-attention** over the encoder's per-node hadron states
+(`model.use_cross_attention=true`), so the parton decoder is no longer restricted to a single
+pooled `ctx_dim` vector. Compare it at *matched parameter count* — the attention adds ~25k
+params at `dec_dim=64`, so shrink `dec_dim` (52 matches v3 to +1.1%).
+
+> **`log_prob` is not a density for every family.** `diffusion` sets
+> `exact_likelihood=False`: its coordinate term is a denoising-score-matching surrogate with
+> an unknown offset, so its NLL is comparable only *within* that family. `train`, `eval` and
+> `serve` each print one warning when they report such a number. `model=cfm` is the
+> exact-likelihood member of the same continuous-time family — use it for NLL model selection
+> and likelihood ratios. Note `cfm` trains a flow-matching regression, so its logged
+> `train_nll` is that objective while `val_nll` is the exact NLL (it says so at startup).
 
 ### Key knobs
 
@@ -302,6 +317,91 @@ What the metrics mean:
 
 Tune cost vs. precision with `experiment.closure_jets` and
 `experiment.n_closure_samples`.
+
+### The full calibration suite (per-coordinate PITs, region strata, TARP)
+
+The SBC/PIT block above uses the **multiplicity** as the test quantity. That is a real
+test for `ar_junipr_v2`'s implicit length model, but `ar_junipr_v3` trains `q(N|x)` by
+direct NLL on `N` — so SBC-on-N certifies the very marginal it optimizes, and a
+**v2-vs-v3 comparison judged on it is biased toward v3 by construction**. Three opt-in
+diagnostics test what it cannot:
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt \
+    experiment.pit_coords=true experiment.stratify_regions=true experiment.tarp=true
+```
+
+```
+per-coordinate PIT (physical space, 300 jets, 1624 emissions):
+    coord       n       KS    mean   (KS -> 0, mean -> 0.5)
+       du    1624   0.0231   0.497
+       dv    1624   0.0189   0.503
+     ln_z    1624   0.0912   0.421
+      psi    1624   0.0154   0.499
+    KS 95% critical value at this sample size = 0.0337   (KS above it => significant miscalibration)
+
+  region-stratified (leading-emission Lund quadrant):
+        region   jets  SBC chi2  rank mean   cov68   (targets: low, 0.5, 0.68)
+     wide_soft    118     12.40      0.492    0.66
+     wide_hard     96     14.10      0.507    0.69
+   narrow_soft     54     18.20      0.463    0.61
+   narrow_hard     32     21.00      0.518    0.72
+
+TARP expected coverage (pooled references, 100 refs, 300 jets, EMD backend pot):
+  max |ECP(alpha) - alpha| = 0.061   mean signed deviation = -0.018
+    ECP(0.50) = 0.472   ECP(0.68) = 0.651   ECP(0.90) = 0.878   ECP(0.95) = 0.933   => consistent with calibrated
+```
+
+(Illustrative shapes, not measured numbers — run it on your own checkpoint.)
+
+How to read them:
+
+- **per-coordinate PIT** — the *kinematics*, coordinate by coordinate, evaluated at the
+  truth with each family's exact conditional CDF. **Read the shape, not just the
+  number**: mass piling up at 0 *and* 1 (U-shaped) means the head is over-confident —
+  too narrow for the data it sees; a dome means over-dispersed. The KS distance is the
+  scalar summary, and its 95% critical value `1.36/√n` is printed beside it so "is this
+  significant?" needs no arithmetic. `ln_z` above is the one coordinate failing.
+  The JSON also carries `by_emission_index` — if KS rises with the emission index, that
+  is the exposure-bias signature, not a width problem.
+  `ar_junipr_v1` and `diffusion` have no exact coordinate density and are skipped with a
+  note; `cinn`/`cfm` report the flow's *base space* instead (tagged `latent`).
+- **region stratification** — the same metrics per Lund quadrant of the leading emission.
+  A model calibrated *on average* but not per region cannot support a localized claim.
+- **TARP** — expected coverage of the *whole tree* under the perturbative-Lund EMD.
+  `ECP(0.68) = 0.651` reads directly as "at 68% credibility the posterior covered 65% of
+  the time". **The sign is the diagnosis**: below the diagonal ⇒ over-confident, above ⇒
+  over-dispersed. Needs the `[mbr]` extra and costs `closure_jets × (K+1)` EMD solves.
+
+`eval` writes `eval_metrics.json` and the three figures
+(`calibration_pit_coords.png`, `calibration_tarp.png`, `calibration_by_region.png`)
+**beside the checkpoint**. Figures need matplotlib, which is not a package dependency —
+without it you still get the JSON. A worked walkthrough on real PYTHIA data is
+[`notebooks/calibration_v2_walkthrough.ipynb`](../notebooks/calibration_v2_walkthrough.ipynb).
+
+### The v2-vs-v3 A/B, and which decode knobs are still live
+
+Under `ar_junipr_v3` the three length-patching decode knobs (`min_emissions`,
+`length_floor_quantile`, `mbr_resample_to_qn`) are *expected* to be no-ops — measured
+rather than assumed:
+
+```bash
+python scripts/ab_v2_v3.py --preset presets/ab_v2_v3.yaml --out runs/ab_v2_v3
+python scripts/ab_v2_v3.py --fast     # CI tier: tiny data, 1 epoch, MAP cells only
+```
+
+Each arm trains **once** (decode knobs are inference-time only) and is evaluated at
+every decode cell; the output is `ab_table.md` + `ab_results.json`. See
+[`CONFIGURATION.md` §7 "v3 semantics"](CONFIGURATION.md#7-decode--inference--map--posterior-knobs)
+for the per-knob verdict and the recorded decision rule for the deferred
+feed-N-into-decoder extension.
+
+> **The multiplicity-support guard.** A categorical `q(N|x)` head has finite support
+> `N = 0..model.max_emissions`; a longer truth is clamped into the last bin and gets the
+> **wrong likelihood**, silently. `train` checks `P_data(N > max_emissions)` against the
+> data you actually loaded and **hard-errors above 1e-3** (warns above 1e-4) before
+> spending any time training; `eval` reports without refusing. If it fires, either raise
+> `model.max_emissions` to the bound the message quotes or tighten the grooming.
 
 ### Reproduce the v2 reference (acceptance tests)
 

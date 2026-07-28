@@ -1,12 +1,79 @@
 # PLAN — Post-review updates: exact-likelihood CFM family, calibration suite v2, sequence conditioning, v3 follow-through, systematics chain completion
 
-Status: proposed (not yet implemented). Five work packages (WP1–WP5) derived from a
-literature/code review of the repo against the 2024–2026 unfolding and SBI literature.
-Each WP is independently mergeable, opt-in with defaults off (the established
-`use_multiplicity_head` / `point_estimator="map"` idiom), and leaves the
-likelihood/MAP parity paths byte-identical when off. Builds on the merged
-`PLAN_NsplitMinCut.md`, `PLAN_QuantileMinCut.md`, `PLAN_MBR_PerturbativeLund.md`,
-and the implemented `PLAN_MultHead.md` (v3).
+Status: **WP1–WP4 implemented** (merge order WP2 → WP1 → WP4 → WP3, one commit each);
+**WP5 not started**. Five work packages derived from a literature/code review of the
+repo against the 2024–2026 unfolding and SBI literature. Each WP is independently
+mergeable, opt-in with defaults off (the established `use_multiplicity_head` /
+`point_estimator="map"` idiom), and leaves the likelihood/MAP parity paths
+byte-identical when off. Builds on the merged `PLAN_NsplitMinCut.md`,
+`PLAN_QuantileMinCut.md`, `PLAN_MBR_PerturbativeLund.md`, and the implemented
+`PLAN_MultHead.md` (v3).
+
+## Implementation status
+
+| WP | Status | Landed as | Docs |
+|---|---|---|---|
+| **WP2** calibration suite v2 | ✅ merged | `eval/calibration.py`, `eval/report.py`, `distributions.py` (`vonmises_cdf`, `trunc_normal_cdf`), `experiment.*` switches, `tests/test_calibration_v2.py` | CONFIGURATION §8 |
+| **WP1** exact-likelihood CFM | ✅ merged | `models/cfm.py`, `CFMConfig`, `configs/model/cfm.yaml`, `exact_likelihood` flag, `tests/test_cfm.py` | CONFIGURATION §4 |
+| **WP4** v3 follow-through | ✅ merged | `data/stats.py` support guard, `presets/ab_v2_v3.yaml`, `scripts/ab_v2_v3.py`, `tests/test_support_guard.py` | CONFIGURATION §7 (v3 semantics + feed-N decision rule) |
+| **WP3** sequence conditioning | ✅ merged | `Encoder.forward_seq`, `use_cross_attention`, `model=ar_junipr_v4`, `tests/test_xattn.py` | CONFIGURATION §4 |
+| **WP5** systematics chain | ⛔ not started | — | — |
+
+### Deviations from the plan as written, and why
+
+1. **A second contract addition: `PosteriorModel.training_objective`.** The plan allows
+   only `exact_likelihood`. But `cfm` has an exact `log_prob` that is *not* its training
+   loss (flow matching regresses a vector field; the ODE runs only at evaluation), and
+   the trainer called `-log_prob` directly. The alternatives were both worse: train by
+   backpropagating through the ODE (slow, unstable, and defeats the point of flow
+   matching), or make `log_prob` return the surrogate while training — which is exactly
+   the dishonesty WP1 exists to remove. `training_objective` defaults to `-log_prob`, so
+   every existing family's loop is bit-identical, and nothing outside `models/` branches
+   on the family. Pinned by `test_cfm.py::test_other_families_keep_maximum_likelihood_training`.
+2. **`coordinate_cdfs` rather than eval-side per-family PIT code.** The plan's WP2.1
+   describes different PIT constructions per family. Implementing that in
+   `eval/calibration.py` would have put family branching outside `models/`, against the
+   cross-cutting rule. Instead each family returns its own transform (or `None`), and
+   `eval` consumes one uniform dict.
+3. **`ψ` in `cfm` is box-mapped, not periodic.** The plan says "the periodic ψ via the
+   same fixed bijections the AR heads use (tanh-box / angle wrap)". Implemented as wrap
+   into `(-π, π]` then tanh-box, which is exactly normalized on the physical support but
+   does *not* close the seam at ±π the way the AR von Mises head does. Documented as a
+   known limitation; closing it structurally needs Riemannian flow matching, which the
+   WP's own non-goals exclude.
+4. **TARP ties use the mid-rank convention**, matching the existing SBC statistic.
+   Without it the discrete cell chains tie often enough to push every `f` down and fake
+   over-dispersion. `tarp_refs` is the size of the reference *pool*; each test jet draws
+   one reference from it, which keeps the cost linear in `n_jets`.
+5. **The A/B's headline (b) statistic changed.** The plan expects `mbr_resample_to_qn`
+   weights ≈ 1 under v3. Measured, the raw spread is **not** ≈ 0 — `w_k` compares an
+   exact head against a K-draw histogram, so `w ≠ 1` at `O(1/√K)` even for a perfect
+   sampler. `scripts/ab_v2_v3.py` therefore reports the **excess over a finite-K null**,
+   which *is* ≈ 0. Quoting the raw spread would have made a genuine no-op look like a
+   live correction.
+
+### Results against the stated exit criteria
+
+- **WP1**: coordinate density integrates to `1.004 ± 0.009` over the physical support
+  (sign-flipped control: `0.856`, ~16σ away — the test caught a real divergence sign
+  error during development); exact 4-VJP divergence matches the full autograd Jacobian
+  trace to `1e-5`; forward/reverse round trip agrees to `1e-4` at 128 steps;
+  `train model=cfm` runs end to end.
+- **WP2**: `vonmises_cdf` matches quadrature of `vonmises_logpdf` to `1e-6` for
+  `κ ∈ [0.01, 50]`; the PIT of self-generated data is uniform and a ×0.5-width head is
+  flagged U-shaped; TARP reads the diagonal on a self-consistent posterior and drops
+  below it for an over-confident one; the all-off metric dict is bit-for-bit the old one.
+- **WP3**: OFF-path `state_dict` keys, NLL, samples and MAP identical to v2/v3; padding
+  nodes provably receive zero attention weight; teacher-forced and incremental decode
+  paths agree step by step. At matched parameter count (+1.1%) on synthetic data,
+  15 epochs, `encoder=gru`: **val NLL/jet 17.85 (v4) vs 21.68 (v3)**.
+- **WP4**: guard unit-tested at both thresholds and gated on the family having a head;
+  `scripts/ab_v2_v3.py --fast` runs end to end in CI's fast tier. The fast tier already
+  reproduces (a): v2 at `min_emissions=0` collapses to the empty tree for 100% of jets,
+  v3 for 0%.
+
+Worked walkthrough of the new calibration and metrics on real PYTHIA data:
+[`notebooks/calibration_v2_walkthrough.ipynb`](../notebooks/calibration_v2_walkthrough.ipynb).
 
 > **Line anchors.** File:line references below were taken from the tree at commit
 > `20a8686` (2026-07-27). Re-verify before editing; merges shift them.
@@ -45,7 +112,8 @@ Review conclusions this plan implements, in one line each:
 
 Recommended merge order: **WP2 → WP1 → WP4 → WP3 → WP5** (WP2 first because every
 other WP's exit criterion consumes it; WP5 is independent and can proceed in
-parallel on the C++ side).
+parallel on the C++ side). WP1–WP4 were merged in exactly that order; see
+"Implementation status" above.
 
 ---
 

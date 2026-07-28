@@ -71,11 +71,21 @@ h2p-rsd-junipr train model=ar_junipr_v2 encoder=gru trainer.max_epochs=20
 # v3 = v2 + a first-class multiplicity head q(N|x): q(y|x) = q(N|x)·q(y|N,x)
 h2p-rsd-junipr train model=ar_junipr_v3 encoder=gru trainer.max_epochs=20
 
+# v4 = v3 + decoder cross-attention over the per-node hadron states
+h2p-rsd-junipr train model=ar_junipr_v4 encoder=lundnet model.dec_dim=52
+
 # swap the model family or encoder — drop-in, no code changes
 h2p-rsd-junipr train model=cinn encoder=lundnet encoder.num_layers=3 geometry.n_bins=16
 
+# conditional flow matching with an EXACT probability-flow-ODE likelihood
+h2p-rsd-junipr train model=cfm encoder=gru
+
 # closure / calibration / point-estimate on held-out jets
 h2p-rsd-junipr eval runs/<id>/best.ckpt
+
+# ...with the full calibration suite (per-coordinate PITs, region strata, TARP)
+h2p-rsd-junipr eval runs/<id>/best.ckpt \
+    experiment.pit_coords=true experiment.stratify_regions=true experiment.tarp=true
 
 # generate real data with PYTHIA 8 (after building cpp/, below) then train on it
 h2p-rsd-junipr generate 100000 jets.root 1
@@ -124,17 +134,55 @@ so the objective and all closure observables are jet-level.
 
 ## Model families (one contract: `log_prob` / `sample` / `map_estimate`)
 
-| family | module | status |
-|---|---|---|
-| §5.1 autoregressive JUNIPR (v1 cells / v2 +continuous coords / v3 +multiplicity head) | `models/ar_junipr.py` | primary, verified |
-| §5.2 conditional normalizing flow (cINN) | `models/cinn.py` | functional baseline |
-| §5.3 conditional diffusion / bridge | `models/diffusion.py` | functional baseline |
+| family | module | `log_prob` exact? | status |
+|---|---|---|---|
+| §5.1 autoregressive JUNIPR (v1 cells / v2 +continuous coords / v3 +multiplicity head / v4 +cross-attention) | `models/ar_junipr.py` | ✅ | primary, verified |
+| §5.2 conditional normalizing flow (cINN) | `models/cinn.py` | ✅ | functional baseline |
+| §5.3 conditional diffusion / bridge | `models/diffusion.py` | ❌ surrogate | cheap-sampler baseline |
+| §5.4 conditional flow matching (exact probability-flow-ODE likelihood) | `models/cfm.py` | ✅ | functional baseline |
 
 Encoders (`gru`, `lundnet`, `deepsets`) are independently pluggable; any encoder
-pairs with any decoder family. `ar_junipr_v3` promotes the sequence length to a
-first-class categorical `q(N|x)` head — the factorization `q(y|x) = q(N|x)·q(y|N,x)`,
-opt-in via `use_multiplicity_head` and off by default (v2 stays bit-for-bit unchanged);
-see [`docs/PLAN_MultHead.md`](docs/PLAN_MultHead.md).
+pairs with any decoder family.
+
+- **`ar_junipr_v3`** promotes the sequence length to a first-class categorical `q(N|x)`
+  head — the factorization `q(y|x) = q(N|x)·q(y|N,x)`, opt-in via
+  `use_multiplicity_head` and off by default (v2 stays bit-for-bit unchanged);
+  see [`docs/PLAN_MultHead.md`](docs/PLAN_MultHead.md).
+- **`ar_junipr_v4`** additionally lets the decoder cross-attend to the encoder's
+  *per-node* hadron states instead of only the pooled `e(x)`, removing the fixed-length
+  bottleneck. Residual, so the off path is byte-identical.
+- **`cfm`** is the exact-likelihood member of the continuous-time family. The
+  `exact_likelihood` column above is a real class attribute: `diffusion`'s `log_prob` is
+  a denoising-score-matching **surrogate**, so its NLL is not comparable with the others
+  and `train`/`eval`/`serve` say so out loud. Use `cfm` for NLL model selection and
+  likelihood ratios.
+
+The post-review work packages behind the last three rows — and the calibration suite
+that gates them — are in [`docs/PLAN_UPDATES.md`](docs/PLAN_UPDATES.md).
+
+## Is the posterior calibrated?
+
+A conditional generator is not calibrated for free (the original cINN unfolding came out
+too narrow), so this gates "trustworthy". Beyond SBC/PIT/coverage on the multiplicity,
+three opt-in diagnostics test what SBC-on-N cannot — and must, since `ar_junipr_v3`
+optimizes that marginal directly and would pass it near-tautologically:
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt \
+    experiment.pit_coords=true experiment.stratify_regions=true experiment.tarp=true
+```
+
+- **per-coordinate PITs** — the kinematics, coordinate by coordinate, via each family's
+  exact conditional CDFs, broken down by emission index and region. U-shaped ⇒
+  over-confident, dome ⇒ over-dispersed.
+- **region stratification** — every metric binned by the leading emission's Lund
+  quadrant, so calibration that only holds *on average* over the plane cannot pass.
+- **TARP** expected coverage (Lemos et al., arXiv:2302.03026) on tree-valued posteriors
+  under the perturbative-Lund EMD — a *joint* test in the physics metric.
+
+Walkthrough on real PYTHIA data:
+[`notebooks/calibration_v2_walkthrough.ipynb`](notebooks/calibration_v2_walkthrough.ipynb).
+Reference: [`docs/CONFIGURATION.md` §8](docs/CONFIGURATION.md#8-experiment--evaluation-suite).
 
 ## C++ data generation
 

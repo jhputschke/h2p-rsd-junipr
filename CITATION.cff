@@ -65,3 +65,47 @@ references:
     volume: "03"
     year: 2021
     notes: "arXiv:2012.08526"
+  # --- post-review update: exact-likelihood CFM family (models/cfm.py) ---
+  - type: article
+    title: "Flow Matching for Generative Modeling"
+    authors: [{family-names: Lipman}, {family-names: Chen}, {family-names: Ben-Hamu}, {family-names: Nickel}, {family-names: Le}]
+    journal: "ICLR"
+    year: 2023
+    notes: "arXiv:2210.02747; the OT-path conditional flow-matching objective"
+  - type: article
+    title: "Score-Based Generative Modeling through Stochastic Differential Equations"
+    authors: [{family-names: Song}]
+    journal: "ICLR"
+    year: 2021
+    notes: "arXiv:2011.13456; the probability-flow ODE used for the exact likelihood"
+  - type: article
+    title: "Flow Matching for Scalable Simulation-Based Inference (FMPE)"
+    authors: [{family-names: Wildberger}, {family-names: Dax}]
+    journal: "NeurIPS"
+    year: 2023
+    notes: "arXiv:2305.17161"
+  - type: article
+    title: "The Landscape of Unfolding with Machine Learning"
+    authors: [{family-names: Huetsch}]
+    journal: "SciPost Phys."
+    volume: "18"
+    year: 2025
+    notes: "arXiv:2404.18807; also the Transfermer sequence-conditioning evidence"
+  - type: article
+    title: "Generative Unfolding of Jets and Their Substructure"
+    authors: [{family-names: Petitjean}]
+    year: 2025
+    notes: "arXiv:2510.19906"
+  # --- post-review update: calibration suite v2 (eval/calibration.py) ---
+  - type: article
+    title: "Sampling-Based Accuracy Testing of Posterior Estimators (TARP)"
+    authors: [{family-names: Lemos}, {family-names: Coogan}, {family-names: Hezaveh}, {family-names: Perreault-Levasseur}]
+    journal: "ICML"
+    year: 2023
+    notes: "arXiv:2302.03026; expected-coverage test used on tree-valued posteriors"
+  # --- post-review update: sequence conditioning (WP3) ---
+  - type: article
+    title: "Jet Diffusion versus JetGPT"
+    authors: [{family-names: Butter}]
+    year: 2023
+    notes: "arXiv:2305.10475; evidence for attending to per-node states"
