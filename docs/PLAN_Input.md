@@ -1,6 +1,12 @@
 # PLAN — Aux conditioning: groomed all-branch observables as encoder input
 
-**Status:** proposed (not yet implemented)
+**Status: implemented, opt-in, NOT adopted as a default.** Stage 1 (C++) and stage 2
+(Python) are merged; `encoder.aux_features` defaults to `[]` and the off path is
+byte-identical. The A/B was run and **exit criterion (i) fails on this sample**: the
+held-out NLL gain (−0.029 nats) is exactly the size of the seed spread and one of three
+seeds goes the wrong way. Criterion (iv) is additionally blocked on `PLAN_UPDATES.md`
+WP5. See "Results against the stated exit criteria" below — including why this sample
+has almost no secondary-plane activity to exploit, and what to change before re-running.
 
 Enrich the conditioning side of q(y | x) with per-jet **groomed** scalars that the
 primary-only hadron sequence x cannot represent — the pipeline-groomed jet mass
@@ -39,6 +45,115 @@ as the scale anchor.
 Positive conditional information is expected iff I(y; aux | x) > 0; the cheap
 in-repo estimator is the held-out conditional NLL delta, which is exactly what
 the exit criteria gate on.
+
+## Implementation status
+
+Both stages are merged. `encoder.aux_features` defaults to `[]`; with it off the
+module list, `state_dict`, `log_prob` and `scripts/verify_parity.py` output are
+bit-identical (`PARITY PASSED`, max |delta| = 0.000e+00).
+
+| Piece | Landed as |
+|---|---|
+| Stage 1 — groom predicate | `passesGroom` in `cpp/include/lund_io.hpp`; `primaryLund` rewritten to call it |
+| Stage 1 — all-branch traversal | `JetAux` / `fullLundAux` (`cpp/src/lund_io.cpp`) |
+| Stage 1 — schema | `x_mg`, `x_nsec` in `LundWriter`; both drivers fill them; `read_lund_rntuple` guards on the descriptor |
+| Stage 2 — registry | `AUX_FEATURES`, `aux_vector`, `with_aux`, `aux_source_fields`, `configured_aux_names` (`features.py`) |
+| Stage 2 — data | `rntuple.py` sentinel reads; `MatchedLundDataset(..., aux_features)`; width-inferring `collate` |
+| Stage 2 — config | `aux_features` on all three encoder schemas + YAMLs; in `_fingerprint`; `nx == 0` coverage report |
+| Stage 2 — models / serving | four `build_encoder` sites; `PosteriorModel.aux_feature_names`; `predict` requires `x_seq["aux"]`; `cmd_export` trace width |
+| Tests | `cpp/tests/test_lund_io.cpp` (fixtures + a 200-jet ensemble), `tests/test_aux_features.py` (44 cases) |
+| Data | `cpp/test_data/jets_aux.root` — the **same card and the same 25 000 events** as `jets.root` (identical 54 007 jets), plus the two columns |
+| A/B | [`notebooks/aux_input_ab.ipynb`](../notebooks/aux_input_ab.ipynb) |
+
+### Deviations from the plan as written, and why
+
+1. **`LundWriter::fill` takes the whole `JetAux`, not two extra scalars.** The
+   `n_all - n_primary` subtraction and its unsigned-underflow guard then live in
+   exactly one place instead of at every call site.
+2. **`configured_aux_names` replaces the plan's inline
+   `getattr(cfg.encoder, "aux_features", None) or []`.** That idiom would have been
+   copied at four model sites plus the datamodule plus serving — six tolerant reads,
+   none of which validates the names. One helper validates once, keeps the
+   old-checkpoint tolerance in a single place (the `decode_params` / `experiment_params`
+   idiom), and turns a typo into a `KeyError` at build time rather than a silent
+   `ValueError` per jet. `with_aux` / `aux_source_fields` likewise deduplicate the
+   broadcast and the error text between the dataset and the serving path.
+3. **The synthetic refusal keys on the missing COLUMNS, not on `data.source`.** The
+   plan says "`aux_features != []` with `data.source=synthetic` raises in
+   `MatchedLundDataset`" — but the dataset is handed a jet list and never sees
+   `cfg.data`. Keying on absent aux sources is strictly stronger: it also catches a
+   *real* `jets.root` written before the schema change, and it lets the plumbing tests
+   do what the plan asks (inject aux fields on fixture dicts) without a
+   source-name escape hatch. The synthetic case still gets its own message, naming
+   why no proxy is offered.
+4. **`_fingerprint` takes the aux tuple as an argument** rather than reaching into
+   `cfg.encoder`; it is a `cfg.data` helper, and coupling the two config groups inside
+   it would be worse than one extra parameter.
+5. **The C++ test gained a 200-jet random ensemble.** Four hand-built fixtures are
+   shallow by construction, and a spine/predicate drift between `fullLundAux` and
+   `primaryLund` would only show up on a deep, wide C/A tree. The ensemble replays
+   `n_primary == primaryLund(...).size()` on 31-particle jets and additionally pins
+   `m_g <= m_ungroomed`.
+6. **`cmd_export` is in scope after all.** The plan does not mention it, but it traced
+   the encoder with a hardcoded `torch.zeros(1, 3, 5)`, which fails for an aux
+   checkpoint; the width now follows `model.aux_feature_names`.
+
+### Results against the stated exit criteria
+
+**C++.** All fixture checks pass, plus a 200-jet random-ensemble replay of
+`n_primary == primaryLund(...).size()` on 31-particle jets and `m_g <= m_ungroomed`.
+On the real sample: `m_g <= m_jet` for all 54 007 jets, `⟨m_g/m⟩ = 0.25`, and
+`n_x == 0 ⟹ n_sec == 0` exactly, as the recursion structurally requires.
+
+**Parity.** `PARITY PASSED`, max |delta| = 0.000e+00. Off-path `state_dict` keys,
+tensors and `log_prob` identical; on-path costs 96 of 117 190 parameters and changes
+no other shape. 268 tests pass.
+
+**Physics A/B — the adoption gate FAILS on criterion (i), so aux is NOT adopted.**
+`ar_junipr_v3 + gru`, 15 epochs, 3 seeds, `cpp/test_data/jets_aux.root`:
+
+| arm | held-out NLL/jet | Δ vs baseline |
+|---|---|---|
+| baseline | 4.6136 ± 0.0205 | — |
+| `+ [ln_mg_pt, nsec, ln_pt]` | 4.5848 ± 0.0202 | **−0.0288** |
+| `ln_pt` only | 4.5948 ± 0.0408 | −0.019 |
+| `ln_mg_pt` only | 4.6052 ± 0.0239 | −0.008 |
+| `nsec` only | 4.5909 ± 0.0286 | −0.023 |
+
+- **(i) FAIL.** The delta (−0.0288) exactly equals the combined seed spread (0.0288),
+  and the paired per-seed deltas are `[+0.007, −0.061, −0.033]` — one of three seeds
+  goes the wrong way. Not distinguishable from seed noise.
+- **(ii) PASS.** Posterior-median multiplicity bias −0.234 → −0.264; MBR
+  perturbative-Lund risk 23.69 → 22.69 (improves).
+- **(iii) PASS.** Coordinate-PIT max KS 0.0583 → 0.0613, both under the 0.0648
+  critical value; 68% coverage 0.69 → 0.67; SBC mean rank 0.469 → 0.496.
+  Aux-stratified: at `n_sec >= 2` (217 jets) the aux arm's `du`/`dv` KS run
+  0.021/0.034 → 0.053/0.074 — inside the critical value at that sample size, but the
+  first number to watch on a sample with real `n_sec` headroom.
+- **(iv) BLOCKED, not skipped.** There is no generator-B producer
+  (`PLAN_UPDATES.md` WP5 not started), so `eval/systematics.py` has nothing to
+  compare against and the prior-systematic side of the trade cannot be measured.
+
+**Why the gate fails, mechanistically — the useful part of the result.** This
+grooming working point leaves almost none of the information the plan is about in the
+sample: **82.6% of jets have `n_sec == 0` exactly** (mean 0.22, max 7), and a further
+6.9% have `n_x == 0` and structurally cannot carry aux at all. For most jets the
+headline new observable is a constant. Two diagnostics confirm the aggregate number is
+mostly noise rather than signal: the `n_x == 0` jets — which *cannot* receive aux, so
+their two arms are the same function of the same input — "gain" −0.024 nats, the same
+size as the overall −0.029; and no single-feature arm's delta exceeds its own spread.
+The one place the design's own prediction does show up is the `n_sec = 2–3` stratum,
+which gains **−0.100 nats/jet**, ~3× the sample average.
+
+The scope of the finding is therefore: *the machinery is correct and the information
+is real where it exists, but this sample has almost none of it.* Re-run at a looser
+`z_cut`, a lower `k_t` floor, or a higher-`p_T` selection — all of which raise
+`⟨n_sec⟩` — before concluding anything about the physics. This mirrors
+`PLAN_UPDATES.md` WP3, which met its criterion on the synthetic generator and washed
+out on this same file, for the same underlying reason: this sample is short on the
+structure the feature exploits.
+
+Worked A/B: [`notebooks/aux_input_ab.ipynb`](../notebooks/aux_input_ab.ipynb).
 
 ## Design (recommended approach)
 

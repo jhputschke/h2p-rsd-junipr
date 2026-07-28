@@ -477,7 +477,13 @@ x = {"lnInvDelta": [0.29, 1.29, 4.26, 4.29, 5.21],   # your jet's hadron-level x
      "lnz":        [-1.10, -0.16, -0.90, -1.90, -0.31],
      "psi":        [-3.07, -2.80, -0.31,  2.95, -2.38]}
 
+# A checkpoint trained with `encoder.aux_features` REQUIRES the aux source columns; a
+# plain checkpoint ignores them. `model.aux_feature_names` says which, in order.
+if model.aux_feature_names:
+    x["aux"] = {"jet_pt": 137.4, "x_mg": 6.1, "x_nsec": 2}   # as written by the C++ stage
+
 out = predict(model, geom, device, x)
+print(out["aux_features"])                    # echoes the active aux conditioning
 print(out["map_multiplicity"], out["map_logprob"])
 print(out["posterior_mult_mean"], out["posterior_mult_68CR"])
 for node in out["map_nodes"]:
@@ -585,7 +591,9 @@ from h2p_rsd_junipr.data.rntuple import load_rntuple
 from h2p_rsd_junipr.data.dataset import MatchedLundDataset, collate
 
 jets = load_rntuple("jets.root", "Jets")       # list of per-jet dicts (x, y, weight, ...)
-ds   = MatchedLundDataset(jets, geom)          # uses the model's geometry for cell targets
+# `aux_features` MUST match what the checkpoint's encoder was built with, or the widths
+# disagree; read it off the model rather than retyping it.
+ds   = MatchedLundDataset(jets, geom, model.aux_feature_names)
 
 # (a) exact per-jet log-likelihood, batched
 batch = collate([ds[i] for i in range(min(256, len(ds)))])
@@ -682,6 +690,10 @@ curl -s localhost:8000/predict -H 'content-type: application/json' -d '{
 # (map_multiplicity >= decode.min_emissions; the service reads the checkpoint's decode config)
 # When the checkpoint's decode has point_estimator=mbr, the response additionally carries
 # "mbr_risk" and "mbr_backend" (the point estimate is then the MBR tree, floor-free).
+# The response always echoes "aux_features"; when it is non-empty the request MUST carry
+#   "aux": {"jet_pt": .., "x_mg": .., "x_nsec": ..}
+# and a missing key is a 4xx, not a silent default -- the served conditioning distribution
+# has to be the one the model was trained on.
 ```
 
 ---

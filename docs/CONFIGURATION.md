@@ -198,6 +198,7 @@ Common fields:
 | `hidden_dim` | `64` | the encoder's internal hidden width (the output is projected to `ctx_dim`) |
 | `num_layers` | varies | encoder depth (the "encoder depth" knob) |
 | `dropout` | `0.1` | dropout inside the encoder |
+| `aux_features` | `[]` | groomed per-jet conditioning scalars appended to every node of `xf` (below) |
 
 Per-encoder:
 
@@ -206,6 +207,58 @@ Per-encoder:
 | `gru` | `bidirectional` | `True` | bi-GRU over the sequence; `num_layers` default `1` |
 | `lundnet` | `k` | `4` | EdgeConv neighbourhood size (LundNet graph net); `num_layers` default `3` |
 | `deepsets` | — | — | permutation-invariant Deep Sets; `num_layers` default `2` |
+
+### `aux_features` — groomed all-branch conditioning
+
+The encoder input is the **primary** Lund sequence only: everything inside the softer
+prongs — the secondary Lund planes — is discarded at write time, so two
+conditioning-relevant quantities can never be functions of `x`. `aux_features` opts them
+back in (see [`PLAN_Input.md`](PLAN_Input.md)):
+
+| Name | Value | Why it is not a function of `x` |
+|---|---|---|
+| `ln_mg_pt` | `ln(max(x_mg, 1e-3) / jet_pt)` | every primary node is recorded **massless**; the subjet masses making up `m_g` live in the discarded prongs |
+| `nsec` | `log1p(x_nsec)` | grooming-passing splittings on **non-primary** branches; secondary-plane density carries quark/gluon information (arXiv:2112.09140) |
+| `ln_pt` | `ln(jet_pt / 100)` | the scale anchor — already written per jet, never previously read |
+
+All three are **groomed**, so they keep the NP/UE suppression that motivates the pipeline
+and stay usable in a heavy-ion environment. Ungroomed observables (constituent
+multiplicity, ungroomed mass, girth) are deliberately excluded: IRC-unsafe,
+background-sensitive conditioning contradicts the grooming-first design.
+
+```bash
+h2p-rsd-junipr train model=ar_junipr_v3 encoder=gru \
+    data=rntuple data.path=cpp/test_data/jets_aux.root \
+    encoder.aux_features='[ln_mg_pt,nsec,ln_pt]'
+```
+
+- **Mechanism.** The scalars are appended as **constant per-node columns of `xf`**, so they
+  reach every consumer (`log_prob`, closure, calibration, MBR, serving) through the
+  existing `(xf, nx)` plumbing. The only model-side change is the encoder's input width.
+- **Parity.** `[]` (the default) is byte-identical: same module list, same `state_dict`,
+  same `log_prob`. A checkpoint config predating the field rebuilds as the plain model.
+- **Data requirement.** The sources (`jet_pt`, `x_mg`, `x_nsec`) come from the C++ writer.
+  A pre-`PLAN_Input` `jets.root` reads them as sentinels (NaN / `-1`) and the dataset
+  **raises** rather than training on NaNs. `data.source=synthetic` raises too — the
+  synthetic generator has no secondary planes, and any proxy would be a function of `x`,
+  faking the very information gain this feature exists to measure.
+- **Known limitation.** A jet with `nx == 0` (empty groomed hadron tree; ~7 % of the
+  reference PYTHIA sample) has no rows to broadcast onto and carries **no** aux signal.
+  `LundDataModule.setup` prints that fraction whenever aux is on.
+- **Serving.** A model built with aux requires `aux` in the request body — a dict of the
+  raw source columns. The response echoes `aux_features`.
+- **Status: measured, and NOT adopted.** On `cpp/test_data/jets_aux.root`
+  (`ar_junipr_v3 + gru`, 15 epochs, 3 seeds) the held-out NLL/jet goes 4.6136 ± 0.0205 →
+  4.5848 ± 0.0202: a −0.029 nat gain against a 0.029 seed spread, with one of three seeds
+  going the wrong way. Calibration and closure are unchanged within noise, so nothing is
+  broken — there is just no measurable gain to adopt at this grooming working point,
+  where **82.6 % of jets have `x_nsec == 0`**. The `n_sec = 2–3` stratum does gain
+  −0.100 nats/jet, so the effect is real where the structure exists; raise `⟨n_sec⟩`
+  (looser `z_cut`, lower `k_t` floor, higher-`p_T` sample) before re-judging. Full A/B,
+  ablation and exit-criteria table:
+  [`notebooks/aux_input_ab.ipynb`](../notebooks/aux_input_ab.ipynb); criterion (iv)
+  (generator-B / fragmentation-prior spread) is separately blocked on
+  `PLAN_UPDATES.md` WP5.
 
 ---
 
