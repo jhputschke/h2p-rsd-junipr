@@ -341,6 +341,61 @@ The serving layer reads the checkpoint's decode config. Source:
 §10; `point_estimator` / `mbr_*` — the whole second point-estimate family — are covered in
 the §10 MBR subsection. All are inference-time only, so you can A/B them on a fixed checkpoint.
 
+### v3 semantics — which of these knobs are still live
+
+Three of the decode knobs exist **only** to patch the two length pathologies of the v2
+implicit continue/stop head. `ar_junipr_v3` (and `cinn` / `diffusion` / `cfm`, which
+always had one) removes those pathologies at source by making the length a first-class
+categorical `q(N|x)`. So under v3 the same knob names mean different things:
+
+| Knob | Status under v3 | Why |
+|---|---|---|
+| `max_emissions` (model) | **live — and now load-bearing** | It is the *categorical support* `N=0..max`. A truth past it is clamped into the last bin and gets the wrong likelihood, so `train` hard-errors when `P_data(N > max_emissions) > 1e-3` (warns above `1e-4`). It was merely a decode cap under v2. |
+| `cont_temperature` | **live** | Still the softmax temperature on the *cell* logits at sampling time. v3 changed the length model, not the kinematics. |
+| `decode.max_emissions` | **live** | Still the decode-time length cap; clamps `N ~ q(N|x)` draws. |
+| `min_emissions` | **legacy-v2** | It floored a brevity-biased *joint* argmax. Under v3 the MAP length is `argmax q(N|x)`, which is not brevity-biased, so the floor is expected to be inert — [`scripts/ab_v2_v3.py`](../scripts/ab_v2_v3.py) measures the `MAP=0` fraction at `min_emissions=0` to confirm it per checkpoint. |
+| `length_floor_quantile` | **legacy-v2** | Same reason: it transferred the model's length belief into a mode that had lost it. Under v3 the mode *is* read off that belief. |
+| `mbr_resample_to_qn` | **legacy-v2 (measure it)** | It matched the MBR support's multiplicity marginal to the calibrated `q(N|x)`. Under v3 the draws already come from `q(N|x)`, so the weights should be 1 up to Monte-Carlo noise. **Read the *excess* over the finite-K null**, not the raw weight spread: `w_k` compares an exact head against a K-draw histogram, so `w ≠ 1` at `O(1/√K)` even for a perfect sampler. The A/B script reports both columns. |
+| `length_penalty` | **legacy-v2** | GNMT normalization of a beam score; v3's greedy fixed-length decode has no beam to rank. |
+
+**Do not read "legacy" as "removed".** Every knob still works and still defaults to the
+same value, so v2 checkpoints and v2 runs are unaffected. The claim is only that under
+v3 they are expected to be *no-ops*, and that expectation is measured per checkpoint by
+the A/B table rather than assumed.
+
+```bash
+# reproduce the table (2 trainings, then every decode cell on each):
+python scripts/ab_v2_v3.py --preset presets/ab_v2_v3.yaml --out runs/ab_v2_v3
+python scripts/ab_v2_v3.py --fast          # CI tier: tiny data, 1 epoch
+```
+
+The A/B is gated on the **WP2 suite** — per-coordinate PITs and TARP — and deliberately
+**not** on SBC-N: v3 trains `q(N|x)` by direct NLL on `N`, so an SBC-on-N comparison
+would certify v3 near-tautologically (see §8 and
+[`eval/calibration.py`](../src/h2p_rsd_junipr/eval/calibration.py)).
+
+### The deferred "feed N into the decoder" extension — the decision rule
+
+`docs/PLAN_MultHead.md` deferred conditioning the *kinematics* decoder on the drawn `N`
+(so `q(y|N,x)` sees its own length). It stays deferred. Recorded here so it is not
+re-litigated: **implement it only if** the WP2 diagnostics show miscalibration of
+`q(y|N,x)` that is *systematically* `N`- or region-dependent, at a magnitude comparable
+to the quoted generator systematic. Concretely, all three must hold on a trained
+checkpoint:
+
+1. `pit_coords` KS rises monotonically with the emission index (`by_emission_index`) or
+   differs across `by_region` strata by more than the KS 95% critical value
+   `1.36/√n` at that sample size — i.e. the miscalibration is *structured*, not noise;
+2. `tarp_max_dev` degrades measurably when TARP is restricted to high-`N` jets relative
+   to the pooled curve;
+3. the resulting spread is of order the `generator_spread` figure
+   ([`eval/systematics.py`](../src/h2p_rsd_junipr/eval/systematics.py)) — below that it is
+   not the dominant uncertainty and buys nothing.
+
+If only (1) holds, the cheaper remedies are `cont_temperature` and the cross-attention
+of §4 (`use_cross_attention`), both of which address coordinate-level exposure bias
+without changing the factorization.
+
 ---
 
 ## 8. `experiment` — evaluation suite
@@ -368,6 +423,12 @@ Trade cost vs. precision with `closure_jets` and `n_closure_samples`.
 ---
 
 ## 10. Inference knobs in depth — the MAP floor, mincut & quantile floor
+
+> **Read this section as the `ar_junipr_v2` story.** Everything below describes the
+> pathology of a *joint* argmax over an implicit continue/stop length model, and the three
+> knobs built to patch it. Under `ar_junipr_v3` (and `cinn` / `diffusion` / `cfm`) the
+> length is a categorical `q(N|x)` and the pathology is gone at source, so these knobs are
+> expected to be no-ops — see "v3 semantics" in §7 and the A/B table it points at.
 
 The **MAP** is the *joint mode* `ŷ = argmax_y q_φ(y|x)`. For a discrete autoregressive
 posterior it is **length-biased low**: every emission pays the cell head's categorical

@@ -1,0 +1,38 @@
+# presets/ab_v2_v3.yaml — the shared base for the v2-vs-v3 A/B (docs/PLAN_UPDATES.md WP4).
+#
+# Everything the two arms must hold FIXED lives here; `scripts/ab_v2_v3.py` varies only
+# the model selector and the decode knobs on top of it, so any difference in the table
+# is attributable to the multiplicity head or to a decode knob and to nothing else.
+#
+#   python scripts/ab_v2_v3.py --preset presets/ab_v2_v3.yaml --out runs/ab_v2_v3
+#
+# `defaults.model` is a placeholder: the script overrides it per arm. Pick it here only
+# if you want to run a single arm by hand with `train base=presets/ab_v2_v3.yaml`.
+defaults:
+  model: ar_junipr_v3
+  encoder: gru
+  data: synthetic
+  decode: default
+  experiment: closure
+
+# The A/B is gated on the WP2 suite — per-coordinate PITs and TARP — NOT on SBC-N,
+# which v3 optimizes directly and would therefore pass near-tautologically.
+experiment:
+  closure_jets: 300
+  n_closure_samples: 200
+  pit_coords: true
+  stratify_regions: true
+  tarp: true
+  tarp_refs: 100
+  tarp_reference: pooled
+
+trainer:
+  max_epochs: 20
+  batch_size: 64
+  seed: 0
+
+data:
+  n_jets: 8000
+  seed: 0
+
+run_root: runs/ab_v2_v3

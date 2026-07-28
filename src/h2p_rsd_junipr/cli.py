@@ -17,6 +17,7 @@ import torch
 
 from .config import config_hash, load_config, save_config
 from .data.datamodule import LundDataModule
+from .data.stats import check_multiplicity_support
 from .geometry import Geometry
 
 
@@ -72,6 +73,10 @@ def cmd_train(argv) -> int:
     )
     print(f"[train] {len(dm.train_jets)} train / {len(dm.val_jets)} val jets "
           f"(fingerprint={dm.fingerprint})")
+    # WP4 guard: a categorical q(N|x) head has finite support, so a truth sequence
+    # past it is silently clamped. Checked against the data actually loaded, before
+    # any time is spent training on it.
+    check_multiplicity_support(dm.jets, cfg)
 
     if cfg.trainer.resume_from:
         trainer = Trainer.resume(
@@ -113,8 +118,11 @@ def cmd_eval(argv) -> int:
         geometry = Geometry.from_config(cfg2.geometry)
         model = build_model(cfg2, geometry).to(device)
         model.load_state_dict(info["model_state"])
-        _, val_ds = LundDataModule(cfg2, geometry).setup().datasets()
-        dm_jets = LundDataModule(cfg2, geometry).setup().val_jets
+        dm2 = LundDataModule(cfg2, geometry).setup()
+        _, val_ds = dm2.datasets()
+        dm_jets = dm2.val_jets
+        # non-fatal here: the model is already trained, so report rather than refuse
+        check_multiplicity_support(dm2.jets, cfg2, strict=False)
         decode = decode_params(cfg2)  # follow the checkpoint's decode config (tolerant of old snapshots)
         # ...but an explicit CLI `decode.*` override still wins over the snapshot (decode is
         # inference-time tuning, e.g. an A/B on decode.length_floor_quantile, or selecting the
