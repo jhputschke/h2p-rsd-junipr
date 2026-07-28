@@ -12,6 +12,7 @@ MODELS = [
     ["model=ar_junipr_v3", "encoder=gru"],
     ["model=cinn", "encoder=deepsets"],
     ["model=diffusion", "encoder=lundnet"],
+    ["model=cfm", "encoder=gru", "model.n_ode_steps=8"],   # 8 steps keeps the smoke fast
 ]
 
 

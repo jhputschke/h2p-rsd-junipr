@@ -152,7 +152,7 @@ class PosteriorModel(nn.Module, ABC):
 
 def build_model(cfg, geometry: Geometry) -> PosteriorModel:
     # import for side-effect registration
-    from . import ar_junipr, cinn, diffusion  # noqa: F401
+    from . import ar_junipr, cfm, cinn, diffusion  # noqa: F401
 
     name = cfg.model.name
     if name not in _REGISTRY:
@@ -161,6 +161,6 @@ def build_model(cfg, geometry: Geometry) -> PosteriorModel:
 
 
 def registered_models() -> list[str]:
-    from . import ar_junipr, cinn, diffusion  # noqa: F401
+    from . import ar_junipr, cfm, cinn, diffusion  # noqa: F401
 
     return sorted(_REGISTRY)

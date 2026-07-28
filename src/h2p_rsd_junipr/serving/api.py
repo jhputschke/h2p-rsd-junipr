@@ -23,6 +23,12 @@ def load_service_model(ckpt_path: str, device: torch.device):
     model = build_model(cfg, geometry).to(device)
     model.load_state_dict(info["model_state"])
     model.eval()
+    if not getattr(model, "exact_likelihood", True):
+        # served responses carry `map_logprob`; say once that for this family it is a
+        # training surrogate rather than a normalized log-density (WP1 honesty flag).
+        print(f"[serve] WARNING: model family {cfg.model.name!r} sets exact_likelihood=False — "
+              "`map_logprob` in the response is a surrogate score, not log q(y|x), and is "
+              "not comparable across families.")
     return model, geometry
 
 

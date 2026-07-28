@@ -37,6 +37,23 @@ def _setup(cfg):
     return device, geometry, dm
 
 
+def _warn_objective_is_not_nll(model, cfg) -> None:
+    """Say so when the logged `train_nll` is not an NLL.
+
+    A family may minimize something other than -log_prob (`cfm` regresses a vector
+    field), and a family's `log_prob` may itself be a surrogate (`diffusion`). Both
+    change what the training curve means, so both are stated once, up front, rather
+    than left for a reader to infer from the column header."""
+    from .models.base import PosteriorModel
+
+    if type(model).training_objective is not PosteriorModel.training_objective:
+        print(f"[train] NOTE: {cfg.model.name!r} trains a surrogate objective (not the NLL); "
+              "the logged `train_nll` is that objective, while `val_nll` is the exact NLL.")
+    elif not getattr(model, "exact_likelihood", True):
+        print(f"[train] NOTE: {cfg.model.name!r} sets exact_likelihood=False; both logged "
+              "losses are a training surrogate, comparable only within this family.")
+
+
 # ---------------------------------------------------------------------------
 def cmd_train(argv) -> int:
     from .train.logging import CSVJSONLLogger
@@ -64,6 +81,7 @@ def cmd_train(argv) -> int:
         model, opt, sched = build_components(cfg, geometry, device)
         n_params = sum(p.numel() for p in model.parameters())
         print(f"[train] {n_params/1e3:.1f}k parameters")
+        _warn_objective_is_not_nll(model, cfg)
         trainer = Trainer(model, opt, sched, loaders, cfg, logger, device, run_dir, dm.fingerprint)
 
     best = trainer.fit()

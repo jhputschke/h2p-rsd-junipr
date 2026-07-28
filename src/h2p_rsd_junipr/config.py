@@ -119,6 +119,23 @@ class DiffusionConfig:
 
 
 @dataclass
+class CFMConfig:
+    """Conditional flow matching with an EXACT probability-flow-ODE likelihood
+    (docs/PLAN_UPDATES.md WP1). Unlike `diffusion`, `log_prob` here is a normalized
+    density, so its NLL is comparable with `cinn` / `ar_junipr_*`."""
+
+    name: str = "cfm"
+    ctx_dim: int = 64
+    hidden_dim: int = 64
+    n_ode_steps: int = 32          # likelihood + sampling ODE steps
+    ode_solver: str = "rk4"        # rk4 (4 field evals/step) | heun (2, ~2x faster)
+    max_emissions: int = 25        # multiplicity-head support, mirrors CINN
+    time_features: int = 16        # Fourier features for t
+    sigma_min: float = 1e-3        # OT-path terminal width (Lipman Eq. 20)
+    cfm_map: str = "ode_mode"      # MAP coordinates: ode_mode (push the base mode) | ascent
+
+
+@dataclass
 class OptimConfig:
     lr: float = 2e-3
     weight_decay: float = 3e-4
@@ -208,6 +225,7 @@ MODEL_SCHEMA = {
     "ar_junipr_v3": ARJuniprConfig,   # v2 backbone + first-class multiplicity head
     "cinn": CINNConfig,
     "diffusion": DiffusionConfig,
+    "cfm": CFMConfig,                 # exact probability-flow-ODE likelihood
 }
 ENCODER_SCHEMA = {
     "gru": EncoderConfig,
