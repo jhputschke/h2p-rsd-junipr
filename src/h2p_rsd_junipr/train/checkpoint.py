@@ -99,11 +99,18 @@ def restore_into(model, optimizer, scheduler, scaler, state: dict, *, strict_con
 
 
 def load_for_inference(path: Path, map_location=None) -> dict:
-    """Export-only load: returns {model_state, config, model_name}; ignores
-    optimiser state (§6)."""
+    """Export-only load: returns {model_state, config, model_name, best_val_nll,
+    epoch}; ignores optimiser state (§6).
+
+    `best_val_nll` / `epoch` are carried because a consumer that RESTORES a run from
+    cache rather than retraining still has to report which checkpoint it got. Omitting
+    them invited `info.get("best_val", nan)` at the call site, which reports `nan`
+    instead of failing — the silent-default trap the aux sentinels exist to avoid."""
     state = load_checkpoint(path, map_location=map_location)
     return {
         "model_state": state["model"]["state_dict"],
         "config": state["config"],
         "model_name": state["model"]["name"],
+        "best_val_nll": float(state["best_val_nll"]),
+        "epoch": int(state["epoch"]),
     }
