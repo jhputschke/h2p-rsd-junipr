@@ -96,6 +96,11 @@ class ARJuniprConfig:
     #                                      q(y|x) = q(N|x) q(y|N,x) (docs/PLAN_MultHead.md).
     max_emissions: int = 25            # categorical size of the multiplicity head (n = 0..max);
     #                                    only used when use_multiplicity_head=True. Mirrors CINN.
+    use_cross_attention: bool = False  # decoder attends to the encoder's per-node hadron
+    #                                    states instead of only the pooled e(x) (WP3). Off keeps
+    #                                    the module list and state_dict byte-identical; requires
+    #                                    an encoder with returns_sequence=True.
+    xattn_heads: int = 4               # attention heads; must divide dec_dim
 
 
 @dataclass
@@ -223,6 +228,7 @@ MODEL_SCHEMA = {
     "ar_junipr_v2": ARJuniprConfig,
     "ar_junipr_v1": ARJuniprConfig,
     "ar_junipr_v3": ARJuniprConfig,   # v2 backbone + first-class multiplicity head
+    "ar_junipr_v4": ARJuniprConfig,   # v3 backbone + decoder cross-attention over x
     "cinn": CINNConfig,
     "diffusion": DiffusionConfig,
     "cfm": CFMConfig,                 # exact probability-flow-ODE likelihood

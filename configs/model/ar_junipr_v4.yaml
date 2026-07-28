@@ -1,0 +1,24 @@
+# §5.1 autoregressive JUNIPR (v3 backbone) + decoder CROSS-ATTENTION over the
+# hadron-level per-node states (docs/PLAN_UPDATES.md WP3).
+#
+# v1..v3 hand the decoder a single pooled ctx_dim vector, tiled at every step: every
+# hadron node reaches the parton decoder only through that vector — the classic
+# fixed-length bottleneck, and the reason LundNet's graph structure is flattened before
+# the decoder ever sees it. Here the decoder additionally attends to the encoder's
+# per-node states (Encoder.forward_seq), residually, so no head's input width changes.
+#
+# Requires an encoder with returns_sequence=True (gru, lundnet, deepsets all qualify).
+# For a like-for-like comparison against v3, shrink dec_dim to match parameter counts.
+ctx_dim: 64
+dec_dim: 64
+dec_layers: 1
+split_head_layers: 2
+coord_head_layers: 2
+continuous_coords: true
+sigma_floor: 0.01
+kappa_max: 50.0
+cell_label_smoothing: 0.0
+use_multiplicity_head: true   # v3's first-class q(N|x); v4 is v3 + cross-attention
+max_emissions: 25
+use_cross_attention: true     # the v4 switch
+xattn_heads: 4                # must divide dec_dim

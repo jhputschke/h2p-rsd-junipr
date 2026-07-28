@@ -37,24 +37,37 @@ class _ChainEdgeConv(nn.Module):
 
 @register_encoder("lundnet")
 class LundNetEncoder(Encoder):
+    returns_sequence = True
+
     def __init__(self, cfg, ctx_dim: int, n_node_feat: int):
         super().__init__()
         hid = int(cfg.hidden_dim)
         layers = max(1, int(cfg.num_layers))
         self.out_dim = int(ctx_dim)
+        self.seq_dim = hid
 
         self.embed = nn.Linear(n_node_feat, hid)
         self.blocks = nn.ModuleList([_ChainEdgeConv(hid, hid) for _ in range(layers)])
         self.drop = nn.Dropout(float(cfg.dropout))
         self.to_ctx = nn.Linear(hid + 1, self.out_dim)
 
-    def forward(self, xf: torch.Tensor, nx: torch.Tensor) -> torch.Tensor:
-        B, Mx, _ = xf.shape
+    def _states(self, xf: torch.Tensor, nx: torch.Tensor):
+        """Per-node EdgeConv states after the last block, before the readout — the
+        graph structure that pooling would otherwise flatten away."""
+        Mx = xf.shape[1]
         mask = (torch.arange(Mx, device=xf.device)[None, :] < nx[:, None]).float()
         h = torch.relu(self.embed(xf)) * mask.unsqueeze(-1)
         for blk in self.blocks:
             h = blk(h, mask)
+        return h, mask
+
+    def forward(self, xf: torch.Tensor, nx: torch.Tensor) -> torch.Tensor:
+        h, mask = self._states(xf, nx)
         pooled = (h * mask.unsqueeze(-1)).sum(1) / mask.sum(1, keepdim=True).clamp(min=1.0)
         pooled = self.drop(pooled)
         nx_feat = torch.log1p(nx.float()).unsqueeze(-1)
         return self.to_ctx(torch.cat([pooled, nx_feat], dim=-1))
+
+    def forward_seq(self, xf: torch.Tensor, nx: torch.Tensor):
+        h, mask = self._states(xf, nx)
+        return h, mask.bool()
