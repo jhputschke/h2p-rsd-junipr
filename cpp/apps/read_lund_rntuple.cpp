@@ -15,6 +15,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -58,10 +59,15 @@ int main(int argc, char** argv) {
   // ---- schema (all field names/types) ------------------------------------
   std::cout << "\n--- schema ---\n";
   const auto& desc = reader->GetDescriptor();
+  std::set<std::string> present;
   for (const auto& field : desc.GetTopLevelFields()) {
+    present.insert(field.GetFieldName());
     std::cout << "  " << std::left << std::setw(16) << field.GetFieldName() << std::right
               << field.GetTypeName() << "\n";
   }
+  // The aux conditioning columns post-date the original schema; a file written before
+  // docs/PLAN_Input.md simply lacks them and must still read (RNTuple compatibility).
+  const bool has_aux = present.count("x_mg") && present.count("x_nsec");
 
   const auto nJets = reader->GetNEntries();
   std::cout << "\nnumber of jets: " << nJets << "\n";
@@ -104,6 +110,14 @@ int main(int argc, char** argv) {
             << "\n";
   std::cout << "  jet_pt=" << vPt(0) << " GeV  eta=" << vEta(0) << "  phi=" << vPhi(0)
             << "  m=" << vM(0) << " GeV\n";
+  if (has_aux) {
+    auto vXmg = reader->GetView<float>("x_mg");
+    auto vXnsec = reader->GetView<std::uint32_t>("x_nsec");
+    std::cout << "  aux (hadron-level, conditioning side): x_mg=" << vXmg(0)
+              << " GeV  x_nsec=" << vXnsec(0) << " secondary passing splittings\n";
+  } else {
+    std::cout << "  aux: none (pre-PLAN_Input file: no x_mg / x_nsec columns)\n";
+  }
   printSeq("x  hadron-level", vXi(0), vXk(0), vXz(0), vXp(0));
   printSeq("y  parton-level", vYi(0), vYk(0), vYz(0), vYp(0));
 

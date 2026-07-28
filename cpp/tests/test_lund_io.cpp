@@ -1,9 +1,10 @@
-// test_lund_io — unit tests for the Soft Drop boundary, the ln(kt) floor, and the
-// greedy one-to-one hadron<->parton matching. Self-contained (no catch2/gtest):
-// returns nonzero on first failure.
+// test_lund_io — unit tests for the Soft Drop boundary, the ln(kt) floor, the greedy
+// one-to-one hadron<->parton matching, and the all-branch aux observables.
+// Self-contained (no catch2/gtest): returns nonzero on first failure.
 //
 //   Soft Drop boundary  z > z_cut (Delta/R0)^beta   (Larkoski et al., 1402.2657)
 //   ln(kt) floor        kt >= kt_floor               (perturbative band)
+//   all-branch aux      fullLundAux (docs/PLAN_Input.md): m_g + secondary-plane count
 
 #include "lund_io.hpp"
 
@@ -12,6 +13,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <random>
+#include <vector>
 
 static int g_fail = 0;
 #define CHECK(cond, msg)                                       \
@@ -24,20 +27,38 @@ static int g_fail = 0;
     }                                                          \
   } while (0)
 
-// Build a single C/A-clusterable jet from a hard + a soft prong and return its
-// primary Lund sequence under the given grooming params.
-static h2p::LundSeq declusterPair(double ptHard, double ptSoft, double dPhi,
-                                  const h2p::GroomParams& g) {
-  fastjet::PseudoJet a, b;
-  a.reset_PtYPhiM(ptHard, 0.0, 0.0, 0.0);
-  b.reset_PtYPhiM(ptSoft, 0.0, dPhi, 0.0);
-  std::vector<fastjet::PseudoJet> parts{a, b};
+static fastjet::PseudoJet mkPart(double pt, double y, double phi) {
+  fastjet::PseudoJet p;
+  p.reset_PtYPhiM(pt, y, phi, 0.0);
+  return p;
+}
+
+// Cluster a massless particle list into one anti-kt(1.0) jet. The ClusterSequence
+// outlives the call (delete_self_when_unused), so the returned jet keeps its
+// constituents and its declustering history.
+static fastjet::PseudoJet makeJet(const std::vector<fastjet::PseudoJet>& parts) {
   fastjet::JetDefinition jd(fastjet::antikt_algorithm, 1.0);
   auto* cs = new fastjet::ClusterSequence(parts, jd);
   auto jets = fastjet::sorted_by_pt(cs->inclusive_jets(0.0));
   cs->delete_self_when_unused();
+  return jets.at(0);
+}
+
+// Two-prong fixture: one hard + one soft prong separated in azimuth.
+static fastjet::PseudoJet pairJet(double ptHard, double ptSoft, double dPhi) {
+  return makeJet({mkPart(ptHard, 0.0, 0.0), mkPart(ptSoft, 0.0, dPhi)});
+}
+
+// Three-prong fixture: a hard prong plus a two-particle secondary prong whose OWN
+// splitting passes grooming — the configuration the primary sequence cannot see.
+static fastjet::PseudoJet threeProngJet() {
+  return makeJet({mkPart(100.0, 0.0, 0.0), mkPart(25.0, 0.0, 0.30), mkPart(20.0, 0.0, 0.40)});
+}
+
+static h2p::LundSeq declusterPair(double ptHard, double ptSoft, double dPhi,
+                                  const h2p::GroomParams& g) {
   fastjet::contrib::LundGenerator lund;
-  return h2p::primaryLund(jets.at(0), lund, g);
+  return h2p::primaryLund(pairJet(ptHard, ptSoft, dPhi), lund, g);
 }
 
 int main() {
@@ -77,6 +98,79 @@ int main() {
   std::vector<fastjet::PseudoJet> hadrons2{mk(98.0, 0.02), mk(50.0, 3.0)};
   auto matched2 = h2p::getMatchedHadronPartonJets(hadrons2, partons2, jp);
   CHECK(matched2.size() == 1, "unmatched hadron jet (no parton in cone) is dropped");
+
+  // ---- all-branch aux observables (docs/PLAN_Input.md) --------------------
+  std::printf("[test_lund_io] fullLundAux: predicate consistency\n");
+  fastjet::contrib::LundGenerator lund;
+  // The guarantee the shared `passesGroom` buys: the aux spine IS the primary plane,
+  // for every grooming setting, on every fixture.
+  const std::vector<fastjet::PseudoJet> fixtures{
+      pairJet(100.0, 40.0, 0.3),   // both cuts passed
+      pairJet(100.0, 5.0, 0.3),    // fails Soft Drop
+      pairJet(100.0, 40.0, 0.01),  // fails the kt floor
+      threeProngJet(),
+  };
+  bool consistent = true;
+  for (double z_cut : {0.0, 0.05, 0.1, 0.3}) {
+    for (double kt_floor : {0.0, 0.5, 1.0, 5.0}) {
+      h2p::GroomParams gg;
+      gg.z_cut = z_cut;
+      gg.kt_floor = kt_floor;
+      for (const auto& jet : fixtures) {
+        const auto n_prim = h2p::fullLundAux(jet, gg).n_primary;
+        const auto n_seq = h2p::primaryLund(jet, lund, gg).lnkt.size();
+        consistent = consistent && (n_prim == n_seq);
+      }
+    }
+  }
+  CHECK(consistent, "n_primary == primaryLund size over a (z_cut, kt_floor) grid");
+
+  std::printf("[test_lund_io] fullLundAux: secondary plane + groomed mass\n");
+  const fastjet::PseudoJet three = threeProngJet();
+  const h2p::JetAux a3 = h2p::fullLundAux(three, g);
+  CHECK(a3.n_all > a3.n_primary, "hard secondary splitting -> n_all > n_primary");
+  CHECK(a3.mg > 0.0f, "resolved two-prong substructure -> m_g > 0");
+
+  // Raising z_cut can only remove splittings and momentum: both are weakly decreasing.
+  h2p::GroomParams tight = g;
+  tight.z_cut = 0.4;
+  const h2p::JetAux a3_tight = h2p::fullLundAux(three, tight);
+  CHECK(a3_tight.n_all <= a3.n_all, "raising z_cut weakly decreases n_all");
+  CHECK(a3_tight.mg <= a3.mg, "raising z_cut weakly decreases m_g");
+
+  // Nothing survives grooming -> the jet is its hard prong: massless, no splittings.
+  const h2p::JetAux a_groomed = h2p::fullLundAux(pairJet(100.0, 5.0, 0.3), g);
+  CHECK(a_groomed.n_all == 0, "fully-groomed jet -> n_all == 0");
+  CHECK(a_groomed.mg == 0.0f, "fully-groomed jet (massless prong) -> m_g == 0");
+  CHECK(a_groomed.n_primary == 0, "fully-groomed jet -> n_primary == 0");
+
+  // The four fixtures above are shallow by construction. Real jets have deep, wide C/A
+  // trees, which is where a spine/predicate drift would actually show up — so replay the
+  // invariants on an ensemble of many-particle jets (fixed seed: deterministic test).
+  std::printf("[test_lund_io] fullLundAux: invariants on many-particle jets\n");
+  std::mt19937 rng(12345);
+  std::uniform_real_distribution<double> u01(0.0, 1.0);
+  bool ens_primary = true, ens_order = true, ens_mass = true;
+  int n_with_secondary = 0;
+  for (int ijet = 0; ijet < 200; ++ijet) {
+    std::vector<fastjet::PseudoJet> parts;
+    parts.push_back(mkPart(100.0, 0.0, 0.0));  // hard core
+    for (int i = 0; i < 30; ++i) {             // a spray of softer constituents
+      const double pt = 0.5 + 40.0 * std::pow(u01(rng), 3.0);
+      parts.push_back(mkPart(pt, 0.6 * (u01(rng) - 0.5), 0.6 * (u01(rng) - 0.5)));
+    }
+    const fastjet::PseudoJet jet = makeJet(parts);
+    const h2p::JetAux a = h2p::fullLundAux(jet, g);
+    ens_primary = ens_primary && (a.n_primary == h2p::primaryLund(jet, lund, g).lnkt.size());
+    ens_order = ens_order && (a.n_all >= a.n_primary);
+    // grooming only ever REMOVES momentum, so the groomed mass cannot exceed the jet's
+    ens_mass = ens_mass && (a.mg <= static_cast<float>(jet.m()) + 1e-3f);
+    if (a.n_all > a.n_primary) ++n_with_secondary;
+  }
+  CHECK(ens_primary, "n_primary == primaryLund size on 200 deep 31-particle jets");
+  CHECK(ens_order, "n_all >= n_primary on the ensemble");
+  CHECK(ens_mass, "m_g <= ungroomed jet mass on the ensemble");
+  CHECK(n_with_secondary > 20, "the ensemble actually exercises secondary planes");
 
   if (g_fail) {
     std::printf("[test_lund_io] %d FAILED\n", g_fail);

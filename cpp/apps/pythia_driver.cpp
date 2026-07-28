@@ -82,7 +82,9 @@ int main(int argc, char** argv) {
       h2p::LundSeq x = h2p::primaryLund(hj, lund, g);
       h2p::LundSeq y = h2p::primaryLund(pj, lund, g);
       if (x.lnkt.empty() && y.lnkt.empty()) continue;
-      writer.fill(iev, jIdx++, pythia.info.weight(), hj, x, y);
+      // hadron-level all-branch scalars: conditioning-side only (docs/PLAN_Input.md)
+      const h2p::JetAux aux = h2p::fullLundAux(hj, g);
+      writer.fill(iev, jIdx++, pythia.info.weight(), hj, x, y, aux);
     }
   }
 
