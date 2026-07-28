@@ -57,6 +57,25 @@ def test_load_for_inference_ignores_optimizer(tmp_path, batch):
     assert "model_state" in info and "config" in info
 
 
+def test_load_for_inference_carries_the_training_summary(tmp_path, batch):
+    """A consumer that RESTORES a run from cache instead of retraining still has to
+    report which checkpoint it got. These keys were missing, so `info.get("best_val",
+    nan)` at the call site reported `nan` rather than failing — a silent NaN in an A/B
+    results table (notebooks/aux_input_ab.ipynb)."""
+    b, geom = batch
+    cfg = load_config(["model=ar_junipr_v2"])
+    model, opt, sched = build_components(cfg, geom, torch.device("cpu"))
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    path = tmp_path / "ckpt.pt"
+    save_checkpoint(path, model=model, optimizer=opt, scheduler=sched, scaler=scaler,
+                    epoch=7, step=42, best_val=4.5901, cfg=cfg)
+    info = load_for_inference(path)
+    assert abs(info["best_val_nll"] - 4.5901) < 1e-9
+    assert info["epoch"] == 7
+    # the key the checkpoint actually stores; reading "best_val" was the bug
+    assert "best_val" not in info
+
+
 def test_old_snapshot_backward_compat(tmp_path, batch):
     """A checkpoint whose config predates min_emissions/length_penalty/cell_label_smoothing
     must still rebuild, read decode params tolerantly, and round-trip its own config_hash."""
