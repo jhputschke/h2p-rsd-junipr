@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from ..config import OmegaConf, decode_params
-from ..features import node_features
+from ..features import aux_source_fields, aux_vector, node_features, with_aux
 from ..geometry import Geometry
 from ..inference.length import learned_min_emissions
 from ..models.base import build_model
@@ -46,11 +46,24 @@ def predict(model, geometry, device, x_seq, decode: dict | None = None) -> dict:
 
     When `decode.length_floor_quantile > 0` (MAP only) the MAP multiplicity is floored
     per jet at the learned quantile of P(n|x). alpha=0 (the default) short-circuits and
-    the MAP is identical to today's hard-floored beam."""
+    the MAP is identical to today's hard-floored beam.
+
+    A model trained with `encoder.aux_features` REQUIRES `x_seq["aux"]`: a dict of the
+    raw source columns (`jet_pt`, `x_mg`, `x_nsec`) the C++ writer produces. Missing
+    keys raise — a served request silently defaulting them would be a different
+    conditioning distribution than the one the model was trained on."""
     dec = dict(decode or {})
-    xf = torch.tensor(
-        node_features(x_seq["lnInvDelta"], x_seq["lnkt"], x_seq["lnz"], x_seq["psi"])
-    ).unsqueeze(0).to(device)
+    xf_np = node_features(x_seq["lnInvDelta"], x_seq["lnkt"], x_seq["lnz"], x_seq["psi"])
+    aux_names = tuple(getattr(model, "aux_feature_names", ()) or ())
+    if aux_names:
+        aux_src = x_seq.get("aux")
+        if not isinstance(aux_src, dict):
+            raise ValueError(
+                f"this model was trained with aux_features={list(aux_names)}; the request "
+                f"must carry 'aux' as a dict of {list(aux_source_fields(aux_names))}"
+            )
+        xf_np = with_aux(xf_np, aux_vector(aux_src, aux_names))  # configured order
+    xf = torch.tensor(xf_np).unsqueeze(0).to(device)
     nx = torch.tensor([xf.shape[1]], device=device)
     draws = model.sample_batch(xf, nx, int(dec.get("n_posterior_samples", 200)))
     mults = np.array([len(d) for d in draws])
@@ -73,6 +86,8 @@ def predict(model, geometry, device, x_seq, decode: dict | None = None) -> dict:
         "posterior_mult_median": float(np.median(mults)),
         "posterior_mult_std": float(mults.std()),
         "posterior_mult_68CR": [float(np.percentile(mults, 16)), float(np.percentile(mults, 84))],
+        # echo the active aux conditioning (additive; [] for a plain model)
+        "aux_features": list(aux_names),
     }
     if is_mbr:  # decision-theoretic score (NOT a likelihood) + its backend tag
         out["mbr_risk"] = float(y_hat.risk) if y_hat.risk is not None else float("nan")
@@ -94,6 +109,9 @@ def create_app(ckpt_path: str):
         lnkt: list[float]
         lnz: list[float]
         psi: list[float]
+        # aux source columns (jet_pt, x_mg, x_nsec); required iff the checkpoint's
+        # encoder.aux_features is non-empty, ignored otherwise.
+        aux: dict[str, float] | None = None
 
     @app.post("/predict")
     def _predict(seq: LundSeq):

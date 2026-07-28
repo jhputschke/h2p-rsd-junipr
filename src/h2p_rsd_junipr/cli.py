@@ -203,7 +203,9 @@ def cmd_export(argv) -> int:
     geometry = Geometry.from_config(cfg.geometry)
     model = build_model(cfg, geometry)
     model.load_state_dict(info["model_state"])
-    example = (torch.zeros(1, 3, 5), torch.tensor([3]))
+    # trace width follows the encoder the checkpoint actually built: 5, or 5 + n_aux
+    n_in = 5 + len(getattr(model, "aux_feature_names", ()) or ())
+    example = (torch.zeros(1, 3, n_in), torch.tensor([3]))
     path = export_encoder_torchscript(model, out, example=example, verify=True)
     print(f"[export] scripted encoder -> {path} (allclose-verified)")
     return 0

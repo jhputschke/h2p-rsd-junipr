@@ -28,7 +28,7 @@ from ..distributions import (
     vonmises_logpdf,
 )
 from ..encoders.base import build_encoder
-from ..features import N_NODE_FEAT
+from ..features import N_NODE_FEAT, configured_aux_names
 from ..geometry import Geometry
 from ..inference.point_estimate import LundNode, LundPointEstimate, beam_search_cells
 from ..inference.sampling import ancestral_sample_cells, ancestral_sample_cells_fixed_length
@@ -84,7 +84,12 @@ class ARJunipr(PosteriorModel):
         self.emb_dim = emb
 
         # ---- encoder e(x) (pluggable) --------------------------------------
-        self.encoder_net = build_encoder(cfg.encoder, self.ctx_dim, N_NODE_FEAT)
+        # Aux conditioning (docs/PLAN_Input.md): the groomed per-jet scalars ride as
+        # constant extra COLUMNS of xf, so the only diff is the encoder's input width.
+        # () is the default -> n_in == N_NODE_FEAT -> byte-identical state_dict.
+        self.aux_feature_names = configured_aux_names(cfg.encoder)
+        n_in = N_NODE_FEAT + len(self.aux_feature_names)
+        self.encoder_net = build_encoder(cfg.encoder, self.ctx_dim, n_in)
 
         # ---- optional cross-attention onto the encoder's per-node states ----
         # Built ONLY when on, so the off-path module list / state_dict are unchanged.

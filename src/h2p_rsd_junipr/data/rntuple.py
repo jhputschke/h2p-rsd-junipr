@@ -1,6 +1,12 @@
 """RNTuple reader (was `load_rntuple`): the real-data path written by the C++
 `write_lund_rntuple` stage. Retains the per-jet `generator` tag for the §8
 systematic and the grooming provenance for downstream reporting.
+
+Also carries the aux conditioning columns (`jet_pt`, `x_mg`, `x_nsec`;
+docs/PLAN_Input.md) through the same tolerant `scalar()` reads. Their defaults are
+SENTINELS — NaN and -1 — that `features.aux_vector` rejects, so a file written
+before those columns existed fails loud at dataset build time when aux is requested,
+rather than training on NaNs.
 """
 
 from __future__ import annotations
@@ -39,6 +45,10 @@ def load_rntuple(path: str = "jets.root", ntuple: str = "Jets"):
                 z_cut=float(scalar("z_cut", i, float("nan"))),
                 beta=float(scalar("beta", i, float("nan"))),
                 kt_floor=float(scalar("kt_floor", i, float("nan"))),
+                # aux conditioning sources (sentinels when the columns are absent)
+                jet_pt=float(scalar("jet_pt", i, float("nan"))),
+                x_mg=float(scalar("x_mg", i, float("nan"))),
+                x_nsec=int(scalar("x_nsec", i, -1)),
                 x=(seq("x_lnInvDelta", i), seq("x_lnkt", i), seq("x_lnz", i), seq("x_psi", i)),
                 y=(seq("y_lnInvDelta", i), seq("y_lnkt", i), seq("y_lnz", i), seq("y_psi", i)),
             )

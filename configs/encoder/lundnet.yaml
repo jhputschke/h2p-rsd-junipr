@@ -4,3 +4,7 @@ hidden_dim: 64
 num_layers: 3
 k: 4
 dropout: 0.1
+
+# aux conditioning: [] == off (byte-identical). docs/PLAN_Input.md
+#   e.g. encoder.aux_features="[ln_mg_pt,nsec,ln_pt]"
+aux_features: []

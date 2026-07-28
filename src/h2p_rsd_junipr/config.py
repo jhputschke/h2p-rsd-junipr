@@ -48,6 +48,16 @@ class DataConfig:
     max_emissions: int = 20            # synthetic parton sequence cap
 
 
+# Aux conditioning (docs/PLAN_Input.md): per-jet GROOMED scalars broadcast onto every
+# node of xf, so the encoder sees what the primary-only sequence cannot represent.
+# `[]` (the default) is the byte-identical off path — same state_dict, same log_prob.
+# Registered names live in features.AUX_FEATURES; read them via
+# `features.configured_aux_names`, never `cfg.encoder.aux_features` directly, so old
+# checkpoint snapshots without the field keep loading.
+#   CLI: encoder.aux_features='[ln_mg_pt,nsec,ln_pt]'
+_AUX_DOC = "groomed per-jet conditioning scalars; [] == off (docs/PLAN_Input.md)"
+
+
 @dataclass
 class EncoderConfig:
     name: str = "gru"                  # gru | lundnet | deepsets
@@ -56,6 +66,7 @@ class EncoderConfig:
     num_layers: int = 1                # the "encoder depth" knob
     bidirectional: bool = True
     dropout: float = 0.1               # wired in (the script defines but never applies it)
+    aux_features: list[str] = field(default_factory=list)  # see _AUX_DOC
 
 
 @dataclass
@@ -66,6 +77,7 @@ class LundNetEncoderConfig:
     num_layers: int = 3
     k: int = 4                         # EdgeConv neighbourhood (chain graph -> sequential)
     dropout: float = 0.1
+    aux_features: list[str] = field(default_factory=list)  # see _AUX_DOC
 
 
 @dataclass
@@ -75,6 +87,7 @@ class DeepSetsEncoderConfig:
     hidden_dim: int = 64
     num_layers: int = 2
     dropout: float = 0.1
+    aux_features: list[str] = field(default_factory=list)  # see _AUX_DOC
 
 
 @dataclass
