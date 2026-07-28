@@ -65,8 +65,16 @@ byte-identical when off. Builds on the merged `PLAN_NsplitMinCut.md`,
   below it for an over-confident one; the all-off metric dict is bit-for-bit the old one.
 - **WP3**: OFF-path `state_dict` keys, NLL, samples and MAP identical to v2/v3; padding
   nodes provably receive zero attention weight; teacher-forced and incremental decode
-  paths agree step by step. At matched parameter count (+1.1%) on synthetic data,
-  15 epochs, `encoder=gru`: **val NLL/jet 17.85 (v4) vs 21.68 (v3)**.
+  paths agree step by step. At matched parameter count (+1.1%), `encoder=gru`: on
+  **synthetic** data (15 epochs) **val NLL/jet 17.85 (v4) vs 21.68 (v3)** — the stated
+  criterion, comfortably met; but on **real PYTHIA** data
+  (`cpp/test_data/jets.root`, 12 epochs) **4.64 (v4) vs 4.61 (v3)** — a wash. The
+  mechanism explains the split: that sample's mean hadron multiplicity is 1.74 (6.9% of
+  jets have no hadron emission at all), so there is no fixed-length bottleneck to remove
+  and the capacity `dec_dim` gave up is simply lost. Recorded because it is the more
+  useful result: **the exit criterion was met on the generator the plan named, and does
+  not transfer to the data.** Adoption stays gated on the WP4 A/B, run on the target
+  sample.
 - **WP4**: guard unit-tested at both thresholds and gated on the family having a head;
   `scripts/ab_v2_v3.py --fast` runs end to end in CI's fast tier. The fast tier already
   reproduces (a): v2 at `min_emissions=0` collapses to the empty tree for 100% of jets,

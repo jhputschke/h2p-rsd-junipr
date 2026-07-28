@@ -106,7 +106,10 @@ bit-for-bit unchanged.
 `ar_junipr_v4` adds decoder **cross-attention** over the encoder's per-node hadron states
 (`model.use_cross_attention=true`), so the parton decoder is no longer restricted to a single
 pooled `ctx_dim` vector. Compare it at *matched parameter count* — the attention adds ~25k
-params at `dec_dim=64`, so shrink `dec_dim` (52 matches v3 to +1.1%).
+params at `dec_dim=64`, so shrink `dec_dim` (52 matches v3 to +1.1%). Whether it pays depends
+on how long your hadron sequences are: a large win on the synthetic generator (mean
+multiplicity ~6), a wash on the tightly-groomed PYTHIA sample (mean 1.74). Measure it on your
+own data — [`CONFIGURATION.md` §4](CONFIGURATION.md#4-model--the-posterior-family) has the table.
 
 > **`log_prob` is not a density for every family.** `diffusion` sets
 > `exact_likelihood=False`: its coordinate term is a denoising-score-matching surrogate with

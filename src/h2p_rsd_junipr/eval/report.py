@@ -20,8 +20,8 @@ def _jsonable(obj):
         return {str(k): _jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_jsonable(v) for v in obj]
-    if isinstance(obj, (np.floating, np.integer)):
-        return obj.item()
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        return obj.item()  # np.bool_ is neither of the other two, and json rejects it
     if isinstance(obj, np.ndarray):
         return _jsonable(obj.tolist())
     return obj

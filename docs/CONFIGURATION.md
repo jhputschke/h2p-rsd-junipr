@@ -291,11 +291,25 @@ does not is a hard config error, never a silent fallback). The attention is appl
 `x` only, so the autoregressive factorization over `y` stays causal and the sampling/beam
 paths inherit the change unmodified.
 
-> **Compare at matched parameter count.** Cross-attention adds `kv_proj` + `xattn`
-> (~25k params at `dec_dim=64`), so shrink `dec_dim` to compensate before drawing any
-> conclusion. On synthetic data at 15 epochs with `encoder=gru`, v4 at `dec_dim=52`
-> (118.5k params) reaches **val NLL/jet 17.85** against v3 at `dec_dim=64` (117.2k params)
-> at **21.68**. Adoption for physics runs goes through the WP4 A/B, not that number alone.
+> **Compare at matched parameter count** — cross-attention adds `kv_proj` + `xattn`
+> (~25k params at `dec_dim=64`), so shrink `dec_dim` to compensate (52 matches v3 to +1.1%)
+> before drawing any conclusion.
+>
+> **And expect the answer to depend on the data.** Measured, `encoder=gru`, v4 at
+> `dec_dim=52` vs v3 at `dec_dim=64`:
+>
+> | data | mean hadron multiplicity | v3 val NLL/jet | v4 val NLL/jet |
+> |---|---:|---:|---:|
+> | synthetic (15 epochs) | ~6 | 21.68 | **17.85** |
+> | `cpp/test_data/jets.root` (12 epochs) | 1.74 | **4.61** | 4.64 |
+>
+> Not a contradiction — the mechanism showing itself. What cross-attention removes is the
+> cost of *pooling a sequence into one vector*, and the PYTHIA sample above is groomed
+> tightly enough (`z_cut=0.1`, `k_t` floor 1 GeV) that the mean hadron sequence is under two
+> emissions, with 6.9% of jets having none at all. There is no bottleneck to remove there,
+> so the capacity `dec_dim` gave up to pay for the attention is simply lost. **An ablation
+> on a generator whose statistics differ from your data can point the wrong way.** Adoption
+> for physics runs goes through the WP4 A/B on the data you will actually use.
 
 ### `cinn` — conditional normalizing flow
 

@@ -150,7 +150,10 @@ pairs with any decoder family.
   see [`docs/PLAN_MultHead.md`](docs/PLAN_MultHead.md).
 - **`ar_junipr_v4`** additionally lets the decoder cross-attend to the encoder's
   *per-node* hadron states instead of only the pooled `e(x)`, removing the fixed-length
-  bottleneck. Residual, so the off path is byte-identical.
+  bottleneck. Residual, so the off path is byte-identical. Whether it helps depends on how
+  long your hadron sequences are — it is a large win on the synthetic generator and a wash
+  on the tightly-groomed PYTHIA sample; measure it on your data
+  ([`CONFIGURATION.md` §4](docs/CONFIGURATION.md#4-model--the-posterior-family)).
 - **`cfm`** is the exact-likelihood member of the continuous-time family. The
   `exact_likelihood` column above is a real class attribute: `diffusion`'s `log_prob` is
   a denoising-score-matching **surrogate**, so its NLL is not comparable with the others
