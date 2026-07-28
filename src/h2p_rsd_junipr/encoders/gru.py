@@ -40,10 +40,20 @@ class GRUEncoder(Encoder):
 
     def _states(self, xf: torch.Tensor, nx: torch.Tensor):
         """(states (B, Mx, n_dir*hid), mask (B, Mx) float) — shared by both paths, so
-        the pooled and sequence views can never diverge."""
-        out, _ = self.encoder(self.x_feat(xf))  # (B, Mx, n_dir*hid)
+        the pooled and sequence views can never diverge.
+
+        `Mx == 0` is short-circuited: `nn.GRU` raises on a zero-length sequence, but a
+        jet whose groomed hadron-level tree is EMPTY is physical and common (~7% of the
+        PYTHIA sample in `cpp/test_data/jets.root`). Batched training never hit it —
+        `collate` pads to the batch maximum — but every per-jet inference path does,
+        since there `Mx = nx`. The empty sequence pools to zeros, so `e(x)` is the
+        projection's bias: the encoder's "I was told nothing" context."""
         Mx = xf.shape[1]
         mask = (torch.arange(Mx, device=xf.device)[None, :] < nx[:, None]).float()
+        if Mx == 0:
+            out = xf.new_zeros(xf.shape[0], 0, self.seq_dim)
+        else:
+            out, _ = self.encoder(self.x_feat(xf))  # (B, Mx, n_dir*hid)
         return out, mask
 
     def forward(self, xf: torch.Tensor, nx: torch.Tensor) -> torch.Tensor:

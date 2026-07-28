@@ -155,6 +155,8 @@ class ARJunipr(PosteriorModel):
         if not self.use_cross_attention:
             return None
         seq, mask = self.encoder_net.forward_seq(xf, nx)
+        if seq.shape[1] == 0:  # every jet here has an EMPTY hadron tree: nothing to attend to
+            return None
         return self.kv_proj(seq), ~mask.bool()  # nn.MultiheadAttention masks where True
 
     def _apply_xattn(self, out: torch.Tensor, kv) -> torch.Tensor:
@@ -173,6 +175,13 @@ class ARJunipr(PosteriorModel):
             key_padding_mask = key_padding_mask.expand(out.shape[0], -1)
         attn, _ = self.xattn(out, k, k, key_padding_mask=key_padding_mask,
                              need_weights=False)
+        # A jet with an EMPTY hadron tree has every key masked. Softmax over nothing is
+        # undefined and some torch versions return NaN there, which would silently
+        # poison a whole batch's gradients — so drop the residual for those rows, which
+        # is also the right semantics: nothing to attend to contributes nothing.
+        empty = key_padding_mask.all(dim=1)
+        if bool(empty.any()):
+            attn = torch.where(empty[:, None, None], torch.zeros_like(attn), attn)
         return out + attn
 
     # -- teacher-forced decoder states --------------------------------------

@@ -177,7 +177,7 @@ class CFM(PosteriorModel):
         `u_t = x_1 - (1 - sigma_min) x_0`, constant along the path."""
         x1 = s
         x0 = torch.randn_like(x1)
-        t = torch.rand(x1.shape[:-1] + (1,), device=x1.device)
+        t = torch.rand(x1.shape[:-1] + (1,), device=x1.device, dtype=x1.dtype)
         a = 1.0 - (1.0 - self.sigma_min) * t
         x_t = a * x0 + t * x1
         target = x1 - (1.0 - self.sigma_min) * x0
@@ -191,7 +191,7 @@ class CFM(PosteriorModel):
         the Hutchinson estimator every high-dimensional CNF is forced into is
         unnecessary here, and the likelihood comes out deterministic rather than
         stochastic (the property that makes it usable for model selection)."""
-        div = torch.zeros(xx.shape[:-1], device=xx.device)
+        div = torch.zeros(xx.shape[:-1], device=xx.device, dtype=xx.dtype)
         for i in range(4):
             e = torch.zeros_like(v)
             e[..., i] = 1.0
@@ -215,9 +215,13 @@ class CFM(PosteriorModel):
         n_steps = int(n_steps or self.n_ode_steps)
         solver = self.ode_solver
         dt = (-1.0 if reverse else 1.0) / n_steps
-        t = (torch.ones if reverse else torch.zeros)(s.shape[:-1] + (1,), device=s.device)
+        # dtype from `s`, not the default: the likelihood is evaluated in float64 by the
+        # normalization test, and a float32 time would only survive by type promotion.
+        t = (torch.ones if reverse else torch.zeros)(
+            s.shape[:-1] + (1,), device=s.device, dtype=s.dtype
+        )
         x = s
-        acc = torch.zeros(s.shape[:-1], device=s.device) if with_divergence else None
+        acc = torch.zeros(s.shape[:-1], device=s.device, dtype=s.dtype) if with_divergence else None
 
         def f(xx, tt):
             if not with_divergence:
