@@ -29,10 +29,50 @@ def register_model(*names: str):
 
 
 class PosteriorModel(nn.Module, ABC):
+    # --- contract flags (WP1/WP2 of docs/PLAN_UPDATES.md) ---------------------
+    # Is `log_prob` a NORMALIZED log-density, or a training surrogate? Every family
+    # that honors the contract leaves this True; `Diffusion` sets it False (its
+    # log_prob is a denoising-score-matching proxy). Consumers that report NLLs or
+    # likelihood RATIOS (cli `eval`, serving) warn when it is False rather than
+    # branching on the family name.
+    exact_likelihood: bool = True
+    # Does the family expose closed-form / invertible per-coordinate CDFs, i.e. can
+    # `coordinate_cdfs` return a probability-integral transform? (WP2 coordinate PITs.)
+    supports_coordinate_pit: bool = False
+
     @abstractmethod
     def log_prob(self, batch: dict) -> torch.Tensor:
         """(B,) log q_phi(y | x)."""
         ...
+
+    def training_objective(self, batch: dict) -> torch.Tensor:
+        """(B,) per-jet quantity the trainer MINIMIZES.
+
+        Defaults to `-log_prob` — i.e. maximum likelihood, which is what every
+        likelihood-trained family wants, so the default keeps the loop bit-identical
+        for all of them. The hook exists because a family can have an exact
+        `log_prob` that is *not* its training objective: `cfm` regresses a conditional
+        vector field (Lipman et al., arXiv:2210.02747) and only integrates the
+        probability-flow ODE at evaluation time. Overriding this — instead of letting
+        `log_prob` return the cheap surrogate — is what keeps the one-contract
+        invariant that `log_prob` is always a normalized density."""
+        return -self.log_prob(batch)
+
+    def coordinate_cdfs(self, batch: dict) -> dict | None:
+        """Per-emission probability-integral transforms of the TRUE coordinates,
+        teacher-forced on `batch` — the input to the WP2 per-coordinate PITs.
+
+        Returns `{"names": [str, ...], "u": (B, L, D) in [0,1], "mask": (B, L) bool,
+        "space": "physical"|"latent"}` or **None** when the family cannot provide one
+        (no exact coordinate density, or no continuous coordinates at all). Families
+        with an explicit coordinate head report the transform in PHYSICAL coordinates
+        (one PIT per Lund coordinate); families whose coordinates go through a
+        normalizing map report it in the LATENT base space (one PIT per base
+        dimension, uniform under a calibrated model either way).
+
+        This is the only place the per-family difference lives: `eval/calibration.py`
+        consumes the dict and never asks which family produced it."""
+        return None
 
     @abstractmethod
     def sample(self, xf: torch.Tensor, nx: torch.Tensor, n: int) -> list:

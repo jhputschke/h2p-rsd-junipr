@@ -19,13 +19,24 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..distributions import gauss_logpdf, trunc_normal_logpdf, vonmises_logpdf
+from ..distributions import (
+    gauss_cdf,
+    gauss_logpdf,
+    trunc_normal_cdf,
+    trunc_normal_logpdf,
+    vonmises_cdf,
+    vonmises_logpdf,
+)
 from ..encoders.base import build_encoder
 from ..features import N_NODE_FEAT
 from ..geometry import Geometry
 from ..inference.point_estimate import LundNode, LundPointEstimate, beam_search_cells
 from ..inference.sampling import ancestral_sample_cells, ancestral_sample_cells_fixed_length
 from .base import PosteriorModel, register_model
+
+# Physical coordinate names, in the column order of `yraw` / the coordinate head.
+# Shared with the WP2 per-coordinate PIT report.
+_COORD_NAMES = ("du", "dv", "ln_z", "psi")
 
 
 def _mlp(in_dim: int, hidden: int, out_dim: int, n_layers: int) -> nn.Module:
@@ -53,6 +64,8 @@ class ARJunipr(PosteriorModel):
         self.dec_dim = int(m.dec_dim)
         self.dec_layers = int(m.dec_layers)
         self.continuous_coords = bool(m.continuous_coords)
+        # exact closed-form coordinate CDFs exist exactly when the coordinate head does
+        self.supports_coordinate_pit = self.continuous_coords
         self.sigma_floor = float(m.sigma_floor)
         self.kappa_max = float(m.kappa_max)
         # default 0.0 == off; getattr tolerates old checkpoint configs lacking the field
@@ -199,6 +212,44 @@ class ARJunipr(PosteriorModel):
 
     def log_prob(self, batch) -> torch.Tensor:
         return -self.per_jet_nll(batch)
+
+    # -- WP2: per-coordinate PIT ---------------------------------------------
+    @torch.inference_mode()
+    def coordinate_cdfs(self, batch) -> dict | None:
+        """Teacher-forced probability-integral transform of the four true coordinates.
+
+        The AR coordinate head is a product of closed-form 1-d densities, so its PIT is
+        exact and lives in PHYSICAL coordinates: the truncated-normal CDF for the
+        within-cell offsets (du, dv) — the same normalizer `trunc_normal_logpdf` divides
+        by — the normal CDF for ln z, and the von Mises CDF for psi. v1
+        (`continuous_coords=False`) has no coordinate density, so it returns None."""
+        if not self.continuous_coords:
+            return None
+        xf, nx, yc, ny, yraw = (batch["xf"], batch["nx"], batch["yc"], batch["ny"], batch["yraw"])
+        B, L = yc.shape
+        if L == 0:
+            empty = torch.zeros(B, 0, 4, device=yc.device)
+            return {"names": _COORD_NAMES, "u": empty, "mask": empty[..., 0].bool(),
+                    "space": "physical"}
+        e = self.encode(xf, nx)
+        out = self._decode_states(yc, e)
+        eh_t = torch.cat([out[:, :L, :], e.unsqueeze(1).expand(-1, L, -1)], dim=-1)
+        params = self._coord_params(torch.cat([eh_t, self.y_embed(yc.clamp(min=0))], dim=-1))
+        du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig, mu, kappa = params
+        cx, cy = self.cell_cx[yc], self.cell_cy[yc]
+        du = (yraw[..., 0] - cx).clamp(-self.half_u, self.half_u)
+        dv = (yraw[..., 1] - cy).clamp(-self.half_v, self.half_v)
+        u = torch.stack(
+            [
+                trunc_normal_cdf(du, du_mean, du_sig, -self.half_u, self.half_u),
+                trunc_normal_cdf(dv, dv_mean, dv_sig, -self.half_v, self.half_v),
+                gauss_cdf(yraw[..., 2], lnz_mean, lnz_sig),
+                vonmises_cdf(yraw[..., 3], mu, kappa),
+            ],
+            dim=-1,
+        )
+        mask = torch.arange(L, device=yc.device).unsqueeze(0) < ny.unsqueeze(1)
+        return {"names": _COORD_NAMES, "u": u, "mask": mask, "space": "physical"}
 
     # -- single-jet / batched decoder steps ---------------------------------
     def _step(self, tok: torch.Tensor, e: torch.Tensor, h):

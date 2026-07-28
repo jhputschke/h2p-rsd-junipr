@@ -73,9 +73,11 @@ def cmd_train(argv) -> int:
 
 
 def cmd_eval(argv) -> int:
-    from .config import OmegaConf, decode_params
+    from .config import OmegaConf, decode_params, experiment_params
     from .eval.calibration import run_calibration
     from .eval.closure import print_point_estimate, run_closure
+    from .eval.report import plot_calibration, save_metrics
+    from .inference.mbr import mbr_kwargs_from_decode
     from .models.base import build_model
     from .train.checkpoint import load_for_inference
 
@@ -112,12 +114,35 @@ def cmd_eval(argv) -> int:
         print("[eval] no checkpoint given; evaluating an untrained model (smoke).")
 
     model.eval()
-    run_closure(model, val_ds, dm_jets, geometry, device,
-                K=cfg.experiment.n_closure_samples, n_closure=cfg.experiment.closure_jets,
-                decode=decode)
-    run_calibration(model, val_ds, geometry, device,
-                    K=cfg.experiment.n_closure_samples, n_jets=cfg.experiment.closure_jets)
+    if not getattr(model, "exact_likelihood", True):
+        print(
+            f"[eval] WARNING: model family {cfg.model.name!r} sets exact_likelihood=False — "
+            "its `log_prob` is a training surrogate, not a normalized density. Reported "
+            "NLLs and log-ratios are NOT comparable across families (use model=cfm for the "
+            "exact-likelihood continuous-time family)."
+        )
+    exp = experiment_params(cfg)  # tolerant of pre-WP2 config snapshots
+    metrics = {"model": str(cfg.model.name), "encoder": str(cfg.encoder.name),
+               "checkpoint": str(ckpt) if ckpt else None}
+    metrics["closure"] = run_closure(
+        model, val_ds, dm_jets, geometry, device,
+        K=exp["n_closure_samples"], n_closure=exp["closure_jets"], decode=decode,
+    )
+    metrics["calibration"] = run_calibration(
+        model, val_ds, geometry, device,
+        K=exp["n_closure_samples"], n_jets=exp["closure_jets"],
+        pit_coords=exp["pit_coords"], stratify_regions=exp["stratify_regions"],
+        tarp=exp["tarp"], tarp_refs=exp["tarp_refs"], tarp_reference=exp["tarp_reference"],
+        mbr_kwargs=mbr_kwargs_from_decode(decode),
+    )
     print_point_estimate(model, val_ds, dm_jets, geometry, device, decode=decode)
+
+    if ckpt:  # artifacts land beside the checkpoint, next to the training curves
+        out_dir = Path(ckpt).resolve().parent
+        save_metrics(metrics, out_dir / "eval_metrics.json")
+        figs = plot_calibration(metrics["calibration"], out_dir)
+        print(f"\n[eval] wrote {out_dir/'eval_metrics.json'}"
+              + (f" and {len(figs)} figure(s)" if figs else ""))
     return 0
 
 

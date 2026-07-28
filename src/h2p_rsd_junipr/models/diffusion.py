@@ -1,13 +1,20 @@
 """§5.3 conditional diffusion / Schrödinger-bridge posterior (arXiv:2404.18807).
 
 Contract-complete *baseline* drop-in: a conditional variance-preserving diffusion
-over the 4 continuous coordinates per node (denoising-score-matching training
-objective; a variational bound used as the reported `log_prob`), paired — as in
-the cINN baseline — with categorical multiplicity and cell heads so it returns the
-same posterior-draw structure. `sample` runs the reverse process; `map_estimate`
-uses the posterior-mean (x0-prediction) surrogate. Phase 5 swaps in the full
-score/bridge model and probability-flow-ODE likelihood; this establishes the
-registry drop-in and passes the integration smoke train.
+over the 4 continuous coordinates per node, paired — as in the cINN baseline —
+with categorical multiplicity and cell heads so it returns the same posterior-draw
+structure. `sample` runs the reverse process; `map_estimate` uses the
+posterior-mean (x0-prediction) surrogate.
+
+> **`log_prob` here is NOT a normalized density.** The coordinate term is the
+> denoising-score-matching regression residual used as a (negative) log-density
+> *proxy* — it is not the diffusion ELBO and it is not the probability-flow-ODE
+> likelihood, so it carries an unknown, context-dependent offset. Consequently this
+> family sets `exact_likelihood = False`: its NLL must not be compared against
+> `cinn`/`cfm`/`ar_junipr_*`, and its log-ratios are not likelihood ratios. Use
+> `model=cfm` ([`cfm.py`](cfm.py)) for the exact-likelihood member of the
+> continuous-time family; `diffusion` is kept as the registry's cheap-sampler
+> baseline (docs/PLAN_UPDATES.md WP1).
 """
 
 from __future__ import annotations
@@ -43,6 +50,10 @@ class _Denoiser(nn.Module):
 
 @register_model("diffusion")
 class Diffusion(PosteriorModel):
+    # THE one family whose `log_prob` is a training surrogate, not a density. Every
+    # NLL/log-ratio consumer warns on this flag instead of naming the family.
+    exact_likelihood = False
+
     def __init__(self, cfg, geometry: Geometry):
         super().__init__()
         m = cfg.model
@@ -109,6 +120,9 @@ class Diffusion(PosteriorModel):
         return -(logp_n + logp_cell) + dsm
 
     def log_prob(self, batch) -> torch.Tensor:
+        """NOT a normalized log-density — see the module docstring and
+        `exact_likelihood = False`. Kept as the training objective and as a relative
+        model-selection score *within* this family only."""
         return -self.per_jet_nll(batch)
 
     @torch.inference_mode()

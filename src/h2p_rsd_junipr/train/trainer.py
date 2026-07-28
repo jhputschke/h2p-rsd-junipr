@@ -115,7 +115,10 @@ class Trainer:
             batch = self._move(batch)
             self.opt.zero_grad(set_to_none=True)
             with torch.autocast(self.device.type, enabled=self.cfg.trainer.amp):
-                nll = -self.model.log_prob(batch)  # (B,)
+                # `training_objective` defaults to -log_prob (maximum likelihood) for
+                # every family; `cfm` overrides it with its flow-matching regression,
+                # keeping its `log_prob` an exact ODE likelihood rather than a proxy.
+                nll = self.model.training_objective(batch)  # (B,)
                 loss = (batch["w"] * nll).sum() / batch["w"].sum().clamp(min=1e-8)
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.opt)
