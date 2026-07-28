@@ -17,7 +17,7 @@ execute_process(COMMAND root-config --prefix OUTPUT_VARIABLE ROOT_PREFIX
 if(ROOT_PREFIX)
   list(APPEND CMAKE_PREFIX_PATH "${ROOT_PREFIX}")
 endif()
-find_package(ROOT CONFIG REQUIRED COMPONENTS RIO Tree ROOTNTuple)
+find_package(ROOT CONFIG REQUIRED COMPONENTS RIO Tree Hist ROOTNTuple)
 message(STATUS "ROOT ${ROOT_VERSION} found")
 
 # ---- FastJet + fjcontrib LundPlane ------------------------------------------
@@ -71,6 +71,10 @@ endif()
 # ---- reader / inspector (ROOT-only; no FastJet/PYTHIA) -----------------------
 add_executable(read_lund_rntuple apps/read_lund_rntuple.cpp)
 target_link_libraries(read_lund_rntuple PRIVATE ROOT::RIO ROOT::Tree ROOT::ROOTNTuple)
+
+# ---- histogrammer (ROOT-only; no FastJet/PYTHIA) -----------------------------
+add_executable(hist_lund_rntuple apps/hist_lund_rntuple.cpp)
+target_link_libraries(hist_lund_rntuple PRIVATE ROOT::RIO ROOT::Tree ROOT::Hist ROOT::ROOTNTuple)
 
 # ---- dedicated PYTHIA driver (only when PYTHIA is available) ------------------
 if(PYTHIA8_FOUND)
