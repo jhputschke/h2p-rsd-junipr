@@ -3,6 +3,27 @@
 Validation + physics figures, nbstripped in git (see `.pre-commit-config.yaml`)
 and rendered in the docs:
 
+- **aux_input_ab.ipynb** — the A/B for [`docs/PLAN_Input.md`](../docs/PLAN_Input.md):
+  does conditioning on **groomed all-branch** scalars — the pipeline-groomed mass `m_g`,
+  the secondary-plane splitting count `n_sec`, and the jet scale — buy anything the
+  primary-only hadron sequence cannot supply? Runs on `cpp/test_data/jets_aux.root`
+  (the same card and the same 25 000 events as `jets.root`, plus the two new columns, so
+  the comparison is paired). Shows why the aux columns are not functions of `x`; verifies
+  the `aux_features=[]` off path is byte-identical; then trains `ar_junipr_v3 + gru` with
+  and without aux over **three seeds** and reads the held-out NLL delta against the seed
+  spread. Breaks the gain down by secondary activity and groomed mass (including the
+  `n_x = 0` jets that structurally cannot benefit), checks closure / MBR risk / SBC /
+  per-coordinate PITs **stratified in aux bins**, ablates the three features
+  individually, and closes against the plan's four exit criteria — including the one
+  (generator-B prior spread) that is blocked on `PLAN_UPDATES.md` WP5 and is reported as
+  blocked rather than skipped. **Outcome: the gate fails and aux stays opt-in** — the
+  −0.029 nat/jet gain is exactly the seed spread, one of three seeds goes the wrong way,
+  and the `n_x = 0` jets that *cannot* receive aux "gain" just as much, which is what
+  shows the aggregate is noise. The signal that does survive is in the `n_sec = 2–3`
+  stratum (−0.100 nats/jet); 82.6 % of this sample has `n_sec = 0`, so there is little
+  else to find here. ~35 min on MPS for the 15 trainings; every run is cached, so a
+  re-run is instant.
+
 - **calibration_v2_walkthrough.ipynb** — the post-review calibration suite and the new
   model families ([`docs/PLAN_UPDATES.md`](../docs/PLAN_UPDATES.md) WP1–WP4), worked
   end to end on the **real PYTHIA 8.3 data** in `cpp/test_data/jets.root` rather than the

@@ -27,7 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..encoders.base import build_encoder
-from ..features import N_NODE_FEAT
+from ..features import N_NODE_FEAT, configured_aux_names
 from ..geometry import Geometry
 from ..inference.point_estimate import LundNode, LundPointEstimate
 from .base import PosteriorModel, register_model
@@ -63,7 +63,12 @@ class Diffusion(PosteriorModel):
         self.n_steps = int(m.n_steps)
         self.max_emissions = int(m.max_emissions)
 
-        self.encoder_net = build_encoder(cfg.encoder, self.ctx_dim, N_NODE_FEAT)
+        # Aux conditioning (docs/PLAN_Input.md): the groomed per-jet scalars ride as
+        # constant extra COLUMNS of xf, so the only diff is the encoder's input width.
+        # () is the default -> n_in == N_NODE_FEAT -> byte-identical state_dict.
+        self.aux_feature_names = configured_aux_names(cfg.encoder)
+        n_in = N_NODE_FEAT + len(self.aux_feature_names)
+        self.encoder_net = build_encoder(cfg.encoder, self.ctx_dim, n_in)
         self.cell_emb = nn.Embedding(self.n_cells, int(cfg.encoder.emb_dim))
         self.n_head = nn.Sequential(
             nn.Linear(self.ctx_dim, self.ctx_dim), nn.ReLU(),

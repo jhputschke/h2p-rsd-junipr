@@ -39,6 +39,11 @@ class PosteriorModel(nn.Module, ABC):
     # Does the family expose closed-form / invertible per-coordinate CDFs, i.e. can
     # `coordinate_cdfs` return a probability-integral transform? (WP2 coordinate PITs.)
     supports_coordinate_pit: bool = False
+    # Aux conditioning columns this model's encoder was BUILT for, in order
+    # (docs/PLAN_Input.md). Every family sets it from `encoder.aux_features`; the ()
+    # default is the off path, and it is what serving reads to decide whether a
+    # request must carry the aux sources.
+    aux_feature_names: tuple[str, ...] = ()
 
     @abstractmethod
     def log_prob(self, batch: dict) -> torch.Tensor:

@@ -20,9 +20,12 @@ class LundWriter {
   LundWriter(const std::string& path, const std::string& ntuple, const GroomParams& g,
              std::string generator);
 
-  // Append one jet entry (the writer flushes & closes on destruction).
+  // Append one jet entry (the writer flushes & closes on destruction). `aux` is the
+  // hadron-level all-branch summary (docs/PLAN_Input.md); it feeds the CONDITIONING
+  // side only — the parton-level target y is untouched by it.
   void fill(std::uint64_t event, std::uint32_t jet_index, double weight,
-            const fastjet::PseudoJet& hadronJet, const LundSeq& x, const LundSeq& y);
+            const fastjet::PseudoJet& hadronJet, const LundSeq& x, const LundSeq& y,
+            const JetAux& aux);
 
   std::uint64_t nWritten() const { return n_written_; }
 
@@ -40,6 +43,8 @@ class LundWriter {
   std::shared_ptr<std::string> fGen_;
   std::shared_ptr<std::vector<float>> fXi_, fXk_, fXz_, fXp_;
   std::shared_ptr<std::vector<float>> fYi_, fYk_, fYz_, fYp_;
+  std::shared_ptr<float> fXmg_, fXptg_, fXktSecMax_, fXktSecSum_;
+  std::shared_ptr<std::uint32_t> fXnsec_, fXsecAttach_;
 };
 
 }  // namespace h2p

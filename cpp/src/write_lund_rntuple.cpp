@@ -50,7 +50,9 @@ std::uint32_t processEvent(std::uint64_t iev, const Event& ev,
     h2p::LundSeq x = h2p::primaryLund(hadronJet, lund, g);
     h2p::LundSeq y = h2p::primaryLund(partonJet, lund, g);
     if (x.lnkt.empty() && y.lnkt.empty()) continue;  // nothing survives grooming
-    writer.fill(iev, jIdx++, ev.weight, hadronJet, x, y);
+    // hadron-level all-branch scalars: conditioning-side only (docs/PLAN_Input.md)
+    const h2p::JetAux aux = h2p::fullLundAux(hadronJet, g);
+    writer.fill(iev, jIdx++, ev.weight, hadronJet, x, y, aux);
   }
   return jIdx;
 }

@@ -109,3 +109,15 @@ references:
     authors: [{family-names: Butter}]
     year: 2023
     notes: "arXiv:2305.10475; evidence for attending to per-node states"
+  # --- aux conditioning: groomed all-branch observables (docs/PLAN_Input.md) ---
+  - type: article
+    title: "Quark/Gluon Discrimination and Top Tagging with Dual Attention Transformer"
+    authors: [{family-names: Dreyer}, {family-names: Soyez}, {family-names: Takacs}]
+    year: 2021
+    notes: "arXiv:2112.09140; secondary-plane density carries quark/gluon information beyond the primary plane"
+  - type: article
+    title: "FiLM: Visual Reasoning with a General Conditioning Layer"
+    authors: [{family-names: Perez}, {family-names: Strub}, {family-names: de Vries}, {family-names: Dumoulin}, {family-names: Courville}]
+    journal: "AAAI"
+    year: 2018
+    notes: "arXiv:1709.07871; feature-wise conditioning, the pattern behind broadcasting per-jet aux onto every node"

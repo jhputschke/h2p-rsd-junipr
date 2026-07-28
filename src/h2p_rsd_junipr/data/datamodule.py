@@ -14,20 +14,26 @@ from pathlib import Path
 import numpy as np
 from torch.utils.data import DataLoader
 
+from ..features import configured_aux_names
 from ..geometry import Geometry
 from .dataset import MatchedLundDataset, collate
 from .rntuple import load_rntuple
 from .synthetic import synthetic_matched_dataset
 
 
-def _fingerprint(jets, cfg_data) -> str:
+def _fingerprint(jets, cfg_data, aux_features=()) -> str:
     """Hash of source + grooming params + a content sample, so jets.root <-> run
-    linkage is explicit (§9 data versioning)."""
+    linkage is explicit (§9 data versioning).
+
+    `aux_features` is part of the hash because it changes the WIDTH of the tensors
+    built from these jets — without it the §4 preprocessed-tensor cache could serve
+    a stale-width `xf` to a model expecting the aux columns."""
     h = hashlib.sha1()
     h.update(str(cfg_data.source).encode())
     h.update(str(cfg_data.path).encode())
     h.update(str(cfg_data.seed).encode())
     h.update(str(len(jets)).encode())
+    h.update(",".join(aux_features).encode())
     for j in jets[: min(len(jets), 64)]:
         h.update(np.asarray(j["x"][0], dtype=np.float32).tobytes())
         h.update(np.asarray(j["y"][0], dtype=np.float32).tobytes())
@@ -42,6 +48,8 @@ class LundDataModule:
         self.train_jets: list | None = None
         self.val_jets: list | None = None
         self.fingerprint: str | None = None
+        # tolerant read: a checkpoint config predating the field yields ()
+        self.aux_features = configured_aux_names(cfg.encoder)
 
     # ---- load + split ------------------------------------------------------
     def setup(self) -> LundDataModule:
@@ -52,7 +60,8 @@ class LundDataModule:
         if jets is None:
             jets = synthetic_matched_dataset(d.n_jets, seed=d.seed, max_emissions=d.max_emissions)
         self.jets = jets
-        self.fingerprint = _fingerprint(jets, d)
+        self.fingerprint = _fingerprint(jets, d, self.aux_features)
+        self._report_aux_coverage(jets)
 
         n_val = max(int(d.min_val), len(jets) // int(round(1.0 / d.val_fraction)))
         # Default (no event ids): trailing split, matching the v2 script exactly.
@@ -62,6 +71,23 @@ class LundDataModule:
         else:
             self.train_jets, self.val_jets = jets[:-n_val], jets[-n_val:]
         return self
+
+    def _report_aux_coverage(self, jets) -> None:
+        """Report the fraction of jets whose aux signal is structurally lost.
+
+        Aux rides as constant per-node columns of `xf`, so a jet with an EMPTY groomed
+        hadron tree (`nx == 0`, physical and not rare — the RNTuple path keeps a jet
+        whenever EITHER level survives grooming) has no rows to carry it. If this
+        fraction is material, the fix is signature widening or folding aux into the
+        WP3 cross-attention conditioning, not a silent tolerance."""
+        if not self.aux_features or not jets:
+            return
+        n_empty = sum(1 for j in jets if len(j["x"][0]) == 0)
+        frac = n_empty / len(jets)
+        print(
+            f"[data] aux_features={list(self.aux_features)}: {frac:.2%} of jets have an empty "
+            f"hadron tree (nx=0) and therefore carry NO aux signal (broadcast has no rows)."
+        )
 
     @staticmethod
     def _split_by_event(jets, events, n_val_target, seed):
@@ -84,8 +110,8 @@ class LundDataModule:
 
     # ---- datasets / loaders ------------------------------------------------
     def datasets(self):
-        train = MatchedLundDataset(self.train_jets, self.geometry)
-        val = MatchedLundDataset(self.val_jets, self.geometry)
+        train = MatchedLundDataset(self.train_jets, self.geometry, self.aux_features)
+        val = MatchedLundDataset(self.val_jets, self.geometry, self.aux_features)
         return train, val
 
     def loaders(self):
