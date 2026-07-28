@@ -1,0 +1,32 @@
+! pp_dijet.cmnd — one card configures generation AND analysis for the
+! h2p-rsd-junipr Lund RNTuple writers. Comments start with '!'.
+!
+!   ./pythia_driver 100000 jets.root 1 cpp/cards/pp_dijet.cmnd
+!
+! The "HadronJet:*", "SoftDrop:*" and "Analysis:*" entries are custom settings
+! registered by the driver (run_settings.hpp); change them here instead of in
+! source. The Soft Drop / kt-floor values are written into the RNTuple provenance.
+
+! ---- generator (standard PYTHIA settings) --------------------------------
+Beams:eCM            = 13000.
+HardQCD:all          = on
+PhaseSpace:pTHatMin  = 100.
+PartonLevel:MPI      = off          ! pure hadronization study (no underlying event)
+Print:quiet          = on
+Random:setSeed       = on
+Random:seed          = 1            ! overridden by the CLI seed argument if given
+
+! ---- jet finding / matching (custom; anti-kt + greedy one-to-one) --------
+HadronJet:R          = 0.4          ! anti-kt jet radius
+HadronJet:ptMin      = 20.          ! GeV; min jet pt at both levels
+HadronJet:maxRap     = 2.0          ! |y| acceptance on the hadron jet
+HadronJet:matchdR    = 0.3          ! hadron<->parton matching cone
+
+! ---- grooming (custom; Soft Drop boundary + perturbative floor) ----------
+SoftDrop:zCut        = 0.1          ! CMS/ATLAS standard
+SoftDrop:beta        = 0.0          ! 0 = mMDT-like, most NP-robust
+SoftDrop:R0          = 1.0          ! angular normalisation (drops out for beta=0)
+SoftDrop:ktFloor     = 1.0          ! GeV; lower edge of the perturbative band
+
+! ---- provenance tag stamped per entry ------------------------------------
+Analysis:generatorTag = PYTHIA-8.3:tune-Monash
