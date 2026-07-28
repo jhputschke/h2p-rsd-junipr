@@ -96,6 +96,11 @@ class ARJuniprConfig:
     #                                      q(y|x) = q(N|x) q(y|N,x) (docs/PLAN_MultHead.md).
     max_emissions: int = 25            # categorical size of the multiplicity head (n = 0..max);
     #                                    only used when use_multiplicity_head=True. Mirrors CINN.
+    use_cross_attention: bool = False  # decoder attends to the encoder's per-node hadron
+    #                                    states instead of only the pooled e(x) (WP3). Off keeps
+    #                                    the module list and state_dict byte-identical; requires
+    #                                    an encoder with returns_sequence=True.
+    xattn_heads: int = 4               # attention heads; must divide dec_dim
 
 
 @dataclass
@@ -116,6 +121,23 @@ class DiffusionConfig:
     hidden_dim: int = 64
     n_steps: int = 50
     max_emissions: int = 25
+
+
+@dataclass
+class CFMConfig:
+    """Conditional flow matching with an EXACT probability-flow-ODE likelihood
+    (docs/PLAN_UPDATES.md WP1). Unlike `diffusion`, `log_prob` here is a normalized
+    density, so its NLL is comparable with `cinn` / `ar_junipr_*`."""
+
+    name: str = "cfm"
+    ctx_dim: int = 64
+    hidden_dim: int = 64
+    n_ode_steps: int = 32          # likelihood + sampling ODE steps
+    ode_solver: str = "rk4"        # rk4 (4 field evals/step) | heun (2, ~2x faster)
+    max_emissions: int = 25        # multiplicity-head support, mirrors CINN
+    time_features: int = 16        # Fourier features for t
+    sigma_min: float = 1e-3        # OT-path terminal width (Lipman Eq. 20)
+    cfm_map: str = "ode_mode"      # MAP coordinates: ode_mode (push the base mode) | ascent
 
 
 @dataclass
@@ -178,6 +200,13 @@ class ExperimentConfig:
     closure_jets: int = 300
     n_closure_samples: int = 200
     generator_b: str | None = None  # second generator for the systematic (§8)
+    # --- calibration suite v2 (docs/PLAN_UPDATES.md WP2). All default off, so the
+    #     reported metric dict is bit-identical to the pre-WP2 suite until opted in.
+    pit_coords: bool = False        # per-coordinate PITs (exact conditional CDFs)
+    stratify_regions: bool = False  # every metric also binned by leading-emission quadrant
+    tarp: bool = False              # TARP expected-coverage curve on tree-valued posteriors
+    tarp_refs: int = 100            # size of the TARP reference pool
+    tarp_reference: str = "pooled"  # pooled (posterior draws of other jets) | prior (truth trees)
 
 
 @dataclass
@@ -199,8 +228,10 @@ MODEL_SCHEMA = {
     "ar_junipr_v2": ARJuniprConfig,
     "ar_junipr_v1": ARJuniprConfig,
     "ar_junipr_v3": ARJuniprConfig,   # v2 backbone + first-class multiplicity head
+    "ar_junipr_v4": ARJuniprConfig,   # v3 backbone + decoder cross-attention over x
     "cinn": CINNConfig,
     "diffusion": DiffusionConfig,
+    "cfm": CFMConfig,                 # exact probability-flow-ODE likelihood
 }
 ENCODER_SCHEMA = {
     "gru": EncoderConfig,
@@ -346,6 +377,42 @@ _DECODE_DEFAULTS: dict = {
     "mbr_phi_col": -1,
     "mbr_resample_to_qn": False,
 }
+
+
+# Experiment defaults, kept in sync with ExperimentConfig — same contract as
+# _DECODE_DEFAULTS, for the calibration-suite switches added by WP2.
+_EXPERIMENT_DEFAULTS: dict = {
+    "name": "default",
+    "closure_jets": 300,
+    "n_closure_samples": 200,
+    "generator_b": None,
+    "pit_coords": False,
+    "stratify_regions": False,
+    "tarp": False,
+    "tarp_refs": 100,
+    "tarp_reference": "pooled",
+}
+
+
+def _tolerant_group(cfg, group: str, defaults: dict) -> dict:
+    """Resolved group kwargs, tolerant of OLD checkpoint snapshots whose `<group>`
+    block predates newer fields. `OmegaConf.select` returns None for an absent node
+    even under struct mode, so a missing key falls back to the schema default."""
+    out = dict(defaults)
+    node = OmegaConf.select(cfg, group)
+    if node is not None:
+        for k in out:
+            v = OmegaConf.select(node, k)
+            if v is not None:
+                out[k] = v
+    return out
+
+
+def experiment_params(cfg) -> dict:
+    """Resolved `experiment` kwargs (see `_tolerant_group`). This is the ONLY
+    supported way to read the calibration-suite switches, so a pre-WP2 checkpoint
+    snapshot evaluates with them off rather than crashing."""
+    return _tolerant_group(cfg, "experiment", _EXPERIMENT_DEFAULTS)
 
 
 def decode_params(cfg) -> dict:

@@ -3,6 +3,18 @@
 Validation + physics figures, nbstripped in git (see `.pre-commit-config.yaml`)
 and rendered in the docs:
 
+- **calibration_v2_walkthrough.ipynb** — the post-review calibration suite and the new
+  model families ([`docs/PLAN_UPDATES.md`](../docs/PLAN_UPDATES.md) WP1–WP4), worked
+  end to end on the **real PYTHIA 8.3 data** in `cpp/test_data/jets.root` rather than the
+  synthetic generator. Trains `ar_junipr_v3` on it, then walks through: why SBC-on-N
+  cannot referee a v2-vs-v3 comparison; per-coordinate PITs (with the U-shape /
+  over-confidence signature demonstrated by deliberately narrowing the head); region-
+  stratified coverage on the Lund plane; TARP expected coverage on tree-valued
+  posteriors, with a deliberately over-confident control so the curve's *sign* is
+  readable; the `exact_likelihood` contrast between `cfm` and `diffusion`; the
+  multiplicity-support guard on real grooming parameters; and the v4 cross-attention
+  A/B. Runs top to bottom on CPU/MPS in a few minutes.
+
 - **inference_demo.ipynb** — standalone end-to-end evaluation: load a `best.ckpt`,
   take a `jets.root` test file **or** generate synthetic matched test data, and show
   posterior + MAP point-estimate performance vs truth (single-jet posterior & Lund

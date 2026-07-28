@@ -182,6 +182,19 @@ def test_mbr_resample_to_qn_reweights_and_stays_nonempty(batch):
     assert np.isfinite(pe.risk)
 
 
+# --- support guard (docs/PLAN_UPDATES.md WP4) -----------------------------------
+def test_head_support_covers_the_synthetic_generator(small_jets):
+    """The head's categorical support must cover the data it will be trained on: a
+    truth longer than `max_emissions` is clamped into the last bin and gets the WRONG
+    likelihood. Asserted here, next to the head, as well as in the datamodule guard."""
+    from h2p_rsd_junipr.data.stats import check_multiplicity_support
+
+    cfg = load_config(["model=ar_junipr_v3", "encoder=gru"])
+    stats = check_multiplicity_support(small_jets, cfg)
+    assert stats["max"] <= int(cfg.model.max_emissions)
+    assert stats["tail_fraction"] == 0.0
+
+
 def test_decode_carries_mbr_resample_flag():
     cfg = load_config(["model=ar_junipr_v3", "encoder=gru"])
     dec = decode_params(cfg)

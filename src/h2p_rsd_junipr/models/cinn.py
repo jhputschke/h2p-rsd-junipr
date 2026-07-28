@@ -24,6 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..distributions import std_normal_cdf
 from ..encoders.base import build_encoder
 from ..features import N_NODE_FEAT
 from ..geometry import Geometry
@@ -31,6 +32,9 @@ from ..inference.point_estimate import LundNode, LundPointEstimate
 from .base import PosteriorModel, register_model
 
 _LOG_2PI = math.log(2.0 * math.pi)
+
+# Base-space dimension names for the latent-space PIT report (WP2).
+_LATENT_NAMES = ("z0", "z1", "z2", "z3")
 
 
 class _CondRealNVP(nn.Module):
@@ -66,7 +70,8 @@ class _CondRealNVP(nn.Module):
         s = torch.tanh(s)  # stabilise the scale
         return s, t
 
-    def log_prob(self, x, ctx):
+    def forward_z(self, x, ctx):
+        """x -> (z, logdet): the base-space point and the accumulated log|det J|."""
         z = x
         logdet = torch.zeros(x.shape[:-1], device=x.device)
         for mask, net in zip(self.masks, self.nets):
@@ -76,6 +81,10 @@ class _CondRealNVP(nn.Module):
             t = t * (1 - mask)
             z = xm + (1 - mask) * (z * torch.exp(s) + t)
             logdet = logdet + s.sum(-1)
+        return z, logdet
+
+    def log_prob(self, x, ctx):
+        z, logdet = self.forward_z(x, ctx)
         base = (-0.5 * (z**2) - 0.5 * _LOG_2PI).sum(-1)
         return base + logdet
 
@@ -93,6 +102,10 @@ class _CondRealNVP(nn.Module):
 
 @register_model("cinn")
 class CINN(PosteriorModel):
+    # exact change-of-variables log-density; PIT available in the flow's base space
+    exact_likelihood = True
+    supports_coordinate_pit = True
+
     def __init__(self, cfg, geometry: Geometry):
         super().__init__()
         m = cfg.model
@@ -153,6 +166,31 @@ class CINN(PosteriorModel):
 
     def log_prob(self, batch) -> torch.Tensor:
         return -self.per_jet_nll(batch)
+
+    # -- WP2: per-coordinate PIT ---------------------------------------------
+    @torch.inference_mode()
+    def coordinate_cdfs(self, batch) -> dict | None:
+        """PIT in the flow's BASE space: push the true coordinates through the RealNVP
+        forward map and apply the standard-normal CDF per base dimension.
+
+        The coupling layers mix the four Lund coordinates, so a base dimension is not a
+        single physical coordinate — but under a calibrated flow every base marginal is
+        exactly N(0,1), so each `Phi(z_d)` is Uniform(0,1) and the four histograms are a
+        genuine per-dimension calibration test (reported with `space="latent"` so the
+        physical reading is never implied)."""
+        xf, nx, yc, ny, yraw = (batch["xf"], batch["nx"], batch["yc"], batch["ny"], batch["yraw"])
+        B, L = yc.shape
+        if L == 0:
+            empty = torch.zeros(B, 0, 4, device=yc.device)
+            return {"names": _LATENT_NAMES, "u": empty, "mask": empty[..., 0].bool(),
+                    "space": "latent"}
+        e = self.encode(xf, nx)
+        ctx = torch.cat(
+            [e.unsqueeze(1).expand(-1, L, -1), self.cell_emb(yc.clamp(min=0))], dim=-1
+        )
+        z, _ = self.flow.forward_z(yraw, ctx)
+        mask = torch.arange(L, device=yc.device).unsqueeze(0) < ny.unsqueeze(1)
+        return {"names": _LATENT_NAMES, "u": std_normal_cdf(z), "mask": mask, "space": "latent"}
 
     @torch.inference_mode()
     def sample(self, xf, nx, n, **kw):

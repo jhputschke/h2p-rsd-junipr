@@ -1,0 +1,13 @@
+# §5.4 conditional flow matching with an EXACT probability-flow-ODE likelihood
+# (Lipman et al., arXiv:2210.02747; Song et al., arXiv:2011.13456; FMPE, arXiv:2305.17161).
+# The exact-likelihood member of the continuous-time family: unlike `diffusion`, its
+# `log_prob` IS a normalized density (exact_likelihood=True), so its NLL is comparable
+# with `cinn` and `ar_junipr_*`. See docs/PLAN_UPDATES.md WP1.
+ctx_dim: 64
+hidden_dim: 64
+n_ode_steps: 32       # RK4 steps for the likelihood ODE and for sampling
+ode_solver: rk4       # rk4 | heun — heun halves the field evals per step
+max_emissions: 25     # categorical multiplicity-head support n = 0..max_emissions
+time_features: 16     # Fourier time features fed to the vector field
+sigma_min: 0.001      # OT-path terminal width (Lipman Eq. 20)
+cfm_map: ode_mode     # ode_mode (push the base mode through the ODE) | ascent (exact-density climb)

@@ -17,6 +17,7 @@ import torch
 
 from .config import config_hash, load_config, save_config
 from .data.datamodule import LundDataModule
+from .data.stats import check_multiplicity_support
 from .geometry import Geometry
 
 
@@ -37,6 +38,23 @@ def _setup(cfg):
     return device, geometry, dm
 
 
+def _warn_objective_is_not_nll(model, cfg) -> None:
+    """Say so when the logged `train_nll` is not an NLL.
+
+    A family may minimize something other than -log_prob (`cfm` regresses a vector
+    field), and a family's `log_prob` may itself be a surrogate (`diffusion`). Both
+    change what the training curve means, so both are stated once, up front, rather
+    than left for a reader to infer from the column header."""
+    from .models.base import PosteriorModel
+
+    if type(model).training_objective is not PosteriorModel.training_objective:
+        print(f"[train] NOTE: {cfg.model.name!r} trains a surrogate objective (not the NLL); "
+              "the logged `train_nll` is that objective, while `val_nll` is the exact NLL.")
+    elif not getattr(model, "exact_likelihood", True):
+        print(f"[train] NOTE: {cfg.model.name!r} sets exact_likelihood=False; both logged "
+              "losses are a training surrogate, comparable only within this family.")
+
+
 # ---------------------------------------------------------------------------
 def cmd_train(argv) -> int:
     from .train.logging import CSVJSONLLogger
@@ -55,6 +73,10 @@ def cmd_train(argv) -> int:
     )
     print(f"[train] {len(dm.train_jets)} train / {len(dm.val_jets)} val jets "
           f"(fingerprint={dm.fingerprint})")
+    # WP4 guard: a categorical q(N|x) head has finite support, so a truth sequence
+    # past it is silently clamped. Checked against the data actually loaded, before
+    # any time is spent training on it.
+    check_multiplicity_support(dm.jets, cfg)
 
     if cfg.trainer.resume_from:
         trainer = Trainer.resume(
@@ -64,6 +86,7 @@ def cmd_train(argv) -> int:
         model, opt, sched = build_components(cfg, geometry, device)
         n_params = sum(p.numel() for p in model.parameters())
         print(f"[train] {n_params/1e3:.1f}k parameters")
+        _warn_objective_is_not_nll(model, cfg)
         trainer = Trainer(model, opt, sched, loaders, cfg, logger, device, run_dir, dm.fingerprint)
 
     best = trainer.fit()
@@ -73,9 +96,11 @@ def cmd_train(argv) -> int:
 
 
 def cmd_eval(argv) -> int:
-    from .config import OmegaConf, decode_params
+    from .config import OmegaConf, decode_params, experiment_params
     from .eval.calibration import run_calibration
     from .eval.closure import print_point_estimate, run_closure
+    from .eval.report import plot_calibration, save_metrics
+    from .inference.mbr import mbr_kwargs_from_decode
     from .models.base import build_model
     from .train.checkpoint import load_for_inference
 
@@ -93,8 +118,11 @@ def cmd_eval(argv) -> int:
         geometry = Geometry.from_config(cfg2.geometry)
         model = build_model(cfg2, geometry).to(device)
         model.load_state_dict(info["model_state"])
-        _, val_ds = LundDataModule(cfg2, geometry).setup().datasets()
-        dm_jets = LundDataModule(cfg2, geometry).setup().val_jets
+        dm2 = LundDataModule(cfg2, geometry).setup()
+        _, val_ds = dm2.datasets()
+        dm_jets = dm2.val_jets
+        # non-fatal here: the model is already trained, so report rather than refuse
+        check_multiplicity_support(dm2.jets, cfg2, strict=False)
         decode = decode_params(cfg2)  # follow the checkpoint's decode config (tolerant of old snapshots)
         # ...but an explicit CLI `decode.*` override still wins over the snapshot (decode is
         # inference-time tuning, e.g. an A/B on decode.length_floor_quantile, or selecting the
@@ -112,12 +140,35 @@ def cmd_eval(argv) -> int:
         print("[eval] no checkpoint given; evaluating an untrained model (smoke).")
 
     model.eval()
-    run_closure(model, val_ds, dm_jets, geometry, device,
-                K=cfg.experiment.n_closure_samples, n_closure=cfg.experiment.closure_jets,
-                decode=decode)
-    run_calibration(model, val_ds, geometry, device,
-                    K=cfg.experiment.n_closure_samples, n_jets=cfg.experiment.closure_jets)
+    if not getattr(model, "exact_likelihood", True):
+        print(
+            f"[eval] WARNING: model family {cfg.model.name!r} sets exact_likelihood=False — "
+            "its `log_prob` is a training surrogate, not a normalized density. Reported "
+            "NLLs and log-ratios are NOT comparable across families (use model=cfm for the "
+            "exact-likelihood continuous-time family)."
+        )
+    exp = experiment_params(cfg)  # tolerant of pre-WP2 config snapshots
+    metrics = {"model": str(cfg.model.name), "encoder": str(cfg.encoder.name),
+               "checkpoint": str(ckpt) if ckpt else None}
+    metrics["closure"] = run_closure(
+        model, val_ds, dm_jets, geometry, device,
+        K=exp["n_closure_samples"], n_closure=exp["closure_jets"], decode=decode,
+    )
+    metrics["calibration"] = run_calibration(
+        model, val_ds, geometry, device,
+        K=exp["n_closure_samples"], n_jets=exp["closure_jets"],
+        pit_coords=exp["pit_coords"], stratify_regions=exp["stratify_regions"],
+        tarp=exp["tarp"], tarp_refs=exp["tarp_refs"], tarp_reference=exp["tarp_reference"],
+        mbr_kwargs=mbr_kwargs_from_decode(decode),
+    )
     print_point_estimate(model, val_ds, dm_jets, geometry, device, decode=decode)
+
+    if ckpt:  # artifacts land beside the checkpoint, next to the training curves
+        out_dir = Path(ckpt).resolve().parent
+        save_metrics(metrics, out_dir / "eval_metrics.json")
+        figs = plot_calibration(metrics["calibration"], out_dir)
+        print(f"\n[eval] wrote {out_dir/'eval_metrics.json'}"
+              + (f" and {len(figs)} figure(s)" if figs else ""))
     return 0
 
 

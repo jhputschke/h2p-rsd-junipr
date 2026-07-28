@@ -19,13 +19,24 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..distributions import gauss_logpdf, trunc_normal_logpdf, vonmises_logpdf
+from ..distributions import (
+    gauss_cdf,
+    gauss_logpdf,
+    trunc_normal_cdf,
+    trunc_normal_logpdf,
+    vonmises_cdf,
+    vonmises_logpdf,
+)
 from ..encoders.base import build_encoder
 from ..features import N_NODE_FEAT
 from ..geometry import Geometry
 from ..inference.point_estimate import LundNode, LundPointEstimate, beam_search_cells
 from ..inference.sampling import ancestral_sample_cells, ancestral_sample_cells_fixed_length
 from .base import PosteriorModel, register_model
+
+# Physical coordinate names, in the column order of `yraw` / the coordinate head.
+# Shared with the WP2 per-coordinate PIT report.
+_COORD_NAMES = ("du", "dv", "ln_z", "psi")
 
 
 def _mlp(in_dim: int, hidden: int, out_dim: int, n_layers: int) -> nn.Module:
@@ -41,7 +52,7 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_layers: int) -> nn.Module:
     return nn.Sequential(*layers)
 
 
-@register_model("ar_junipr_v1", "ar_junipr_v2", "ar_junipr_v3", "ar_junipr")
+@register_model("ar_junipr_v1", "ar_junipr_v2", "ar_junipr_v3", "ar_junipr_v4", "ar_junipr")
 class ARJunipr(PosteriorModel):
     def __init__(self, cfg, geometry: Geometry):
         super().__init__()
@@ -53,6 +64,8 @@ class ARJunipr(PosteriorModel):
         self.dec_dim = int(m.dec_dim)
         self.dec_layers = int(m.dec_layers)
         self.continuous_coords = bool(m.continuous_coords)
+        # exact closed-form coordinate CDFs exist exactly when the coordinate head does
+        self.supports_coordinate_pit = self.continuous_coords
         self.sigma_floor = float(m.sigma_floor)
         self.kappa_max = float(m.kappa_max)
         # default 0.0 == off; getattr tolerates old checkpoint configs lacking the field
@@ -61,6 +74,9 @@ class ARJunipr(PosteriorModel):
         # old checkpoint configs (no field) load as the implicit continue/stop model.
         self.use_multiplicity_head = bool(getattr(m, "use_multiplicity_head", False))
         self.max_emissions = int(getattr(m, "max_emissions", 25))
+        # decoder cross-attention over the hadron-node states (WP3); getattr-tolerant
+        # so pre-WP3 checkpoint configs rebuild as the pooled-context model.
+        self.use_cross_attention = bool(getattr(m, "use_cross_attention", False))
         self.half_u = geometry.half_u
         self.half_v = geometry.half_v
 
@@ -69,6 +85,23 @@ class ARJunipr(PosteriorModel):
 
         # ---- encoder e(x) (pluggable) --------------------------------------
         self.encoder_net = build_encoder(cfg.encoder, self.ctx_dim, N_NODE_FEAT)
+
+        # ---- optional cross-attention onto the encoder's per-node states ----
+        # Built ONLY when on, so the off-path module list / state_dict are unchanged.
+        if self.use_cross_attention:
+            if not getattr(self.encoder_net, "returns_sequence", False):
+                raise ValueError(
+                    f"model.use_cross_attention=true needs an encoder exposing per-node "
+                    f"states, but encoder={cfg.encoder.name!r} has returns_sequence=False. "
+                    f"Implement Encoder.forward_seq there, or use encoder=gru|lundnet|deepsets."
+                )
+            heads = int(getattr(m, "xattn_heads", 4))
+            if self.dec_dim % heads:
+                raise ValueError(
+                    f"model.xattn_heads={heads} must divide model.dec_dim={self.dec_dim}"
+                )
+            self.kv_proj = nn.Linear(int(self.encoder_net.seq_dim), self.dec_dim)
+            self.xattn = nn.MultiheadAttention(self.dec_dim, heads, batch_first=True)
 
         # ---- decoder over y: cell-token embedding + context -> GRU ----------
         self.y_embed = nn.Embedding(self.n_cells + 1, emb)  # +1 for START
@@ -111,8 +144,48 @@ class ARJunipr(PosteriorModel):
         h0 = torch.tanh(self.h0_proj(e))  # (B, dec*layers)
         return h0.view(B, self.dec_layers, self.dec_dim).transpose(0, 1).contiguous()
 
+    # -- cross-attention over the hadron-node states (WP3, opt-in) -----------
+    def xattn_kv(self, xf: torch.Tensor, nx: torch.Tensor):
+        """`(kv (B, Mx, dec_dim), key_padding_mask (B, Mx))` for the decoder's attention,
+        or None when cross-attention is off.
+
+        Computed ONCE per jet by each decode entry point and threaded into the
+        incremental steps, so a K-draw sample does not re-encode the hadron sequence K
+        times."""
+        if not self.use_cross_attention:
+            return None
+        seq, mask = self.encoder_net.forward_seq(xf, nx)
+        if seq.shape[1] == 0:  # every jet here has an EMPTY hadron tree: nothing to attend to
+            return None
+        return self.kv_proj(seq), ~mask.bool()  # nn.MultiheadAttention masks where True
+
+    def _apply_xattn(self, out: torch.Tensor, kv) -> torch.Tensor:
+        """Residual cross-attention from decoder states onto the hadron-node states.
+
+        RESIDUAL on purpose: every head's input width (`dec_dim + ctx_dim [+ emb]`) is
+        unchanged, so with the switch off the module list and `state_dict` are
+        byte-identical to today and old checkpoints keep loading strictly. Attention is
+        over `x` only, so the AR factorization over `y` stays causal and the sampling /
+        beam paths inherit the change with no decode-logic edits."""
+        if kv is None:
+            return out
+        k, key_padding_mask = kv
+        if k.shape[0] != out.shape[0]:  # one jet, K draws: broadcast the same keys
+            k = k.expand(out.shape[0], -1, -1)
+            key_padding_mask = key_padding_mask.expand(out.shape[0], -1)
+        attn, _ = self.xattn(out, k, k, key_padding_mask=key_padding_mask,
+                             need_weights=False)
+        # A jet with an EMPTY hadron tree has every key masked. Softmax over nothing is
+        # undefined and some torch versions return NaN there, which would silently
+        # poison a whole batch's gradients — so drop the residual for those rows, which
+        # is also the right semantics: nothing to attend to contributes nothing.
+        empty = key_padding_mask.all(dim=1)
+        if bool(empty.any()):
+            attn = torch.where(empty[:, None, None], torch.zeros_like(attn), attn)
+        return out + attn
+
     # -- teacher-forced decoder states --------------------------------------
-    def _decode_states(self, yc: torch.Tensor, e: torch.Tensor) -> torch.Tensor:
+    def _decode_states(self, yc: torch.Tensor, e: torch.Tensor, kv=None) -> torch.Tensor:
         B, L = yc.shape
         start = torch.full((B, 1), self.start_token, dtype=torch.long, device=yc.device)
         tokens = torch.cat([start, yc], dim=1)  # (B, L+1)
@@ -120,7 +193,7 @@ class ARJunipr(PosteriorModel):
         e_seq = e.unsqueeze(1).expand(-1, L + 1, -1)
         inp = self.dec_in(torch.cat([tok_emb, e_seq], dim=-1))
         out, _ = self.decoder(inp, self._init_hidden(e))
-        return out
+        return self._apply_xattn(out, kv)
 
     # -- continuous coordinate head -----------------------------------------
     def _coord_params(self, coord_in: torch.Tensor):
@@ -152,7 +225,7 @@ class ARJunipr(PosteriorModel):
         yc, ny = batch["yc"], batch["ny"]
         yraw = batch["yraw"]
         e = self.encode(xf, nx)
-        out = self._decode_states(yc, e)
+        out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
         B, Lp1, _ = out.shape
         L = Lp1 - 1
         dev = yc.device
@@ -200,30 +273,80 @@ class ARJunipr(PosteriorModel):
     def log_prob(self, batch) -> torch.Tensor:
         return -self.per_jet_nll(batch)
 
+    # -- WP2: per-coordinate PIT ---------------------------------------------
+    @torch.inference_mode()
+    def coordinate_cdfs(self, batch) -> dict | None:
+        """Teacher-forced probability-integral transform of the four true coordinates.
+
+        The AR coordinate head is a product of closed-form 1-d densities, so its PIT is
+        exact and lives in PHYSICAL coordinates: the truncated-normal CDF for the
+        within-cell offsets (du, dv) — the same normalizer `trunc_normal_logpdf` divides
+        by — the normal CDF for ln z, and the von Mises CDF for psi. v1
+        (`continuous_coords=False`) has no coordinate density, so it returns None."""
+        if not self.continuous_coords:
+            return None
+        xf, nx, yc, ny, yraw = (batch["xf"], batch["nx"], batch["yc"], batch["ny"], batch["yraw"])
+        B, L = yc.shape
+        if L == 0:
+            empty = torch.zeros(B, 0, 4, device=yc.device)
+            return {"names": _COORD_NAMES, "u": empty, "mask": empty[..., 0].bool(),
+                    "space": "physical"}
+        e = self.encode(xf, nx)
+        out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
+        eh_t = torch.cat([out[:, :L, :], e.unsqueeze(1).expand(-1, L, -1)], dim=-1)
+        params = self._coord_params(torch.cat([eh_t, self.y_embed(yc.clamp(min=0))], dim=-1))
+        du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig, mu, kappa = params
+        cx, cy = self.cell_cx[yc], self.cell_cy[yc]
+        du = (yraw[..., 0] - cx).clamp(-self.half_u, self.half_u)
+        dv = (yraw[..., 1] - cy).clamp(-self.half_v, self.half_v)
+        u = torch.stack(
+            [
+                trunc_normal_cdf(du, du_mean, du_sig, -self.half_u, self.half_u),
+                trunc_normal_cdf(dv, dv_mean, dv_sig, -self.half_v, self.half_v),
+                gauss_cdf(yraw[..., 2], lnz_mean, lnz_sig),
+                vonmises_cdf(yraw[..., 3], mu, kappa),
+            ],
+            dim=-1,
+        )
+        mask = torch.arange(L, device=yc.device).unsqueeze(0) < ny.unsqueeze(1)
+        return {"names": _COORD_NAMES, "u": u, "mask": mask, "space": "physical"}
+
     # -- single-jet / batched decoder steps ---------------------------------
-    def _step(self, tok: torch.Tensor, e: torch.Tensor, h):
+    # These maintain their own GRU stepping rather than calling `_decode_states`, so
+    # the cross-attention residual is mirrored here explicitly (WP3). `kv` is the
+    # per-jet key/value pair from `xattn_kv`, threaded through by the decode entry
+    # points; None (the default) is exactly the pre-WP3 arithmetic.
+    def _step_core(self, tok: torch.Tensor, e: torch.Tensor, h, kv):
         inp = self.dec_in(torch.cat([self.y_embed(tok), e.unsqueeze(1)], dim=-1))
         out, h = self.decoder(inp, h)
-        hv = torch.cat([out[:, -1, :], e], dim=-1)
+        out = self._apply_xattn(out, kv)
+        return torch.cat([out[:, -1, :], e], dim=-1), h
+
+    def _step(self, tok: torch.Tensor, e: torch.Tensor, h, kv=None):
+        hv, h = self._step_core(tok, e, h, kv)
         p_cont = torch.sigmoid(self.cont_head(hv)).item()
         logp_split = F.log_softmax(self.split_head(hv), dim=-1).squeeze(0)
         return p_cont, logp_split, h
 
-    def _step_batched(self, tok: torch.Tensor, e: torch.Tensor, h):
-        inp = self.dec_in(torch.cat([self.y_embed(tok), e.unsqueeze(1)], dim=-1))
-        out, h = self.decoder(inp, h)
-        hv = torch.cat([out[:, -1, :], e], dim=-1)
+    def _step_batched(self, tok: torch.Tensor, e: torch.Tensor, h, kv=None):
+        hv, h = self._step_core(tok, e, h, kv)
         p_cont = torch.sigmoid(self.cont_head(hv)).squeeze(-1)
         split_logits = self.split_head(hv)
         return p_cont, split_logits, h
 
-    def _step_cells(self, tok: torch.Tensor, e: torch.Tensor, h):
+    def _step_cells(self, tok: torch.Tensor, e: torch.Tensor, h, kv=None):
         """cont_head-free batched decoder step (multiplicity-head model): returns
         ``(split_logits (K, n_cells), h)``. Length is set externally by q(N|x)."""
-        inp = self.dec_in(torch.cat([self.y_embed(tok), e.unsqueeze(1)], dim=-1))
-        out, h = self.decoder(inp, h)
-        hv = torch.cat([out[:, -1, :], e], dim=-1)
+        hv, h = self._step_core(tok, e, h, kv)
         return self.split_head(hv), h
+
+    @staticmethod
+    def _bind(step_fn, kv):
+        """Bind `kv` into a step so the generic `(tok, e, h)` signature the samplers
+        and beam search expect is preserved."""
+        if kv is None:
+            return step_fn
+        return lambda tok, e, h: step_fn(tok, e, h, kv)
 
     # -- contract: sample ----------------------------------------------------
     @torch.inference_mode()
@@ -232,16 +355,17 @@ class ARJunipr(PosteriorModel):
         dev = xf.device
         e = self.encode(xf, nx).expand(n, -1).contiguous()
         h0 = self._init_hidden(e)
+        kv = self.xattn_kv(xf, nx)  # once per jet, broadcast across the n draws
         if self.use_multiplicity_head:
             # first-class factorization: N_k ~ q(N|x), then decode exactly N_k cells.
             n_probs = F.softmax(self.n_head(e[:1]), dim=-1).squeeze(0)  # (max+1,)
             lengths = torch.multinomial(n_probs, n, replacement=True).clamp(max=max_emissions)
             return ancestral_sample_cells_fixed_length(
-                self._step_cells, e, h0, self.start_token, lengths, dev,
+                self._bind(self._step_cells, kv), e, h0, self.start_token, lengths, dev,
                 cont_temperature=cont_temperature,
             )
         return ancestral_sample_cells(
-            self._step_batched, e, h0, self.start_token, n, dev,
+            self._bind(self._step_batched, kv), e, h0, self.start_token, n, dev,
             max_emissions=max_emissions, cont_temperature=cont_temperature,
         )
 
@@ -256,17 +380,19 @@ class ARJunipr(PosteriorModel):
         self.eval()
         e = self.encode(xf, nx)
         h0 = self._init_hidden(e)
+        kv = self.xattn_kv(xf, nx)
         if self.use_multiplicity_head:
             return self._map_decode_fixed_length(
-                e, h0, min_emissions=min_emissions, max_emissions=max_emissions
+                e, h0, min_emissions=min_emissions, max_emissions=max_emissions, kv=kv
             )
         return beam_search_cells(
-            self._step, e, h0, self.start_token, xf.device,
+            self._bind(self._step, kv), e, h0, self.start_token, xf.device,
             beam_width=beam_width, topk_cells=topk_cells, max_emissions=max_emissions,
             min_emissions=min_emissions, length_penalty=length_penalty,
         )
 
-    def _map_decode_fixed_length(self, e, h0, *, min_emissions: int, max_emissions: int):
+    def _map_decode_fixed_length(self, e, h0, *, min_emissions: int, max_emissions: int,
+                                 kv=None):
         """q(N|x)-head MAP: N* = clamp(argmax q(N|x), min_emissions, max_emissions),
         then greedily decode exactly N* cells (argmax split per step; no stop head).
         With the default `min_emissions=1` the estimate is never the empty tree."""
@@ -278,7 +404,7 @@ class ARJunipr(PosteriorModel):
         tok = torch.full((1, 1), self.start_token, dtype=torch.long, device=dev)
         h, cells = h0, []
         for _ in range(n_star):
-            split_logits, h = self._step_cells(tok, e, h)
+            split_logits, h = self._step_cells(tok, e, h, kv)
             c = int(split_logits.argmax(dim=-1).item())
             cells.append(c)
             tok = torch.tensor([[c]], dtype=torch.long, device=dev)
@@ -295,7 +421,7 @@ class ARJunipr(PosteriorModel):
         L = len(cells)
         e = self.encode(xf, nx)
         yc = torch.tensor([list(cells)], dtype=torch.long, device=dev)
-        out = self._decode_states(yc, e)
+        out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
         eh = torch.cat([out, e.unsqueeze(1).expand(-1, L + 1, -1)], dim=-1)
         if self.use_multiplicity_head:
             # length log-density = log q(N=L | x); no per-node continue/stop terms.
