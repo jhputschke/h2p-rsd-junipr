@@ -61,6 +61,27 @@ static h2p::LundSeq declusterPair(double ptHard, double ptSoft, double dPhi,
   return h2p::primaryLund(pairJet(ptHard, ptSoft, dPhi), lund, g);
 }
 
+// INDEPENDENT reference implementation of `fullLundAux`'s splitting count, built on
+// fjcontrib's own LundGenerator instead of raw has_parents/pt2 bookkeeping: walk the
+// primary plane, and at every passing splitting recurse into the softer prong. Different
+// declustering machinery, different harder/softer determination, and Delta/z/kt taken
+// from LundDeclustering's cached values rather than recomputed.
+//
+// This is the guard against the one bug that would be invisible in the aggregate: a
+// traversal that silently never leaves the hardest branch would still satisfy every
+// primary-plane invariant while reporting n_all == n_primary for every jet.
+static std::uint32_t refCountAll(const fastjet::PseudoJet& jet,
+                                 const fastjet::contrib::LundGenerator& lund,
+                                 const h2p::GroomParams& g) {
+  std::uint32_t n = 0;
+  for (const fastjet::contrib::LundDeclustering& d : lund(jet)) {
+    if (!h2p::passesGroom(d.Delta(), d.kt(), d.z(), g)) continue;
+    ++n;                                        // this primary-chain splitting
+    n += refCountAll(d.softer(), lund, g);      // ...and everything inside the softer prong
+  }
+  return n;
+}
+
 int main() {
   h2p::GroomParams g;  // z_cut=0.1, beta=0, kt_floor=1.0
 
@@ -171,6 +192,35 @@ int main() {
   CHECK(ens_order, "n_all >= n_primary on the ensemble");
   CHECK(ens_mass, "m_g <= ungroomed jet mass on the ensemble");
   CHECK(n_with_secondary > 20, "the ensemble actually exercises secondary planes");
+
+  // Cross-check the traversal against the independent LundGenerator-based reference,
+  // over a grooming grid so both a starved and a busy working point are covered.
+  std::printf("[test_lund_io] fullLundAux: n_all vs an independent implementation\n");
+  std::mt19937 rng2(12345);
+  bool ens_ref = true;
+  std::uint32_t ref_total = 0, off_spine_total = 0;
+  for (int ijet = 0; ijet < 200; ++ijet) {
+    std::vector<fastjet::PseudoJet> parts;
+    parts.push_back(mkPart(100.0, 0.0, 0.0));
+    for (int i = 0; i < 30; ++i) {
+      const double pt = 0.5 + 40.0 * std::pow(u01(rng2), 3.0);
+      parts.push_back(mkPart(pt, 0.6 * (u01(rng2) - 0.5), 0.6 * (u01(rng2) - 0.5)));
+    }
+    const fastjet::PseudoJet jet = makeJet(parts);
+    for (double kt_floor : {0.2, 1.0, 5.0}) {
+      h2p::GroomParams gg;
+      gg.kt_floor = kt_floor;
+      const h2p::JetAux a = h2p::fullLundAux(jet, gg);
+      const std::uint32_t ref = refCountAll(jet, lund, gg);
+      ens_ref = ens_ref && (a.n_all == ref);
+      ref_total += ref;
+      off_spine_total += a.n_all - a.n_primary;
+    }
+  }
+  CHECK(ens_ref, "n_all matches the independent LundGenerator-based count exactly");
+  CHECK(off_spine_total > 0, "the count genuinely leaves the hardest branch (n_sec > 0 somewhere)");
+  std::printf("        (reference counted %u passing splittings, %u of them off-spine)\n",
+              ref_total, off_spine_total);
 
   if (g_fail) {
     std::printf("[test_lund_io] %d FAILED\n", g_fail);

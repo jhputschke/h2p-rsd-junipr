@@ -146,12 +146,47 @@ The one place the design's own prediction does show up is the `n_sec = 2–3` st
 which gains **−0.100 nats/jet**, ~3× the sample average.
 
 The scope of the finding is therefore: *the machinery is correct and the information
-is real where it exists, but this sample has almost none of it.* Re-run at a looser
-`z_cut`, a lower `k_t` floor, or a higher-`p_T` selection — all of which raise
-`⟨n_sec⟩` — before concluding anything about the physics. This mirrors
+is real where it exists, but this sample has almost none of it.* This mirrors
 `PLAN_UPDATES.md` WP3, which met its criterion on the synthetic generator and washed
 out on this same file, for the same underlying reason: this sample is short on the
 structure the feature exploits.
+
+#### Is the 82.6% zero fraction a bug — is the traversal only walking the spine?
+
+The obvious suspicion, since the persisted sequences *are* primary-only. Two checks say
+no; `x_nsec` comes from `fullLundAux`, a different code path from `primaryLund`.
+
+1. **An independent implementation agrees exactly.** `cpp/tests/test_lund_io.cpp`
+   carries a second traversal built on fjcontrib's own `LundGenerator` (different
+   declustering machinery, different harder/softer determination, `Delta`/`z`/`k_t` from
+   `LundDeclustering`'s cached values): walk the primary plane, and at each passing
+   splitting recurse into `d.softer()`. Over 200 jets × 3 `k_t` floors it matches
+   `n_all` **exactly** — 5676 passing splittings, **3141 of them off-spine**.
+2. **`n_sec` responds strongly to the cuts.** A spine-only traversal would report
+   `n_sec == 0` in every row below. 3 000 events per setting:
+
+| z_cut | k_t floor | pTHat | R | ⟨n_x⟩ | ⟨n_sec⟩ | P(n_sec ≥ 1) |
+|---|---|---|---|---|---|---|
+| 0.10 | 1.0 | >100 | 0.4 | 1.74 | **0.23** | 17% |
+| 0.10 | **0.2** | >100 | 0.4 | 3.44 | **2.04** | 75% |
+| **0.02** | **0.2** | >100 | 0.4 | 5.37 | **2.53** | 81% |
+| 0.10 | 1.0 | **>500** | 0.4 | 1.93 | **0.67** | 33% |
+| 0.10 | 1.0 | >100 | **0.8** | 2.10 | **0.62** | 36% |
+
+So the zero fraction is a statement about the working point, not the code. The reason it
+is so high at the default is that secondary activity requires **two** things to compound:
+a passing primary splitting to open the plane at all (⟨n_x⟩ = 1.74, so only ~1.7 planes
+per jet), *and* a further `k_t ≥ 1 GeV`, `z > 0.1` splitting inside a softer prong that
+carries only `z · p_T` ≈ 10–30 GeV and sits inside an angular region smaller than its
+parent's `ΔR`. A 1 GeV floor is a large fraction of such a subjet's available `k_t`,
+which is why dropping the floor to 0.2 GeV multiplies `⟨n_sec⟩` by ~9.
+
+**Concretely, before re-judging the physics:** `SoftDrop:ktFloor = 0.2` is the single
+highest-leverage change (0.23 → 2.04); `pTHatMin = 500` or `R = 0.8` each give ~3×
+for free. Note the first two rows also change what the *targets* are — a lower floor
+admits more primary emissions too (⟨n_x⟩ 1.74 → 3.44), so that is a different
+learning problem, not just a re-scoring of this one, and `max_emissions` support should
+be re-checked via `check_multiplicity_support`.
 
 Worked A/B: [`notebooks/aux_input_ab.ipynb`](../notebooks/aux_input_ab.ipynb).
 
