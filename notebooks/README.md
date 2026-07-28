@@ -3,6 +3,17 @@
 Validation + physics figures, nbstripped in git (see `.pre-commit-config.yaml`)
 and rendered in the docs:
 
+- **lund_rntuple_histograms.ipynb** — the notebook twin of
+  [`cpp/apps/hist_lund_rntuple.cpp`](../cpp/apps/hist_lund_rntuple.cpp): reads a
+  `jets.root` RNTuple with `uproot` and fills the **same histograms, bin for bin** —
+  same edges, same per-jet `weight`, same `x_nsec > 0` gate on the secondary-`k_t`
+  columns. Opens on the two **primary Lund planes** (hadron `x` vs parton `y`, shared
+  colour scale), then the jet kinematics, the primary multiplicity, the four Lund
+  observables pooled, the same four **split by splitting index** (the first two;
+  `NSPLIT_SHOW` raises it), and every aux conditioning column. The last section is a
+  parity check against the C++ app's output file — currently 13 histograms, worst bin
+  difference 0. Runs in seconds on `cpp/test_data/jets_aux.root`; needs no ROOT install.
+
 - **aux_input_ab.ipynb** — the A/B for [`docs/PLAN_Input.md`](../docs/PLAN_Input.md):
   does conditioning on **groomed all-branch** scalars — the pipeline-groomed mass `m_g`,
   the secondary-plane splitting count `n_sec`, and the jet scale — buy anything the
