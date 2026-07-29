@@ -149,17 +149,73 @@ int main() {
   bool consistent = true;
   for (double z_cut : {0.0, 0.05, 0.1, 0.3}) {
     for (double kt_floor : {0.0, 0.5, 1.0, 5.0}) {
-      h2p::GroomParams gg;
-      gg.z_cut = z_cut;
-      gg.kt_floor = kt_floor;
-      for (const auto& jet : fixtures) {
-        const auto n_prim = h2p::fullLundAux(jet, gg).n_primary;
-        const auto n_seq = h2p::primaryLund(jet, lund, gg).lnkt.size();
-        consistent = consistent && (n_prim == n_seq);
+      // -1 is the mirror sentinel (symmetric); the rest are genuine asymmetric floors,
+      // including one ABOVE kt_floor, since nothing forbids a tighter secondary cut.
+      for (double kt_floor_sec : {-1.0, 0.0, 0.2, 1.0, 10.0}) {
+        h2p::GroomParams gg;
+        gg.z_cut = z_cut;
+        gg.kt_floor = kt_floor;
+        gg.kt_floor_sec = kt_floor_sec;
+        for (const auto& jet : fixtures) {
+          const auto n_prim = h2p::fullLundAux(jet, gg).n_primary;
+          const auto n_seq = h2p::primaryLund(jet, lund, gg).lnkt.size();
+          consistent = consistent && (n_prim == n_seq);
+        }
       }
     }
   }
-  CHECK(consistent, "n_primary == primaryLund size over a (z_cut, kt_floor) grid");
+  // The load-bearing invariant: the spine keeps kt_floor whatever the off-spine floor
+  // is, so the aux spine IS the persisted primary plane even when the two disagree.
+  CHECK(consistent, "n_primary == primaryLund size over a (z_cut, kt_floor, kt_floor_sec) grid");
+
+  // ---- asymmetric floor: mirror default, and what a looser off-spine floor moves --
+  std::printf("[test_lund_io] fullLundAux: asymmetric kt floor\n");
+  {
+    h2p::GroomParams sym;  // defaults: kt_floor_sec = -1 -> mirrors kt_floor
+    CHECK(sym.secondaryFloor() == sym.kt_floor, "default kt_floor_sec mirrors kt_floor");
+    CHECK(!sym.asymmetricFloor(), "default GroomParams is not asymmetric");
+    h2p::GroomParams explicit_mirror = sym;
+    explicit_mirror.kt_floor_sec = sym.kt_floor;
+    CHECK(!explicit_mirror.asymmetricFloor(), "kt_floor_sec == kt_floor is not asymmetric");
+
+    h2p::GroomParams loose = sym;
+    loose.kt_floor_sec = 0.05 * sym.kt_floor;  // far below the spine floor
+    CHECK(loose.asymmetricFloor(), "kt_floor_sec != kt_floor is asymmetric");
+
+    // Byte-for-byte: mirroring must reproduce the single-floor result exactly, or
+    // every existing card silently changes meaning.
+    bool mirror_identical = true, spine_frozen = true, sec_weakly_grows = true;
+    for (const auto& jet : fixtures) {
+      const h2p::JetAux a_sym = h2p::fullLundAux(jet, sym);
+      const h2p::JetAux a_mir = h2p::fullLundAux(jet, explicit_mirror);
+      const h2p::JetAux a_loose = h2p::fullLundAux(jet, loose);
+      mirror_identical = mirror_identical && a_mir.n_all == a_sym.n_all &&
+                         a_mir.n_primary == a_sym.n_primary && a_mir.mg == a_sym.mg &&
+                         a_mir.ptg == a_sym.ptg && a_mir.kt_sec_sum == a_sym.kt_sec_sum;
+      // the spine is untouched by the off-spine floor...
+      spine_frozen = spine_frozen && a_loose.n_primary == a_sym.n_primary;
+      // ...while off-spine counts and the kept momentum can only grow
+      sec_weakly_grows = sec_weakly_grows && a_loose.n_all >= a_sym.n_all &&
+                         a_loose.kt_sec_sum >= a_sym.kt_sec_sum && a_loose.ptg >= a_sym.ptg &&
+                         a_loose.mg >= a_sym.mg;
+    }
+    CHECK(mirror_identical, "explicit kt_floor_sec == kt_floor reproduces the single-floor aux");
+    CHECK(spine_frozen, "lowering the off-spine floor leaves n_primary unchanged");
+    CHECK(sec_weakly_grows, "lowering the off-spine floor weakly increases n_all/kt_sec_sum/ptg/mg");
+
+    // The three-prong fixture has a real secondary, so the effect is strict there:
+    // its off-spine splitting is admitted only once the secondary floor drops below it.
+    h2p::GroomParams tight_sec = sym;
+    tight_sec.kt_floor_sec = 1e9;  // no off-spine splitting can pass
+    const h2p::JetAux a_tight = h2p::fullLundAux(threeProngJet(), tight_sec);
+    const h2p::JetAux a_open = h2p::fullLundAux(threeProngJet(), sym);
+    CHECK(a_tight.n_all == a_tight.n_primary, "an unreachable off-spine floor -> no secondaries");
+    CHECK(a_tight.kt_sec_max == 0.0f && a_tight.kt_sec_sum == 0.0f,
+          "no secondary -> kt_sec_* stay 0 under an asymmetric floor too");
+    CHECK(a_tight.n_primary == a_open.n_primary,
+          "raising ONLY the off-spine floor cannot change the spine");
+    CHECK(a_tight.ptg < a_open.ptg, "a tighter off-spine floor discards secondary momentum");
+  }
 
   std::printf("[test_lund_io] fullLundAux: secondary plane + groomed mass\n");
   const fastjet::PseudoJet three = threeProngJet();

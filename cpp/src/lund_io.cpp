@@ -43,7 +43,11 @@ fastjet::PseudoJet groomRecurse(const fastjet::PseudoJet& p, const GroomParams& 
   const double z = (pt_sum > 0.0) ? p2.pt() / pt_sum : 0.0;
   const double kt = p2.pt() * Delta;
 
-  if (!passesGroom(Delta, kt, z, g)) {
+  // `on_spine` is a property of THIS node, so it selects the floor for THIS splitting:
+  // the spine is the primary plane and must stay on `kt_floor` (that is what makes
+  // n_primary == primaryLund's length), while an off-spine splitting may use the looser
+  // `secondaryFloor()`. The two coincide unless a card set SoftDrop:ktFloorSec.
+  if (!passesGroom(Delta, kt, z, g, on_spine ? g.kt_floor : g.secondaryFloor())) {
     // recursive Soft Drop: discard the softer prong, keep walking the harder one
     return groomRecurse(p1, g, on_spine, attach, aux);
   }

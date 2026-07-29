@@ -2,6 +2,12 @@
 `write_lund_rntuple` stage. Retains the per-jet `generator` tag for the §8
 systematic and the grooming provenance for downstream reporting.
 
+Grooming provenance is `(z_cut, beta, kt_floor, kt_floor_sec)`. `kt_floor_sec` is the
+OFF-SPINE floor the aux traversal used; when it differs from `kt_floor` the aux columns
+(`x_mg`, `x_ptg`, `x_nsec`, `x_kt_sec_*`, `x_sec_attach`) are groomed LOOSER than the
+`x`/`y` sequences beside them, by design (cpp/include/lund_io.hpp). Anything comparing
+aux across files must compare this pair, not `kt_floor` alone.
+
 Also carries the aux conditioning columns (`jet_pt`, `jet_eta`, `x_mg`, `x_ptg`,
 `x_nsec`, `x_kt_sec_*`, `x_sec_attach`; docs/PLAN_Input.md). Their defaults are
 SENTINELS — NaN and -1 — that `features.aux_vector` rejects, so a file written before
@@ -79,6 +85,11 @@ def load_rntuple(path: str = "jets.root", ntuple: str = "Jets"):
     generator = ak.to_list(arr["generator"]) if "generator" in fields else ["unknown"] * n
     z_cut, beta, kt_floor = (column(k, np.nan, np.float64)
                              for k in ("z_cut", "beta", "kt_floor"))
+    # Off-spine floor the AUX traversal used. Absent in files written before the
+    # asymmetric floor existed, where one floor governed everything — so the sentinel
+    # is `kt_floor` itself, not NaN: mirroring is exactly what those files did.
+    kt_floor_sec = (column("kt_floor_sec", np.nan, np.float64)
+                    if "kt_floor_sec" in fields else kt_floor)
     # --- aux conditioning sources (sentinels when the columns are absent) ---
     jet_pt, jet_eta = (column(k, np.nan, np.float64) for k in ("jet_pt", "jet_eta"))
     x_mg, x_ptg = (column(k, np.nan, np.float64) for k in ("x_mg", "x_ptg"))
@@ -101,6 +112,7 @@ def load_rntuple(path: str = "jets.root", ntuple: str = "Jets"):
             z_cut=float(z_cut[i]),
             beta=float(beta[i]),
             kt_floor=float(kt_floor[i]),
+            kt_floor_sec=float(kt_floor_sec[i]),
             jet_pt=float(jet_pt[i]),
             jet_eta=float(jet_eta[i]),
             x_mg=float(x_mg[i]),

@@ -4,9 +4,10 @@
 // PYTHIA's Settings database accepts *custom* entries registered before init, so
 // one `.cmnd` card configures the generator (beams, process, MPI, seed, tune) AND
 // the analysis (jet R/ptMin/acceptance/match cone, Soft Drop z_cut/beta/R0/kt
-// floor, generator tag). No yaml-cpp, no bespoke parser, native comment handling.
-// The parsed grooming params are written into the RNTuple provenance, so the
-// recorded `z_cut/beta/kt_floor/generator` always match what produced the file.
+// floor + optional secondary floor, generator tag). No yaml-cpp, no bespoke parser,
+// native comment handling. The parsed grooming params are written into the RNTuple
+// provenance, so the recorded `z_cut/beta/kt_floor/kt_floor_sec/generator` always
+// match what produced the file.
 //
 //   registerAnalysisSettings(pythia);   // BEFORE readFile/init — defaults + schema
 //   ... pythia.readFile(card); pythia.init(); ...
@@ -38,6 +39,10 @@ inline void registerAnalysisSettings(Pythia8::Pythia& pythia) {
   s.addParm("SoftDrop:beta", 0.0, false, false, 0.0, 0.0);  // may be 0, >0, or <0
   s.addParm("SoftDrop:R0", 1.0, true, false, 0.0, 0.0);
   s.addParm("SoftDrop:ktFloor", 1.0, true, false, 0.0, 0.0);
+  // Secondary (off-spine) floor for the aux traversal only. NEGATIVE default, and no
+  // minimum, because <= 0 is the "mirror ktFloor" sentinel — the historical
+  // single-floor behaviour. See GroomParams::kt_floor_sec.
+  s.addParm("SoftDrop:ktFloorSec", -1.0, false, false, 0.0, 0.0);
   s.addWord("Analysis:generatorTag", "PYTHIA-8:tune-Monash");
 }
 
@@ -58,6 +63,7 @@ inline GroomParams readGroomParams(Pythia8::Pythia& pythia) {
   g.beta = s.parm("SoftDrop:beta");
   g.R0 = s.parm("SoftDrop:R0");
   g.kt_floor = s.parm("SoftDrop:ktFloor");
+  g.kt_floor_sec = s.parm("SoftDrop:ktFloorSec");  // <= 0 -> mirrors ktFloor
   return g;
 }
 

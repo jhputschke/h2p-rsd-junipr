@@ -173,12 +173,56 @@ run to its data. Sources: [`datamodule.py`](../src/h2p_rsd_junipr/data/datamodul
 | `min_val` | `200` | floor on the validation count (lower it for tiny runs, e.g. `min_val=32`) |
 | `cache_dir` | `null` | if set, preprocessed tensors are cached at `<cache_dir>/jets_<fingerprint>.pt` |
 | `max_emissions` | `20` | cap on the synthetic **truth** parton-sequence length (simulator only) |
+| `pt_var` | `"jet_pt"` | which pT the window below cuts on: `jet_pt` (ungroomed) or `x_ptg` (groomed) |
+| `pt_min` | `null` | GeV, **inclusive** lower edge of the jet-pT window; `null` == unbounded |
+| `pt_max` | `null` | GeV, **exclusive** upper edge of the jet-pT window; `null` == unbounded |
 
 **Split semantics.** When the data carries `event` ids (real RNTuples), the split is **by
 event** so jets of one event never straddle train/val; otherwise it is a deterministic
 *trailing* split (`jets[:-n_val]` / `jets[-n_val:]`), matching the original v2 script.
 `min_val` wins when `n_jets` is small — set it below `n_jets` or you get an empty train
 split.
+
+### `pt_min` / `pt_max` — training on one slice of the jet spectrum
+
+Keeps only the jets with `pt_min <= pt < pt_max`, applied to the list `load_rntuple`
+returns, *before* the fingerprint and *before* the train/val split — so both splits see
+the same window and the run's data hash records it.
+
+```bash
+# a 100-150 GeV ungroomed slice (27.9% of cpp/test_data/jets_aux.root)
+h2p-rsd-junipr train data=rntuple data.path=cpp/test_data/jets_aux.root \
+    data.pt_min=100 data.pt_max=150
+
+# the same cut on GROOMED momentum instead
+h2p-rsd-junipr train data=rntuple data.path=cpp/test_data/jets_aux.root \
+    data.pt_var=x_ptg data.pt_min=50
+```
+
+- **Both bounds `null` is the off path, and off is byte-identical**: no jet is dropped,
+  the same list object flows through, and the fingerprint hashes exactly as it did before
+  the knob existed. The window is mixed into the hash only when it is active — two
+  different windows can leave the same jet count with the same leading jets, which the
+  length + content-sample terms alone would not tell apart.
+- **The upper edge is exclusive**, so adjacent windows (`[40,60)`, `[60,100)`) tile a
+  sample without any jet landing in both.
+- **`pt_var` accepts `jet_pt`/`pt` or `x_ptg`/`ptg`/`pt_g`** and nothing else; a typo
+  names the alternatives rather than silently matching no column.
+- **At `eval` the window comes from the checkpoint's config snapshot**, so a model
+  trained on a slice is evaluated on that same slice unless you override it explicitly.
+- **A jet with no finite `pt_var` is dropped** — synthetic jets carry no pT and an
+  RNTuple written before the aux columns stores the NaN sentinel
+  ([rntuple.py](../src/h2p_rsd_junipr/data/rntuple.py)). If *every* jet is unset the
+  loader raises and names the column, rather than handing back an empty dataset. A window
+  that keeps 0 jets, or too few to leave a non-empty train split after `min_val`, also
+  raises and names the knob to move.
+
+> **What this is for.** [PLAN_jet_xsection.md](PLAN_jet_xsection.md) §2 measures that the
+> training sample is `pTHat`-sculpted rather than steeply falling, and §3 that the
+> conditional genuinely moves with pT (⟨n_y⟩ at fixed `n_x` swings 73% across the range).
+> A window makes the single-slice experiment — train in one pT band, evaluate in it or
+> across it — possible without regenerating anything. It is a **selection**, not a
+> reweighting: it narrows the sample, it does not restore a physical spectrum (§6).
 
 ---
 

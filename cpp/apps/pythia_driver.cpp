@@ -62,6 +62,14 @@ int main(int argc, char** argv) {
   std::cout << "[pythia_driver] R=" << jp.R << " ptMin=" << jp.jet_ptmin
             << " z_cut=" << g.z_cut << " beta=" << g.beta << " kt_floor=" << g.kt_floor
             << " generator=" << gen << "\n";
+  if (g.asymmetricFloor()) {
+    // Say it loudly: the aux columns are no longer groomed like the sequences, and
+    // that is invisible in the output file unless you read `kt_floor_sec`.
+    std::cout << "[pythia_driver] ASYMMETRIC FLOOR: spine kt_floor=" << g.kt_floor
+              << " GeV, off-spine kt_floor_sec=" << g.secondaryFloor()
+              << " GeV. The x/y sequences use the SPINE floor; x_mg/x_ptg/x_nsec/"
+                 "x_kt_sec_* use the off-spine floor below the spine.\n";
+  }
 
   h2p::LundWriter writer(out, "Jets", g, gen);
 

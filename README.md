@@ -127,7 +127,8 @@ python scripts/verify_synthetic.py   # full train + closure on the v2 synthetic 
 ## Data contract
 
 One entry per jet (`write_lund_rntuple` → `Jets` RNTuple): `event`, `jet_index`,
-`weight`, jet kinematics, grooming provenance `(z_cut, beta, kt_floor, generator)`,
+`weight`, jet kinematics, grooming provenance `(z_cut, beta, kt_floor, kt_floor_sec,
+generator)`,
 and two **node-unaligned** jagged sequences `x_*` (hadron) and `y_*` (parton) in
 `(ln 1/ΔR, ln k_t, ln z, ψ)`. There is by design no per-node x↔y correspondence,
 so the objective and all closure observables are jet-level.
@@ -216,6 +217,19 @@ the jet radius/ptMin/acceptance/match-cone and the Soft Drop `z_cut/beta/R0/kt`
 floor are registered as custom PYTHIA settings (`cpp/include/run_settings.hpp`), so
 one file sets everything and the grooming values are stamped into the RNTuple
 provenance. Omit the card to fall back to the built-in defaults.
+
+**Asymmetric k_t floors** (`cpp/cards/pp_dijet_asym_floor.cmnd`). `SoftDrop:ktFloorSec`
+sets a separate, looser floor for the **off-spine** branches of the aux traversal,
+leaving the spine — and therefore the persisted `x`/`y` sequences, inputs *and* targets
+— bit-for-bit unchanged. It exists because the aux scalars are conditioning inputs,
+never targets, and a fixed *absolute* floor cuts far deeper off-spine than on it: at the
+1 GeV default 80.6% of jets carry no passing secondary splitting at all. Measured on
+identical events, `1.0 / 0.2` takes `⟨x_nsec⟩` from 0.251 to 2.213 (zero fraction 80.6%
+→ 20.5%) with `⟨n_x⟩` and `⟨n_y⟩` unmoved. Unset (the default) mirrors `ktFloor`, which
+is the historical single-floor behaviour. Note it *redefines* `x_mg`/`x_ptg` — see
+[`docs/PLAN_Input.md`](docs/PLAN_Input.md) ("Asymmetric k_t floors") for the trade-off,
+the generator-systematic caveat, and the production recipe for scanning floors without
+re-running PYTHIA per floor.
 
 **Aux conditioning columns.** Besides the two primary sequences, the writer persists
 per-jet **groomed all-branch** scalars the primary-only sequence structurally cannot

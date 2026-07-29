@@ -26,6 +26,10 @@ LundWriter::LundWriter(const std::string& path, const std::string& ntuple, const
   fZcut_ = model->MakeField<float>("z_cut");
   fBeta_ = model->MakeField<float>("beta");
   fKtFloor_ = model->MakeField<float>("kt_floor");
+  // The floor the AUX traversal used off-spine. Written RESOLVED (never the <= 0
+  // mirror sentinel), so a reader compares `kt_floor_sec == kt_floor` to learn whether
+  // the aux scalars were groomed like the sequences or not, without knowing the card.
+  fKtFloorSec_ = model->MakeField<float>("kt_floor_sec");
   fGen_ = model->MakeField<std::string>("generator");
 
   fXi_ = model->MakeField<std::vector<float>>("x_lnInvDelta");
@@ -43,6 +47,11 @@ LundWriter::LundWriter(const std::string& path, const std::string& ntuple, const
   // every primary node is recorded massless, and the secondary prongs that carry the
   // rest of it are discarded at write time; `x_nsec` counts the grooming-passing
   // splittings living on those discarded prongs. See docs/PLAN_Input.md.
+  //
+  // When `kt_floor_sec != kt_floor` these were groomed with a LOOSER off-spine floor
+  // than the sequences above — deliberate for the counting/hardness columns, and a
+  // redefinition of `x_mg`/`x_ptg` that a consumer must opt into knowingly. The
+  // `kt_floor_sec` provenance column is what makes that detectable downstream.
   fXmg_ = model->MakeField<float>("x_mg");
   fXnsec_ = model->MakeField<std::uint32_t>("x_nsec");
   // `x_ptg` pairs with `x_mg` on purpose: groomed mass AND groomed momentum, both
@@ -75,6 +84,7 @@ void LundWriter::fill(std::uint64_t event, std::uint32_t jet_index, double weigh
   *fZcut_ = static_cast<float>(g_.z_cut);
   *fBeta_ = static_cast<float>(g_.beta);
   *fKtFloor_ = static_cast<float>(g_.kt_floor);
+  *fKtFloorSec_ = static_cast<float>(g_.secondaryFloor());
   *fGen_ = generator_;
 
   *fXi_ = x.lnInvDelta;

@@ -79,8 +79,26 @@ split. The device is auto-selected (CUDA → MPS → CPU).
 h2p-rsd-junipr train data=rntuple data.path=jets.root model=ar_junipr_v2
 ```
 
+Swap in [`cpp/cards/pp_dijet_asym_floor.cmnd`](../cpp/cards/pp_dijet_asym_floor.cmnd)
+for an **asymmetric k_t floor**: the aux conditioning columns are groomed down to
+0.2 GeV off-spine while the `x`/`y` sequences keep the 1 GeV perturbative floor
+unchanged. `./cpp/build/read_lund_rntuple jets.root Jets` prints both floors and says
+so explicitly when they differ.
+
 When the RNTuple carries `event` ids the split is **by event** (jets of one event
 never straddle train/val); otherwise it is a deterministic trailing split.
+
+To train on one slice of the jet spectrum, add a half-open pT window — on the
+ungroomed jet pT, or on the groomed one with `data.pt_var=x_ptg`:
+
+```bash
+h2p-rsd-junipr train data=rntuple data.path=jets.root data.pt_min=100 data.pt_max=150
+h2p-rsd-junipr train data=rntuple data.path=jets.root data.pt_var=x_ptg data.pt_min=50
+```
+
+It applies before the split, so train and val see the same window, and `eval` inherits
+it from the checkpoint's config. Both bounds unset (the default) keeps every jet.
+Details: [`CONFIGURATION.md` §2](CONFIGURATION.md).
 
 ### Pick the model and encoder (drop-in, no code change)
 
@@ -134,6 +152,8 @@ own data — [`CONFIGURATION.md` §4](CONFIGURATION.md#4-model--the-posterior-fa
 | `optim.scheduler` / `optim.eta_min` | cosine / 3e-4 | LR schedule |
 | `optim.grad_clip` | 1.0 | gradient-norm clip |
 | `data.n_jets` / `data.seed` | 8000 / 0 | synthetic dataset |
+| `data.pt_min` / `data.pt_max` | null / null | jet-pT window `[pt_min, pt_max)` in GeV; off keeps every jet |
+| `data.pt_var` | jet_pt | pT the window cuts on: `jet_pt` (ungroomed) or `x_ptg` (groomed) |
 | `geometry.n_bins` | 10 | Lund-cell grid (n_cells = n_bins²) |
 | `run_root` | runs | where run dirs go |
 
