@@ -140,10 +140,19 @@ so the objective and all closure observables are jet-level.
 | §5.1 autoregressive JUNIPR (v1 cells / v2 +continuous coords / v3 +multiplicity head / v4 +cross-attention) | `models/ar_junipr.py` | ✅ | primary, verified |
 | §5.2 conditional normalizing flow (cINN) | `models/cinn.py` | ✅ | functional baseline |
 | §5.3 conditional diffusion / bridge | `models/diffusion.py` | ❌ surrogate | cheap-sampler baseline |
-| §5.4 conditional flow matching (exact probability-flow-ODE likelihood) | `models/cfm.py` | ✅ | functional baseline |
+| §5.4 conditional flow matching (exact probability-flow-ODE likelihood) | `models/cfm.py` | ✅ | verified density, unvalidated posterior |
 
 Encoders (`gru`, `lundnet`, `deepsets`) are independently pluggable; any encoder
 pairs with any decoder family.
+
+> **What the status column means.** Only `ar_junipr` is *verified* in the
+> [Verification](#verification-this-is-the-acceptance-test) sense — weight-level parity plus a
+> train+closure run — and it is the only family with trained runs on real data under
+> [`runs/`](runs/). The other three carry the full shared contract (calibration hooks, the
+> decode floors, aux conditioning, the empty-sequence and support guards), each parametrized
+> over every family in `tests/`, but none has a closure or calibration verdict on data beyond
+> the short demo in [`calibration_v2_walkthrough.ipynb`](notebooks/calibration_v2_walkthrough.ipynb).
+> "Baseline" is about that missing validation, not about missing plumbing.
 
 - **`ar_junipr_v3`** promotes the sequence length to a first-class categorical `q(N|x)`
   head — the factorization `q(y|x) = q(N|x)·q(y|N,x)`, opt-in via
@@ -159,10 +168,15 @@ pairs with any decoder family.
   `exact_likelihood` column above is a real class attribute: `diffusion`'s `log_prob` is
   a denoising-score-matching **surrogate**, so its NLL is not comparable with the others
   and `train`/`eval`/`serve` say so out loud. Use `cfm` for NLL model selection and
-  likelihood ratios.
+  likelihood ratios. Its *density* is checked quantitatively — exact divergence against
+  autograd, and the coordinate density integrating to **1.004 ± 0.009** over the physical
+  support, with a sign-flipped control that fails by many σ ([`tests/test_cfm.py`](tests/test_cfm.py)).
+  That is a correctness result, not a calibration one: nothing yet says the *posterior* it
+  produces is trustworthy on data.
 
-The post-review work packages behind the last three rows — and the calibration suite
-that gates them — are in [`docs/PLAN_UPDATES.md`](docs/PLAN_UPDATES.md).
+The post-review work packages behind the last three rows — and the calibration suite that
+gates them — are in [`docs/PLAN_UPDATES.md`](docs/PLAN_UPDATES.md): WP1–WP4 are merged,
+WP5 (the systematics chain) is not started.
 
 ## Is the posterior calibrated?
 
@@ -178,7 +192,12 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt \
 
 - **per-coordinate PITs** — the kinematics, coordinate by coordinate, via each family's
   exact conditional CDFs, broken down by emission index and region. U-shaped ⇒
-  over-confident, dome ⇒ over-dispersed.
+  over-confident, dome ⇒ over-dispersed. Each report carries the `space` it was computed
+  in, and only `ar_junipr` is `physical`: `cinn` and `cfm` report `latent`, because both
+  reach their density through a map that mixes the four coordinates (coupling layers, the
+  probability-flow ODE), so a base dimension is not one physical coordinate. The latent
+  histograms are still a genuine per-dimension test — under a calibrated flow every base
+  marginal is exactly `N(0,1)` — but they do not localize *which* kinematic is off.
 - **region stratification** — every metric binned by the leading emission's Lund
   quadrant, so calibration that only holds *on average* over the plane cannot pass.
 - **TARP** expected coverage (Lemos et al., arXiv:2302.03026) on tree-valued posteriors
