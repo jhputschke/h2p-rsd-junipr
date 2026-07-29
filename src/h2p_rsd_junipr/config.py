@@ -46,6 +46,14 @@ class DataConfig:
     min_val: int = 200
     cache_dir: str | None = None    # preprocessed-tensor cache (§4 stage 3)
     max_emissions: int = 20            # synthetic parton sequence cap
+    # --- jet-pT window applied to the loaded jets (docs/PLAN_jet_xsection.md §2) ---
+    # Both bounds `null` == off, and off is the byte-identical path: no jet is dropped
+    # and the data fingerprint is unchanged. Half-open, `pt_min <= pt < pt_max`, so
+    # adjacent windows tile a sample without double-counting a jet.
+    pt_var: str = "jet_pt"             # jet_pt (ungroomed) | x_ptg (groomed); aliases in
+    #                                    datamodule.PT_SELECT_VARS
+    pt_min: float | None = None        # GeV, inclusive lower edge; null == unbounded
+    pt_max: float | None = None        # GeV, EXCLUSIVE upper edge; null == unbounded
 
 
 # Aux conditioning (docs/PLAN_Input.md): per-jet GROOMED scalars broadcast onto every

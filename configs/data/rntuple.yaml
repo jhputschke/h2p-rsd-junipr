@@ -5,3 +5,9 @@ seed: 0
 val_fraction: 0.1
 min_val: 200
 cache_dir: null
+# Jet-pT window, half-open [pt_min, pt_max) in GeV. Both null == every jet is kept.
+#   pt_var: jet_pt (ungroomed, as clustered) | x_ptg (groomed, SoftDrop-kept momentum)
+# e.g. data.pt_min=100 data.pt_max=150, or data.pt_var=x_ptg data.pt_min=50
+pt_var: jet_pt
+pt_min: null
+pt_max: null

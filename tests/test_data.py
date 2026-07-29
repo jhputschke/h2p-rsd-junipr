@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from h2p_rsd_junipr.data.dataset import MatchedLundDataset, collate
 from h2p_rsd_junipr.data.synthetic import synthetic_matched_dataset
@@ -137,3 +138,105 @@ def test_rntuple_missing_optional_columns_become_sentinels():
     # ...but jet_pt and jet_eta have been in the schema all along; they were merely
     # never READ into the jet dicts before the aux work, so they are real values here
     assert j["jet_pt"] > 0 and np.isfinite(j["jet_eta"])
+
+
+# ---------------------------------------------------------------------------
+# Jet-pT window (data.pt_min / data.pt_max / data.pt_var)
+# ---------------------------------------------------------------------------
+def _fake_jets(pts, col="jet_pt"):
+    """Minimal jet dicts: the selector only ever reads the one pT column."""
+    return [{col: p, "x": (np.zeros(1, np.float32),), "y": (np.zeros(1, np.float32),)}
+            for p in pts]
+
+
+def test_select_pt_range_is_half_open_and_off_by_default():
+    from h2p_rsd_junipr.data.datamodule import select_pt_range
+
+    jets = _fake_jets([20.0, 100.0, 149.9, 150.0, 400.0])
+    # off path returns the SAME list object -- nothing downstream can change
+    assert select_pt_range(jets) is jets
+    kept = select_pt_range(jets, "jet_pt", 100.0, 150.0, verbose=False)
+    assert [j["jet_pt"] for j in kept] == [100.0, 149.9]  # lower incl., upper excl.
+    assert [j["jet_pt"] for j in
+            select_pt_range(jets, "jet_pt", 150.0, None, verbose=False)] == [150.0, 400.0]
+    assert [j["jet_pt"] for j in
+            select_pt_range(jets, "jet_pt", None, 100.0, verbose=False)] == [20.0]
+
+
+def test_select_pt_range_groomed_column_and_alias():
+    from h2p_rsd_junipr.data.datamodule import select_pt_range
+
+    jets = [{"jet_pt": 200.0, "x_ptg": 40.0}, {"jet_pt": 50.0, "x_ptg": 120.0}]
+    for var in ("x_ptg", "ptg"):
+        kept = select_pt_range(jets, var, 100.0, None, verbose=False)
+        assert [j["x_ptg"] for j in kept] == [120.0]  # cuts on the GROOMED pT, not jet_pt
+
+
+def test_select_pt_range_rejects_unusable_windows():
+    from h2p_rsd_junipr.data.datamodule import select_pt_range
+
+    jets = _fake_jets([20.0, 100.0, 400.0])
+    with pytest.raises(ValueError, match="not a selectable"):
+        select_pt_range(jets, "pt_groomed", 10.0, None)
+    with pytest.raises(ValueError, match="empty jet-pT window"):
+        select_pt_range(jets, "jet_pt", 200.0, 100.0)
+    with pytest.raises(ValueError, match="negative"):
+        select_pt_range(jets, "jet_pt", -1.0, None)
+    with pytest.raises(ValueError, match="kept 0 of 3"):
+        select_pt_range(jets, "jet_pt", 5000.0, None)
+    # every jet unset (synthetic data / pre-aux file) must NAME the column, not
+    # hand back an empty dataset
+    with pytest.raises(ValueError, match="NO jet carries a finite jet_pt"):
+        select_pt_range(_fake_jets([np.nan, np.nan]), "jet_pt", 100.0, None)
+
+
+def test_select_pt_range_drops_unset_jets_but_keeps_the_rest():
+    from h2p_rsd_junipr.data.datamodule import select_pt_range
+
+    jets = _fake_jets([np.nan, 120.0, 130.0])
+    assert len(select_pt_range(jets, "jet_pt", 100.0, 150.0, verbose=False)) == 2
+
+
+def test_datamodule_pt_window_applies_before_split_and_fingerprint():
+    from h2p_rsd_junipr.config import load_config
+    from h2p_rsd_junipr.data.datamodule import LundDataModule
+
+    base = ["data=rntuple", f"data.path={JETS_AUX}"]
+    if not JETS_AUX.exists():
+        pytest.skip("jets_aux.root not present")
+    wide = LundDataModule(load_config(base), Geometry()).setup()
+    if wide.jets is None or not np.isfinite(wide.jets[0]["jet_pt"]):
+        pytest.skip("uproot could not read the RNTuple")
+    cut = LundDataModule(
+        load_config(base + ["data.pt_min=100", "data.pt_max=150"]), Geometry()
+    ).setup()
+
+    assert 0 < len(cut.jets) < len(wide.jets)
+    # the window bounds BOTH splits, not just the loaded list
+    for j in cut.train_jets + cut.val_jets:
+        assert 100.0 <= j["jet_pt"] < 150.0
+    # ...and ties the run to a different dataset than the unwindowed one
+    assert cut.fingerprint != wide.fingerprint
+
+
+def test_datamodule_pt_window_off_leaves_the_fingerprint_untouched():
+    """The off path must hash exactly as it did before the knob existed, or every
+    cached tensor file and recorded run<->data linkage is invalidated."""
+    from h2p_rsd_junipr.config import load_config
+    from h2p_rsd_junipr.data.datamodule import LundDataModule, _fingerprint
+
+    cfg = load_config(["data.n_jets=300", "data.seed=0", "data.min_val=32"])
+    dm = LundDataModule(cfg, Geometry()).setup()
+    legacy = {k: v for k, v in dm.cfg.data.items() if not k.startswith("pt_")}
+    assert dm.fingerprint == _fingerprint(dm.jets, OmegaConf.create(legacy))
+
+
+def test_datamodule_pt_window_that_starves_the_train_split_raises():
+    from h2p_rsd_junipr.config import load_config
+    from h2p_rsd_junipr.data.datamodule import LundDataModule
+
+    if not JETS_AUX.exists():
+        pytest.skip("jets_aux.root not present")
+    cfg = load_config(["data=rntuple", f"data.path={JETS_AUX}", "data.pt_min=400"])
+    with pytest.raises(ValueError, match="train split would be empty"):
+        LundDataModule(cfg, Geometry()).setup()
