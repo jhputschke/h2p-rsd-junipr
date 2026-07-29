@@ -29,6 +29,29 @@ struct GroomParams {
   double beta = 0.0;      // beta = 0 -> mMDT-like, most NP-robust
   double R0 = 1.0;        // SD angular normalisation (drops out for beta = 0)
   double kt_floor = 1.0;  // GeV; lower edge of the perturbative band
+  // OPTIONAL secondary (off-spine) floor, used by `fullLundAux` ONLY. <= 0 mirrors
+  // `kt_floor`, which is the historical single-floor behaviour and the default, so an
+  // unchanged card reproduces an existing file bit-for-bit.
+  //
+  // Why an asymmetric floor is defensible at all: `kt_floor` does two jobs at once.
+  // On the persisted sequences it scopes the PREDICTED and matched object to the band
+  // where hadron<->parton correspondence holds. The aux scalars are CONDITIONING
+  // inputs (hadron-level only, never targets), and nothing requires those to live in
+  // that band — `jet_pt` and `|eta|` already do not. Meanwhile a fixed ABSOLUTE floor
+  // is a far deeper cut off-spine, because a secondary plane hangs off a prong
+  // carrying only z*pT of the jet: at the 1 GeV default 80.6% of jets have no passing
+  // off-spine splitting at all, and dropping the floor to 0.2 multiplies <n_sec> by
+  // ~9 (docs/PLAN_Input.md, "Is the 82.6% zero fraction a bug").
+  double kt_floor_sec = -1.0;
+
+  // The floor that applies OFF-SPINE, mirror sentinel resolved. Always read the
+  // secondary floor through this — `kt_floor_sec` itself may be the sentinel.
+  double secondaryFloor() const { return (kt_floor_sec > 0.0) ? kt_floor_sec : kt_floor; }
+
+  // True when the two floors differ, i.e. the aux scalars are groomed differently
+  // from the persisted sequences. Consumers that compare against a textbook Soft Drop
+  // quantity, or against another file, must branch on this.
+  bool asymmetricFloor() const { return secondaryFloor() != kt_floor; }
 };
 
 // anti-kt jet clustering / matching parameters.
@@ -51,10 +74,22 @@ struct LundSeq {
 // sequences (primaryLund) and the all-branch traversal (fullLundAux), so the two
 // cannot drift. Soft Drop boundary (Larkoski et al., 1402.2657) + the perturbative
 // kt floor that scopes the whole pipeline to the resolvable band.
-inline bool passesGroom(double Delta, double kt, double z, const GroomParams& g) {
+//
+// The floor is an explicit argument in the general form because `fullLundAux` may
+// apply a looser one off-spine (`GroomParams::kt_floor_sec`). The DEFINITION is still
+// single-sourced — the Soft Drop boundary, the degenerate-kinematics rejection and
+// the shape of the cut all live here once; only the floor VALUE varies, and only for
+// the conditioning-side traversal. `primaryLund` uses the 4-argument form, i.e.
+// `g.kt_floor`, always: the persisted sequences have exactly one floor, by design.
+inline bool passesGroom(double Delta, double kt, double z, const GroomParams& g,
+                        double kt_floor) {
   if (Delta <= 0.0 || kt <= 0.0 || z <= 0.0) return false;
   if (z <= g.z_cut * std::pow(Delta / g.R0, g.beta)) return false;  // Soft Drop boundary
-  return kt >= g.kt_floor;                                          // perturbative floor
+  return kt >= kt_floor;                                            // perturbative floor
+}
+
+inline bool passesGroom(double Delta, double kt, double z, const GroomParams& g) {
+  return passesGroom(Delta, kt, z, g, g.kt_floor);
 }
 
 // Decluster the primary Lund plane and keep splittings above the Soft Drop
@@ -68,8 +103,28 @@ LundSeq primaryLund(const fastjet::PseudoJet& jet,
 //
 // `mg`/`ptg` are the **pipeline-groomed** jet mass and transverse momentum: taken from
 // the momentum surviving exactly the predicate above (`passesGroom`, kt floor included),
-// NOT the textbook z_cut-only Soft Drop quantities. One grooming definition per file, by
-// design — the persisted sequences and these are groomed identically.
+// NOT the textbook z_cut-only Soft Drop quantities.
+//
+// They are therefore STRONGLY floor-dependent, which is easy to underestimate: a
+// splitting under the floor is not a soft splitting (kt ~ pT_softer * Delta, so at
+// Delta = 0.05 a sub-1-GeV-kt prong carries ~18 GeV), and it is DISCARDED here rather
+// than merely left unrecorded as it is in `primaryLund`. Measured on 3220 jets from
+// identical events, floor 1.0 -> 0.2: median pt_g/pt 0.394 -> 0.686, median m_g
+// 2.54 -> 4.89 GeV, with only 1.4% of jets unchanged.
+//
+// Consequences, both load-bearing:
+//   * Under `kt_floor_sec != kt_floor` these are groomed differently from the
+//     persisted sequences. That is a deliberate choice for the counting/hardness aux
+//     (`n_all`, `kt_sec_*`), which are absolute properties of the jet; it is more
+//     delicate for `mg`/`ptg`, whose documented job is to be the COMPLEMENT of the
+//     recorded sequence ("how much did this grooming remove"). Under an asymmetric
+//     floor they are the complement of a tree the model never sees. Ship them as a
+//     distinct, opt-in feature rather than silently redefining the symmetric ones.
+//   * They cannot be recomputed downstream at another floor. The file records the
+//     surviving primary splittings' (Delta, kt, z, psi) — shape, not momenta — and
+//     sums the off-spine prongs away into four scalars, while m_g needs every kept
+//     prong's 4-vector. Re-flooring in Python is exact for the SEQUENCES and
+//     impossible for these.
 //
 // `ptg` is deliberately paired with `mg` rather than shipping a mass-drop ratio m_g/m:
 // the encoder already conditions on ln(m_g/pt), so ln(m_g/m) would be an invertible
@@ -98,9 +153,14 @@ struct JetAux {
 // continues down the harder one. Lund conventions of Dreyer, Salam & Soyez
 // (1807.04758): Delta = DeltaR(p1, p2), z = pT2/(pT1+pT2), kt = pT2 * Delta.
 //
+// Splittings ON the spine use `g.kt_floor`; splittings off it use `g.secondaryFloor()`,
+// which mirrors `kt_floor` unless a card set `SoftDrop:ktFloorSec`.
+//
 // Guaranteed: `fullLundAux(jet, g).n_primary == primaryLund(jet, lund, g).lnkt.size()`
 // — the spine is the primary plane and the predicate is shared (pinned by
-// cpp/tests/test_lund_io.cpp).
+// cpp/tests/test_lund_io.cpp). This survives an asymmetric floor BECAUSE the spine
+// keeps `kt_floor` and every predicate is evaluated on the UNGROOMED tree kinematics,
+// so no off-spine decision can reach a spine one.
 JetAux fullLundAux(const fastjet::PseudoJet& jet, const GroomParams& g);
 
 // Cluster two same-event particle collections with anti-kt(R) and geometrically

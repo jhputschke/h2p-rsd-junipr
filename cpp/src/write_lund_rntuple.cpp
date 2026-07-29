@@ -40,6 +40,27 @@ struct Event {
 
 // Process one event: cluster + match both levels, primary-Lund-decluster each
 // matched pair, and write one entry per jet.
+// PRODUCTION NOTE — scanning the grooming floors.
+//
+// A floor scan means several samples, each with ONE grooming definition, because the
+// aux scalars (x_mg / x_ptg / x_nsec / x_kt_sec_*) cannot be recomputed at another
+// floor downstream: `groomRecurse` DISCARDS momentum at a failing splitting, and the
+// file keeps only the surviving primary splittings' shape plus four off-spine sums.
+// (The x/y SEQUENCES re-floor exactly in Python, upward only — verified bit-for-bit —
+// so a sequences-only scan needs no regeneration. The aux does.)
+//
+// Do NOT regenerate per floor: PYTHIA dominates the cost by orders of magnitude, the
+// grooming is one O(n_constituents) tree walk per jet. Loop the WRITERS instead —
+// take a `std::vector<std::pair<GroomParams, LundWriter>>`, one entry per floor, and
+// fill every one of them from the same `matched` jets inside this function. One
+// generation, N files, each with exactly one grooming definition and its own
+// natively-applied keep test below. That last part matters: the keep test is
+// floor-dependent, so a file re-floored after the fact is NOT the file a native run
+// would have written (measured: re-flooring 0.2 -> 1.0 leaves 8.1% of jets with both
+// sequences empty, which a native run at 1.0 never writes).
+//
+// Left as a note rather than built in because the single-writer signature is what the
+// unit tests and the toy path use; the change is local to this function and `main`.
 std::uint32_t processEvent(std::uint64_t iev, const Event& ev,
                            const fastjet::contrib::LundGenerator& lund,
                            const h2p::GroomParams& g, const h2p::JetParams& jp,

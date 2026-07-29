@@ -103,6 +103,16 @@ int main(int argc, char** argv) {
   std::cout << "  z_cut     : " << vZcut(0) << "\n";
   std::cout << "  beta      : " << vBeta(0) << "\n";
   std::cout << "  kt_floor  : " << vKtFloor(0) << " GeV\n";
+  // Optional: absent in files written before the asymmetric floor existed, where the
+  // single `kt_floor` governed the aux traversal too.
+  if (present.count("kt_floor_sec")) {
+    const float sec = reader->GetView<float>("kt_floor_sec")(0);
+    std::cout << "  kt_floor_sec: " << sec << " GeV  (off-spine, aux traversal only)"
+              << (sec != vKtFloor(0) ? "  <-- ASYMMETRIC: x_mg/x_ptg/x_nsec/x_kt_sec_* "
+                                       "are NOT groomed like the x/y sequences"
+                                     : "  (mirrors kt_floor)")
+              << "\n";
+  }
 
   // ---- first jet ---------------------------------------------------------
   std::cout << "\n--- first jet (entry 0) ---\n";

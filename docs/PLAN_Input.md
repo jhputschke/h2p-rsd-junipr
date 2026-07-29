@@ -230,6 +230,78 @@ be re-checked via `check_multiplicity_support`.
 
 Worked A/B: [`notebooks/aux_input_ab.ipynb`](../notebooks/aux_input_ab.ipynb).
 
+#### Asymmetric k_t floors — the gain without the changed learning problem
+
+The caveat above is the whole motivation for `SoftDrop:ktFloorSec`. A **secondary
+(off-spine) floor**, applied by `fullLundAux` only, buys the `⟨n_sec⟩` increase while
+leaving the persisted sequences — the model's inputs *and* targets — bit-for-bit
+unchanged.
+
+**Why it is legitimate.** `kt_floor` does two jobs. On `x`/`y` it scopes the
+*predicted and matched* object to the band where hadron↔parton correspondence holds;
+that job is non-negotiable. The aux scalars are hadron-level **conditioning** inputs,
+never targets, and nothing requires those to live in the perturbative band —
+`jet_pt` and `|η|` already do not. It is *not* a perturbativity argument: a 0.5 GeV
+emission is equally non-perturbative wherever it sits. It is an argument about role.
+
+**Why a single absolute floor was already asymmetric in effect.** `kt = z·p_T·ΔR`, and
+a secondary plane hangs off a prong carrying only `z·p_T` of the jet, so the same
+1 GeV is a far deeper cut off-spine than on it — which is exactly the compounding the
+section above diagnoses.
+
+**Measured**, `write_lund_rntuple`, 1500 events, seed 7, 3220 jets, identical events
+throughout (`cpp/cards/pp_dijet_asym_floor.cmnd` vs the symmetric card):
+
+| | symmetric (1.0 / 1.0) | asymmetric (1.0 / 0.2) | uniform 0.2 |
+|---|---|---|---|
+| `⟨x_nsec⟩` | 0.251 | **2.213** | 2.309 |
+| `x_nsec == 0` | 80.6% | **20.5%** | 18.2% |
+| ⟨n_x⟩ (input length) | 1.783 | **1.783** | 3.53 |
+| ⟨n_y⟩ (**target** length) | 1.423 | **1.423** | — |
+| median `x_ptg/jet_pt` | 0.394 | 0.501 | 0.686 |
+| median `x_mg` | 2.54 GeV | 3.63 GeV | 4.89 GeV |
+
+The asymmetric point recovers ~96% of the uniform-0.2 secondary yield with the
+sequences *provably* untouched (verified column-for-column, not just in the mean), so
+`max_emissions` support and every length-dependent guard are unaffected.
+
+**What it costs, and the two traps.**
+
+1. **`x_mg` / `x_ptg` are redefined by it** — visible in the table. Their documented
+   job is to be the complement of the recorded sequence ("how much did *this* grooming
+   remove"); under an asymmetric floor they are the complement of a tree the model
+   never sees. Unlike `x_nsec`/`x_kt_sec_*`, which are absolute properties of the jet
+   at a stated scale, these are statements *about a grooming*. Treat them as distinct
+   features from the symmetric ones. The `kt_floor_sec` provenance column is what makes
+   the difference detectable downstream; `rntuple.py` carries it per jet, mirroring
+   `kt_floor` for files written before the column existed.
+2. **A looser floor buys information and buys hadronization sensitivity.** Validate
+   with the generator systematic
+   ([`configs/experiment/pythia_vs_herwig.yaml`](../configs/experiment/pythia_vs_herwig.yaml)),
+   not with the NLL alone: a conditioning variable the shower mismodels is a systematic
+   that only shows up off-sample.
+
+**Production — scanning the floors.** The aux scalars **cannot** be recomputed at
+another floor downstream: `groomRecurse` *discards* momentum at a failing splitting,
+and the file keeps only the surviving primary splittings' shape plus four off-spine
+sums, while `m_g` needs every kept prong's 4-vector. (The `x`/`y` sequences, by
+contrast, re-floor *exactly* in Python — upward only — because `primaryLund` filters a
+declustering chain that is itself floor-independent. Verified bit-for-bit on 3220 jets.)
+
+So a floor scan means several samples, each with one grooming definition — but **do
+not regenerate per floor**. PYTHIA dominates the cost by orders of magnitude; the
+grooming is one `O(n_constituents)` tree walk per jet. **Loop the writers inside
+[`processEvent`](../cpp/src/write_lund_rntuple.cpp)**: take a
+`std::vector<std::pair<GroomParams, LundWriter>>`, one entry per floor, and fill every
+one of them from the same `matched` jets. One generation, N files, each with exactly
+one grooming definition and its own natively-applied keep test.
+
+That last clause is load-bearing: the writer's keep test
+(`if (x.empty() && y.empty()) continue`) is itself floor-dependent, so a file
+re-floored after the fact is **not** the file a native run would have written —
+measured, re-flooring 0.2 → 1.0 leaves 8.1% of jets with both sequences empty, which a
+native run at 1.0 never writes (3505 − 285 = 3220, the native count exactly).
+
 ## Design (recommended approach)
 
 ### Stage 1 — C++: compute and persist the aux columns

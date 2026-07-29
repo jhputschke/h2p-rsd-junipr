@@ -1,0 +1,53 @@
+! pp_dijet_asym_floor.cmnd — pp_dijet.cmnd with an ASYMMETRIC k_t floor: the
+! persisted x/y sequences keep the 1 GeV perturbative floor, while the aux
+! (conditioning-side) traversal groomes off-spine branches down to 0.2 GeV.
+!
+!   ./pythia_driver 100000 jets_asym.root 1 cpp/cards/pp_dijet_asym_floor.cmnd
+!
+! WHY. `SoftDrop:ktFloor` does two jobs. On the sequences it scopes the PREDICTED and
+! matched object to the band where hadron<->parton correspondence holds — that job is
+! non-negotiable. The aux scalars are hadron-level CONDITIONING inputs, never targets,
+! and nothing requires those to sit in the perturbative band (`jet_pt` and `|eta|`
+! already do not). Meanwhile a fixed ABSOLUTE floor cuts far deeper off-spine, because
+! a secondary plane hangs off a prong carrying only z*pT of the jet: at 1 GeV, 80.6%
+! of jets have NO passing off-spine splitting, so `x_nsec` is a near-binary variable
+! that is zero four times out of five. Dropping the off-spine floor to 0.2 GeV takes
+! <n_sec> from 0.25 to 2.31 and the zero fraction from 80.6% to 18.2%, while the
+! targets — the y sequences — are left exactly as the symmetric card produces them.
+!
+! WHAT IT COSTS. A looser floor buys information and buys hadronization sensitivity.
+! Validate with the generator systematic (configs/experiment/pythia_vs_herwig.yaml),
+! not with the NLL alone. And note `x_mg`/`x_ptg` are redefined by this card: their
+! documented job is to be the complement of the recorded sequence ("how much did THIS
+! grooming remove"), and under an asymmetric floor they are the complement of a tree
+! the model never sees. Treat them as distinct features from the symmetric ones —
+! the `kt_floor_sec` provenance column is what makes the difference detectable.
+!
+! See docs/PLAN_Input.md ("Asymmetric k_t floors") and cpp/include/lund_io.hpp.
+
+! ---- generator (standard PYTHIA settings) --------------------------------
+Beams:eCM            = 13000.
+HardQCD:all          = on
+PhaseSpace:pTHatMin  = 100.
+PartonLevel:MPI      = off          ! pure hadronization study (no underlying event)
+Print:quiet          = on
+Random:setSeed       = on
+Random:seed          = 1            ! overridden by the CLI seed argument if given
+
+! ---- jet finding / matching (custom; anti-kt + greedy one-to-one) --------
+HadronJet:R          = 0.4          ! anti-kt jet radius
+HadronJet:ptMin      = 20.          ! GeV; min jet pt at both levels
+HadronJet:maxRap     = 2.0          ! |y| acceptance on the hadron jet
+HadronJet:matchdR    = 0.3          ! hadron<->parton matching cone
+
+! ---- grooming (custom; Soft Drop boundary + perturbative floor) ----------
+SoftDrop:zCut        = 0.1          ! CMS/ATLAS standard
+SoftDrop:beta        = 0.0          ! 0 = mMDT-like, most NP-robust
+SoftDrop:R0          = 1.0          ! angular normalisation (drops out for beta=0)
+SoftDrop:ktFloor     = 1.0          ! GeV; SPINE floor -> governs the x/y sequences
+SoftDrop:ktFloorSec  = 0.2          ! GeV; OFF-SPINE floor -> aux traversal only.
+                                    ! <= 0 (the default) mirrors ktFloor, i.e. the
+                                    ! single-floor behaviour of pp_dijet.cmnd.
+
+! ---- provenance tag stamped per entry ------------------------------------
+Analysis:generatorTag = PYTHIA-8.3:tune-Monash

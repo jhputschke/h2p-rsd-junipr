@@ -244,6 +244,27 @@ soft/wide-angle corner yields a broad, near-meaningless posterior
 posterior should respect there is itself calculable: Lifson, Salam & Soyez, *JHEP*
 **10** (2020) 170, arXiv:2007.06578).
 
+**The floor is not a Soft Drop parameter.** Soft Drop is $z_{\rm cut}$, $\beta$, $R_0$;
+the $k_t$ floor is a second condition **AND-ed** with it in one per-splitting predicate
+(`passesGroom`), evaluated *during* the declustering rather than as a pass over its
+output. Two consequences worth internalizing, because they differ:
+
+- On the persisted sequences the floor only decides which emissions are *recorded* —
+  the declustering chain always follows the harder prong, so it never truncates the
+  walk. Raising the floor after the fact is therefore an exact set operation.
+- On the all-branch traversal (`fullLundAux`, which produces `x_mg` / `x_ptg`) a
+  failing splitting **discards the softer prong**, so the floor changes the surviving
+  momentum. Those are *pipeline*-groomed, not textbook $z_{\rm cut}$-only Soft Drop
+  quantities, and they move a lot: measured on 3220 jets from identical events, floor
+  $1.0 \to 0.2$ GeV shifts median $p_{T,g}/p_T$ from 0.394 to 0.686.
+
+**Asymmetric floors.** Because the aux scalars are *conditioning* inputs rather than
+targets, `SoftDrop:ktFloorSec` may groom off-spine branches below the spine floor —
+recovering the secondary-plane information the primary sequence structurally cannot
+carry, with the inputs and targets left bit-for-bit unchanged. See
+[`PLAN_Input.md`](PLAN_Input.md) ("Asymmetric k_t floors") and
+[`cpp/cards/pp_dijet_asym_floor.cmnd`](../cpp/cards/pp_dijet_asym_floor.cmnd).
+
 ---
 
 ## 5. The Lund-plane representation used here

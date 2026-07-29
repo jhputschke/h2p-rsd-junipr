@@ -39,7 +39,7 @@ class LundWriter {
   std::shared_ptr<std::uint32_t> fJetIdx_;
   std::shared_ptr<double> fWeight_;
   std::shared_ptr<float> fJetPt_, fJetEta_, fJetPhi_, fJetM_;
-  std::shared_ptr<float> fZcut_, fBeta_, fKtFloor_;
+  std::shared_ptr<float> fZcut_, fBeta_, fKtFloor_, fKtFloorSec_;
   std::shared_ptr<std::string> fGen_;
   std::shared_ptr<std::vector<float>> fXi_, fXk_, fXz_, fXp_;
   std::shared_ptr<std::vector<float>> fYi_, fYk_, fYz_, fYp_;

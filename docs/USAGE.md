@@ -79,6 +79,12 @@ split. The device is auto-selected (CUDA → MPS → CPU).
 h2p-rsd-junipr train data=rntuple data.path=jets.root model=ar_junipr_v2
 ```
 
+Swap in [`cpp/cards/pp_dijet_asym_floor.cmnd`](../cpp/cards/pp_dijet_asym_floor.cmnd)
+for an **asymmetric k_t floor**: the aux conditioning columns are groomed down to
+0.2 GeV off-spine while the `x`/`y` sequences keep the 1 GeV perturbative floor
+unchanged. `./cpp/build/read_lund_rntuple jets.root Jets` prints both floors and says
+so explicitly when they differ.
+
 When the RNTuple carries `event` ids the split is **by event** (jets of one event
 never straddle train/val); otherwise it is a deterministic trailing split.
 

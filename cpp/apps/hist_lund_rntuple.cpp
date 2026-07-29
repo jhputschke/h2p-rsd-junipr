@@ -280,6 +280,9 @@ int main(int argc, char** argv) {
     put("z_cut", std::to_string(reader->GetView<float>("z_cut")(0)));
     put("beta", std::to_string(reader->GetView<float>("beta")(0)));
     put("kt_floor", std::to_string(reader->GetView<float>("kt_floor")(0)));
+    // absent in pre-asymmetric-floor files; there the single kt_floor governed the aux
+    if (present.count("kt_floor_sec"))
+      put("kt_floor_sec", std::to_string(reader->GetView<float>("kt_floor_sec")(0)));
     put("source", in + ":" + ntuple);
     put("n_jets", std::to_string(nJets));
   }

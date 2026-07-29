@@ -108,6 +108,18 @@ def test_rntuple_sequence_buffers_are_read_only():
         seq[0] = 0.0
 
 
+def test_rntuple_carries_the_secondary_floor_provenance():
+    """`kt_floor_sec` is the OFF-SPINE floor the aux traversal used. A file written
+    before asymmetric floors existed has no such column, and there the honest default
+    is `kt_floor` itself — mirroring is exactly what those files did — NOT NaN."""
+    jets = _jets_or_skip()
+    j = jets[0]
+    assert "kt_floor_sec" in j
+    if np.isfinite(j["kt_floor"]):
+        # jets_aux.root predates the column -> must mirror, not report a sentinel
+        assert j["kt_floor_sec"] == j["kt_floor"]
+
+
 def test_rntuple_dtypes_and_sentinels():
     jets = _jets_or_skip()
     j = jets[0]
