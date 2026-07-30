@@ -240,7 +240,7 @@ Common fields:
 |---|---|---|
 | `emb_dim` | `32` | node-feature embedding width (in AR, **also** the decoder y-token embedding width) |
 | `hidden_dim` | `64` | the encoder's internal hidden width (the output is projected to `ctx_dim`) |
-| `num_layers` | varies | encoder depth (the "encoder depth" knob) |
+| `num_layers` | varies | encoder depth (the "encoder depth" knob); for `gru`, raising it is measured to be neutral-to-harmful — see below |
 | `dropout` | `0.1` | dropout inside the encoder |
 | `aux_features` | `[]` | groomed per-jet conditioning scalars appended to every node of `xf` (below) |
 
@@ -251,6 +251,77 @@ Per-encoder:
 | `gru` | `bidirectional` | `True` | bi-GRU over the sequence; `num_layers` default `1` |
 | `lundnet` | `k` | `4` | EdgeConv neighbourhood size (LundNet graph net); `num_layers` default `3` |
 | `deepsets` | — | — | permutation-invariant Deep Sets; `num_layers` default `2` |
+
+### `encoder.num_layers` — why the `gru` default is `1`
+
+> **Measured, and it is not a free knob: depth 2 is noise, depth 3+ is a regression.**
+> `model=ar_junipr_v3 encoder=gru`, 15 epochs, 3 seeds per point, on **PYTHIA**
+> (`cpp/test_data/jets.root`, `z_cut=0.1`, 1 GeV `k_t` floor) with **`aux_features=[]`** —
+> i.e. the tightly-groomed sample and the aux-off input width of 5 columns per node. Both
+> qualifiers matter; see the caveats below. Best val NLL/jet, and the *paired* per-seed
+> differences against `num_layers=1`:
+>
+> | `num_layers` | encoder params | model params | mean | seed spread | paired Δ vs `1` |
+> |---|---:|---:|---:|---:|---|
+> | `1` (default) | 47.2k | 117.2k | **4.5973** | 0.035 | — |
+> | `2` | 121.7k | 191.7k | 4.5825 | 0.040 | −0.032, **+0.027**, −0.039 |
+> | `3` | 196.2k | 266.2k | 4.6859 | **0.193** | −0.023, +0.134, +0.154 |
+> | `4` | 270.7k | 340.7k | 4.7846 | 0.038 | +0.171, +0.228, +0.163 |
+> | `1`, `hidden_dim=128` | 142.2k | 212.2k | 4.5918 | **0.020** | +0.004, +0.002, −0.022 |
+>
+> Read against the **0.029-nat seed spread** of the aux A/B (`runs/aux_input_ab/ab_summary.json`
+> — `runs/` is gitignored, so that file is local to whoever ran it), which is
+> the noise floor for this data/epoch budget. `num_layers=2` improves the mean by 0.015 —
+> half the floor — and its paired differences *change sign* across seeds, so it buys nothing
+> for +64% model size. `3` is 0.089 worse **and** its seed spread explodes to 0.193, 5× the
+> spread at `1`: an encoder that has become a seed lottery rather than a better one. `4` is
+> 0.187 worse with all three paired differences positive — no seed ambiguity left.
+>
+> **It is recurrent depth that hurts, not capacity.** The last row spends *more* parameters
+> than `num_layers=2` on width instead of layers and comes out flat, with the tightest spread
+> in the scan. Extra capacity here is merely wasted; stacking it as recurrent layers is
+> destructive.
+>
+> Same mechanism as the `ar_junipr_v4` cross-attention result below: at this grooming the
+> encoder input is a **median of 2 nodes** (mean 1.74, p99 4, 6.9% empty), so layer 2+ has no
+> temporal structure left to compose, and
+> [`encoders/gru.py`](../src/h2p_rsd_junipr/encoders/gru.py) mean-pools the result to one
+> vector regardless.
+>
+> **Revisit this under looser grooming.** Sequence length is set by `z_cut` / `β` / the `k_t`
+> floors, and it is the *only* reason depth fails here — lower the floor or `z_cut` and the
+> mean multiplicity rises until stacked layers have something to compose (`data=synthetic`,
+> mean ~6, is the existing long-sequence reference: it is where cross-attention won by 3.8
+> nats while losing on this sample). So do not carry `num_layers=1` over as a settled default
+> to a looser-groomed file; re-run the scan there. Same for turning `aux_features` on: the
+> aux columns widen every node's input, which is more per-node structure to combine and a
+> case this scan does not cover.
+>
+> Two further scoping caveats. The LR schedule and 15-epoch budget were held **fixed** across
+> arms, so part of the `3`/`4` degradation is optimization difficulty, not pure capacity
+> waste — a retuned schedule would likely recover some of it, but the ceiling is still `1`,
+> so parity is the best case for 2–3× the parameters. And this measures the **`gru`** knob
+> only: `lundnet` layers are graph message-passing rounds and `deepsets` layers are not
+> recurrent over position at all, so neither default (`3`, `2`) is implicated.
+>
+> **Regenerating the table.** No run directory is committed (`runs/` is gitignored), but the
+> input is — `cpp/test_data/jets.root` is in the repo, so the scan reproduces from a clean
+> clone. The 12 depth runs are one `sweep.py` grid, and the width control is a second:
+>
+> ```sh
+> PYTHONPATH=src python scripts/sweep.py \
+>     model=ar_junipr_v3 encoder=gru data=rntuple data.path=cpp/test_data/jets.root \
+>     trainer.max_epochs=15 encoder.num_layers=1,2,3,4 trainer.seed=0,1,2
+>
+> PYTHONPATH=src python scripts/sweep.py \
+>     model=ar_junipr_v3 encoder=gru data=rntuple data.path=cpp/test_data/jets.root \
+>     trainer.max_epochs=15 encoder.num_layers=1 encoder.hidden_dim=128 trainer.seed=0,1,2
+> ```
+>
+> Each point lands in its own `runs/<stamp>-<config_hash>/`; the table's entry is
+> `min(val_nll)` over that run's `metrics.csv`, i.e. the same `best val NLL/jet` the trainer
+> prints on exit. Add `run_root=<dir>` to keep a scan's runs together. ~3 min per run on an
+> M-series `mps` device, so ~45 min for all 15.
 
 ### `aux_features` — groomed all-branch conditioning
 
