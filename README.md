@@ -50,12 +50,15 @@ script installs `nbstripout` if missing and registers the driver for **this repo
 only**. `pre-commit install` activates the same stripping as a second, independent
 net (see `.pre-commit-config.yaml`).
 
-Stripped: outputs, execution counts, and two per-machine metadata keys —
-`metadata.kernelspec` (whose kernel you happened to pick) and
-`metadata.language_info.version` (your Python patch version). Without those, a
-notebook shows as modified for whoever opened it last. The key list is duplicated
-in `setup_nbstripout.sh` and `.pre-commit-config.yaml`; change both together or
-the two strippers will undo each other.
+Stripped: outputs, execution counts, and the per-machine metadata —
+`metadata.kernelspec` (whose kernel you happened to pick) and everything Jupyter
+derives from the live kernel on save (`language_info.version`, `.codemirror_mode`,
+`.file_extension`, `.mimetype`, `.nbconvert_exporter`). Only `language_info.name`
+and `.pygments_lexer` survive, which is what renderers need for highlighting.
+Without this a notebook shows as modified for whoever *ran* it last, even with its
+outputs stripped. The key list is duplicated in `setup_nbstripout.sh` and
+`.pre-commit-config.yaml`; change both together or the two strippers will undo
+each other.
 
 > **ARM64 (Dell GB10, Apple Silicon):** the `[energyflow]` extra pulls in
 > `wasserstein`, a C++ extension with no prebuilt ARM wheel, so pip compiles it

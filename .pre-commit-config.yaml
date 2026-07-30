@@ -24,5 +24,14 @@ repos:
       - id: nbstripout
         # Must match EXTRA_KEYS in setup_nbstripout.sh: this hook and the git
         # filter both rewrite notebooks, and a mismatch makes them undo each
-        # other. Drops the per-machine kernel choice and Python patch version.
-        args: [--extra-keys, "metadata.kernelspec metadata.language_info.version"]
+        # other. Drops the kernel choice and everything Jupyter derives from the
+        # live kernel, keeping language_info.name + .pygments_lexer.
+        args:
+          - --extra-keys
+          - >-
+            metadata.kernelspec
+            metadata.language_info.version
+            metadata.language_info.codemirror_mode
+            metadata.language_info.file_extension
+            metadata.language_info.mimetype
+            metadata.language_info.nbconvert_exporter

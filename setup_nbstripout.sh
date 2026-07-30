@@ -24,11 +24,20 @@ die()  { echo "[setup_nbstripout] ERROR: $*" >&2; exit 1; }
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Metadata stripped on top of nbstripout's defaults (outputs, execution counts).
-# Both are per-machine noise that otherwise shows every notebook as modified for
-# whoever last opened it: the kernel a contributor happened to pick, and their
-# Python patch version.  Keep this list in sync with the nbstripout hook args in
-# .pre-commit-config.yaml — the two paths must strip identically or they fight.
-EXTRA_KEYS="metadata.kernelspec metadata.language_info.version"
+# All of it is per-machine noise that otherwise shows a notebook as modified for
+# whoever ran it last: the kernel they happened to pick, their Python patch
+# version, and the language_info block Jupyter fills in from the live kernel on
+# save.  What survives is language_info.name + .pygments_lexer, which is what
+# renderers need for syntax highlighting.
+#
+# Keep this list in sync with the nbstripout hook args in .pre-commit-config.yaml
+# — the two paths must strip identically or they fight.
+EXTRA_KEYS="metadata.kernelspec \
+metadata.language_info.version \
+metadata.language_info.codemirror_mode \
+metadata.language_info.file_extension \
+metadata.language_info.mimetype \
+metadata.language_info.nbconvert_exporter"
 
 # ── parse flags ───────────────────────────────────────────────────────────────
 GLOBAL=false
