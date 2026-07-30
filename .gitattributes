@@ -1,0 +1,16 @@
+# Notebook outputs are stripped on the way into git by the "nbstripout" filter.
+#
+# These lines say *which* files the filter applies to and are committed, so every
+# clone inherits them.  The filter *driver* — the command git actually runs — is
+# per-clone state in .git/config and is NOT committed: run
+#
+#     bash setup_nbstripout.sh
+#
+# once after cloning.  Without that step git warns about an undefined filter and
+# notebooks are committed with their outputs intact.
+#
+# That script also configures which metadata keys are stripped (kernel choice,
+# Python patch version) — so run it rather than a bare "nbstripout --install",
+# which would strip less and leave notebooks churning between contributors.
+*.ipynb filter=nbstripout
+*.ipynb diff=ipynb

@@ -14,6 +14,7 @@ black>=24.0
 isort>=5.13
 mypy>=1.8
 pre-commit>=3.6
+nbstripout>=0.7      # tested: 0.9.1  (git filter; register it via setup_nbstripout.sh)
 
 # --- [track] lightweight experiment logging -------------------------------
 tensorboard>=2.14

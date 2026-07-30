@@ -22,3 +22,7 @@ repos:
     rev: 0.7.1
     hooks:
       - id: nbstripout
+        # Must match EXTRA_KEYS in setup_nbstripout.sh: this hook and the git
+        # filter both rewrite notebooks, and a mismatch makes them undo each
+        # other. Drops the per-machine kernel choice and Python patch version.
+        args: [--extra-keys, "metadata.kernelspec metadata.language_info.version"]

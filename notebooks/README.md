@@ -1,7 +1,8 @@
 # notebooks/
 
-Validation + physics figures, nbstripped in git (see `.pre-commit-config.yaml`)
-and rendered in the docs:
+Validation + physics figures, nbstripped in git (run `bash setup_nbstripout.sh`
+once per clone; `.pre-commit-config.yaml` carries the same hook) and rendered in
+the docs:
 
 - **lund_rntuple_histograms.ipynb** — the notebook twin of
   [`cpp/apps/hist_lund_rntuple.cpp`](../cpp/apps/hist_lund_rntuple.cpp): reads a

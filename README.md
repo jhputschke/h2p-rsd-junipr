@@ -37,6 +37,26 @@ pip install -e ".[track,serve,dev]"   # optional extras
 pip install -e ".[mbr]"          # MBR point estimator (pot backend); add ".[energyflow]" for the reference EMD
 ```
 
+After a fresh clone, run once to keep notebook outputs out of git:
+
+```bash
+bash setup_nbstripout.sh   # --status to check, --global to apply machine-wide
+```
+
+`.gitattributes` (committed) says `*.ipynb` goes through the `nbstripout` filter;
+the filter *driver* lives in `.git/config`, which git never clones — so this step is
+per-clone, and skipping it means notebooks get committed with their outputs. The
+script installs `nbstripout` if missing and registers the driver for **this repo
+only**. `pre-commit install` activates the same stripping as a second, independent
+net (see `.pre-commit-config.yaml`).
+
+Stripped: outputs, execution counts, and two per-machine metadata keys —
+`metadata.kernelspec` (whose kernel you happened to pick) and
+`metadata.language_info.version` (your Python patch version). Without those, a
+notebook shows as modified for whoever opened it last. The key list is duplicated
+in `setup_nbstripout.sh` and `.pre-commit-config.yaml`; change both together or
+the two strippers will undo each other.
+
 > **ARM64 (Dell GB10, Apple Silicon):** the `[energyflow]` extra pulls in
 > `wasserstein`, a C++ extension with no prebuilt ARM wheel, so pip compiles it
 > from source. Its headers declare `enum ... : char` members with value `-1`,
