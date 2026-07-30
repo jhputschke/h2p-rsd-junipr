@@ -398,8 +398,8 @@ How to read them:
 
 `eval` writes `eval_metrics.json` and the three figures
 (`calibration_pit_coords.png`, `calibration_tarp.png`, `calibration_by_region.png`)
-**beside the checkpoint**. Figures need matplotlib, which is not a package dependency —
-without it you still get the JSON. A worked walkthrough on real PYTHIA data is
+**beside the checkpoint**. Figures need matplotlib, which is not a core dependency but an
+opt-in extra (`pip install -e ".[plots]"`) — without it you still get the JSON. A worked walkthrough on real PYTHIA data is
 [`notebooks/calibration_v2_walkthrough.ipynb`](../notebooks/calibration_v2_walkthrough.ipynb).
 
 ### The v2-vs-v3 A/B, and which decode knobs are still live
@@ -446,7 +446,7 @@ pytest tests/test_train_integration.py   # fast_dev train for ar_junipr_v1/v2/ci
 
 You don't need the CLI to run the model — `import h2p_rsd_junipr` and call it
 directly. The package installs as `pip install -e .`; nothing here needs the
-`[serve]` or `[track]` extras (only `numpy`/`torch`; add `matplotlib` for the
+`[serve]` or `[track]` extras (only `numpy`/`torch`; add the `[plots]` extra for the
 plots in §5.4).
 
 The contract every model family implements is **`log_prob`** (exact per-jet
@@ -642,7 +642,7 @@ only required for `log_prob`.)
 
 ### 5.4 In a Jupyter notebook (with plots)
 
-The same calls work in a notebook; add `matplotlib` (`pip install matplotlib`) to
+The same calls work in a notebook; add matplotlib (`pip install -e ".[plots]"`) to
 visualise the posterior. This plots the posterior multiplicity distribution and the
 posterior draws on the Lund plane, with the MAP tree overlaid:
 

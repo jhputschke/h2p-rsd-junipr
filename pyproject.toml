@@ -22,7 +22,22 @@ dependencies = [
 [project.optional-dependencies]
 lundnet = ["torch-geometric>=2.4"]
 track = ["tensorboard>=2.14"]
-serve = ["fastapi>=0.110", "uvicorn>=0.27", "onnxruntime>=1.17"]
+# `pydantic` is imported directly by serving/api.py (request models) — declared
+# explicitly rather than leaned on as a transitive fastapi dependency. `onnx` +
+# `onnxscript` are what `torch.onnx.export` needs: since torch 2.9 that call
+# defaults to `dynamo=True`, whose exporter lives in onnxscript. `onnxruntime` is
+# only for loading the exported graph back (round-trip checks / non-torch serving).
+serve = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "pydantic>=2.0",
+    "onnx>=1.16",
+    "onnxscript>=0.1",
+    "onnxruntime>=1.17",
+]
+# Calibration/diagnostic figures (`eval/report.py`) and the notebooks. Kept an
+# opt-in extra, not a core dependency: without it eval still writes metrics JSON.
+plots = ["matplotlib>=3.7"]
 # MBR point estimator (decode.point_estimator=mbr). `pot` is the DEFAULT backend and
 # the only one pulled by `[mbr]`; it is lazy-imported so the default point_estimator=map
 # path needs nothing. `energyflow` is the optional reference EMD backend

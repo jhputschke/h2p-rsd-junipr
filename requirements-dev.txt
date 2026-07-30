@@ -21,7 +21,15 @@ tensorboard>=2.14
 # --- [serve] FastAPI service + ONNX export --------------------------------
 fastapi>=0.110
 uvicorn>=0.27        # tested: 0.40.0
-onnxruntime>=1.17
+pydantic>=2.0        # tested: 2.12.5  (imported directly by serving/api.py)
+onnx>=1.16           # torch.onnx.export writes/validates the graph
+onnxscript>=0.1      # torch>=2.9 defaults torch.onnx.export to dynamo=True
+onnxruntime>=1.17    # only needed to load the exported graph back
+
+# --- [plots] calibration figures + notebooks ------------------------------
+matplotlib>=3.7      # tested: 3.10.7  (eval/report.py degrades to JSON without it)
 
 # --- [lundnet] EdgeConv graph encoder (heavy; install per your CUDA/CPU) ---
+# Not imported yet: encoders/lundnet.py ships a dependency-free chain EdgeConv;
+# the extra is reserved for swapping in a real kNN EdgeConv behind the same API.
 # torch-geometric>=2.4

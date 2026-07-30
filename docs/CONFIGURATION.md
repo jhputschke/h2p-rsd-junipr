@@ -798,7 +798,7 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt \
 
 `eval` writes `eval_metrics.json` plus `calibration_pit_coords.png`,
 `calibration_tarp.png` and `calibration_by_region.png` beside the checkpoint (figures need
-matplotlib, which is not a package dependency — without it you still get the JSON).
+matplotlib — not a core dependency, but the `[plots]` extra; without it you still get the JSON).
 
 ---
 

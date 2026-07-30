@@ -4,15 +4,20 @@
 #   pip install -r requirements.txt
 #
 # The package itself is installed with `pip install -e .` (see pyproject.toml);
-# this file mirrors the [project].dependencies for users who want a plain
+# this file covers the same [project].dependencies for users who want a plain
 # requirements-based environment. Optional extras live in requirements-dev.txt.
+#
+# Floors here track the *tested* environment and are deliberately tighter than
+# pyproject's [project].dependencies, which state the lowest versions the code is
+# expected to work on (torch>=2.1, numpy>=1.24 — what docker/Dockerfile.train's
+# torch-2.4 base image resolves to). Install from pyproject if you need those.
 
 # torch: a >= floor rather than an exact pin — install the right wheel for your
-# platform/accelerator from https://pytorch.org (tested with 2.11.0.dev; >=2.1
-# is the supported floor). On Apple Silicon the default wheel includes MPS.
+# platform/accelerator from https://pytorch.org (tested with 2.11.0.dev).
+# On Apple Silicon the default wheel includes MPS.
 torch>=2.10
 
-numpy>=2.0,<3        # tested: 2.3.5
+numpy>=2.0,<3        # tested: 2.3.5  (nothing here needs the 2.x API; see above)
 omegaconf>=2.3,<3     # tested: 2.3.1  (structured-config validation, no Hydra)
 uproot>=5.0,<6        # tested: 5.6.9  (reads the ROOT RNTuple written by cpp/)
 awkward>=2.6,<3       # tested: 2.8.11 (jagged Lund columns: arrays(library="ak"))
@@ -27,3 +32,9 @@ pot>=0.9             # tested: 0.9.7  (ot.emd2 augmented-cost EMD)
 # heavier (pulls the Wasserstein/POT stack). Uncomment, or `pip install -e ".[energyflow]"`,
 # to enable it; it too is lazy-imported and only needed when that backend is chosen.
 # energyflow>=1.3    # reference KMT EMD (arXiv:1902.02346); needs a working `wasserstein` build
+
+# --- figures (optional) ---
+# The calibration/diagnostic plots in eval/report.py and the notebooks need
+# matplotlib; it is lazy-imported and eval degrades to metrics-JSON-only without
+# it. Uncomment, or `pip install -e ".[plots]"`, to get the figures.
+# matplotlib>=3.7    # tested: 3.10.7
