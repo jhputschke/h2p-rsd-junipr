@@ -258,8 +258,16 @@ def _emd_ef(pa, wa, pb, wb, *, R, beta, norm, periodic_phi) -> float:
     )
 
 
-def _lund_image(pts, w, geom, nb=10) -> np.ndarray:
-    """Normalised binned Lund image over ``(ln 1/DeltaR, ln kt)`` — the surrogate."""
+def _lund_image(pts, w, geom, nb=None) -> np.ndarray:
+    """Normalised binned Lund image over ``(ln 1/DeltaR, ln kt)`` — the surrogate.
+
+    ``nb`` defaults to ``geom.n_bins``, i.e. the surrogate bins at exactly the
+    resolution the model decides at. It used to be hard-coded to 10, which happened to
+    agree with the only geometry in use; at ``n_bins: 30`` that made the risk function
+    bin at 0.2-wide truth in 0.6-wide cells, so the surrogate was *coarser than the
+    model* and MBR could not tell apart candidates the model distinguishes. Pass ``nb``
+    explicitly only to deliberately decouple the two."""
+    nb = int(geom.n_bins if nb is None else nb)
     img = np.zeros((nb, nb), dtype=float)
     if pts.shape[0] == 0:
         return img.ravel()

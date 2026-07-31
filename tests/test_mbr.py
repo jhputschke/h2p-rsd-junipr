@@ -129,6 +129,34 @@ def test_pot_imbalance_penalty_is_exactly_R_times_dW():
     assert mbr.lund_emd(empty, a, R=R, backend="pot") == pytest.approx(R * a[1].sum(), rel=1e-6)
 
 
+# --- the surrogate follows the model's resolution --------------------------------
+def test_surrogate_image_bins_at_geom_n_bins():
+    """`_lund_image` used to hard-code a 10x10 grid, which silently made the surrogate
+    risk COARSER than the model at any other geometry (docs/PLAN_prod_test_v0.md check
+    6). It must follow `geom.n_bins` — and still reproduce the old numbers at 10."""
+    from h2p_rsd_junipr.geometry import Geometry
+
+    g30 = Geometry(n_bins=30)
+    pts, w = mbr.lund_cloud([0, 5, 9], GEOM, lnkt_cut=0.0)
+    assert mbr._lund_image(pts, w, GEOM).size == 10 * 10
+    assert mbr._lund_image(pts, w, g30).size == 30 * 30
+    # explicit nb still wins, and nb=10 on the old geometry is unchanged
+    assert mbr._lund_image(pts, w, g30, nb=10).size == 10 * 10
+    assert np.allclose(mbr._lund_image(pts, w, GEOM), mbr._lund_image(pts, w, GEOM, nb=10))
+
+
+def test_surrogate_resolves_what_the_coarse_image_could_not():
+    """Two clouds inside one 0.6-wide cell but in different 0.2-wide cells: chi2 is 0
+    at nb=10 (indistinguishable) and > 0 at nb=30."""
+    from h2p_rsd_junipr.geometry import Geometry
+
+    g30 = Geometry(n_bins=30)
+    a = (np.array([[0.05, 0.05]]), np.array([1.0]))
+    b = (np.array([[0.55, 0.55]]), np.array([1.0]))   # same 0.6-cell, different 0.2-cell
+    assert mbr.lund_emd(a, b, backend="surrogate", geom=GEOM) == pytest.approx(0.0)
+    assert mbr.lund_emd(a, b, backend="surrogate", geom=g30) > 0.0
+
+
 # --- backend agreement: pot vs energyflow ---------------------------------------
 @pytest.mark.skipif(not (POT_OK and EF_OK), reason="need both pot and a working energyflow")
 def test_pot_energyflow_agree_on_argmin_and_ratio():
