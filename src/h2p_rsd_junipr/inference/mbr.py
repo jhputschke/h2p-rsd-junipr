@@ -36,8 +36,11 @@ neither and parity stays dependency-free.
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import glob
 import math
 import os
+import platform
 import warnings
 
 import numpy as np
@@ -175,21 +178,121 @@ def _emd_pot(pa, wa, pb, wb, *, R, beta, norm, periodic_phi, phi_col) -> float:
     return float(ot.emd2(a, b, C))
 
 
+_OMP_RUNTIME_NAMES = ("libomp.dylib", "libiomp5.dylib", "libgomp")
+
+
+def _loaded_omp_runtimes() -> set:
+    """Realpaths of every OpenMP runtime currently mapped into this process (macOS).
+
+    Walks dyld's image list; `realpath` so that a symlinked duplicate counts once."""
+    dyld = ctypes.CDLL(None)
+    dyld._dyld_image_count.restype = ctypes.c_uint32
+    dyld._dyld_get_image_name.restype = ctypes.c_char_p
+    dyld._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+    found = set()
+    for i in range(dyld._dyld_image_count()):
+        raw = dyld._dyld_get_image_name(i)
+        if not raw:
+            continue
+        name = raw.decode(errors="replace")
+        if any(k in os.path.basename(name) for k in _OMP_RUNTIME_NAMES):
+            found.add(os.path.realpath(name))
+    return found
+
+
+_REBUILD_HINT = (
+    "Numbers are unaffected, but the batched solve loses ~11x. Fix: rebuild "
+    "wasserstein against the same libomp PyTorch loads -- see the [energyflow] "
+    "notes in README.md."
+)
+
+# Threads for the batched `emds`; None = energyflow's default (every core). Set to 1
+# only by the guard below, when a duplicate OpenMP runtime makes a team fatal.
+_EMDS_N_JOBS = None
+_OPENMP_GUARDED = False
+
+
+def _guard_wasserstein_openmp() -> None:
+    """macOS: keep `wasserstein`'s OpenMP off when a *second* runtime is loaded.
+
+    PyTorch bundles `torch/lib/libomp.dylib`, and `import energyflow` loads it before
+    we get here (energyflow -> POT -> `ot.backend` imports torch). If `wasserstein`'s
+    extension then resolves ``@rpath/libomp.dylib`` to a *different* file -- conda's
+    ``$CONDA_PREFIX/lib/libomp.dylib``, which is what the README's macOS build command
+    linked -- the process holds two LLVM OpenMP runtimes. Creating the batched `emds`
+    thread team then **segfaults**: a Jupyter kernel simply dies, no traceback. The
+    ``KMP_DUPLICATE_LIB_OK=TRUE`` this function used to set unconditionally is exactly
+    what downgraded OpenMP's own self-explaining "Error #15" abort into that silent
+    SIGSEGV, so it is no longer set unless it is the only thing left to try.
+
+    Probe rather than guess: dlopen the OpenMP extension -- which resolves its rpath
+    but starts no parallel region, so loading is safe even though `emds` is not -- and
+    count the runtimes. Which repair is available depends on who got here first:
+
+      * Nothing has touched the extension yet -> take wasserstein's own documented
+        Darwin opt-out (`without_openmp()`), which selects its no-OpenMP build. Clean:
+        no parallel region is ever entered, and no unsupported env var is involved.
+      * Something already ran an EMD (a probe, an earlier cell) -> the OpenMP build is
+        committed and cannot be swapped. Fall back to suppressing the duplicate-runtime
+        abort and pinning `emds` to `n_jobs=1`: with a team of one no second team is
+        spawned, which is what actually avoids the crash. Verified elementwise against
+        the single-runtime result: max deviation 0.0.
+
+    Cost, measured on an M-series 16-core (100x100 clouds of 3-20 points): 2.9 us/pair
+    with one shared runtime, 32.7 single-threaded, 43.1 on the per-pair `emd`. The
+    batched path is still worth taking, but a shared runtime is worth ~11x more --
+    hence a warning that names the repair rather than a silent degradation."""
+    global _EMDS_N_JOBS, _OPENMP_GUARDED
+    if _OPENMP_GUARDED or platform.system() != "Darwin":
+        return  # Linux: GCC's libgomp coexists with torch's runtime without aborting
+    try:
+        import wasserstein
+        import wasserstein.config as wconfig
+    except ImportError:  # pragma: no cover - energyflow imports wasserstein itself
+        return
+    sos = glob.glob(os.path.join(os.path.dirname(wasserstein.__file__),
+                                 "_wasserstein_omp*.so"))
+    if not sos:  # pragma: no cover - no OpenMP build exists, so nothing to guard
+        return
+    try:
+        ctypes.CDLL(sos[0], mode=ctypes.RTLD_LOCAL)  # resolve its libomp; no OMP init
+    except OSError:  # pragma: no cover - an unloadable extension fails at first use
+        return
+    _OPENMP_GUARDED = True
+    if len(_loaded_omp_runtimes()) <= 1:
+        return  # one runtime -> the OpenMP-parallel `emds` is safe, and ~11x faster
+    if wconfig._CAN_SET_OPENMP:
+        wconfig.without_openmp()  # no extension loaded yet: pick the no-OpenMP build
+        warnings.warn(
+            "Two OpenMP runtimes are loaded (PyTorch's bundled libomp and the one "
+            "`wasserstein` links); its parallel `emds` would segfault, so wasserstein "
+            "was switched to its single-threaded build. " + _REBUILD_HINT,
+            RuntimeWarning, stacklevel=3,
+        )
+        return
+    from wasserstein import _wasserstein as _wext
+    if not _wext.cvar.COMPILED_WITH_OPENMP:
+        return  # already committed to the no-OpenMP build; nothing can go wrong
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # or the team creation aborts outright
+    _EMDS_N_JOBS = 1
+    warnings.warn(
+        "Two OpenMP runtimes are loaded (PyTorch's bundled libomp and the one "
+        "`wasserstein` links) and its OpenMP build is already committed, so `emds` "
+        "is pinned to one thread to avoid a segfault. " + _REBUILD_HINT,
+        RuntimeWarning, stacklevel=3,
+    )
+
+
 def _import_ef():
-    # EnergyFlow's `wasserstein` OpenMP extension and PyTorch both link an OpenMP
-    # runtime; loading both in one process aborts with "OMP: Error #15 ... libomp
-    # already initialized" on macOS. Allow them to coexist (set before the first
-    # wasserstein call, which is where its runtime initialises). The MBR solves are
-    # independent LPs, so the duplicate-runtime caveat does not affect correctness.
-    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     try:
         import energyflow as ef  # lazy, per-backend
-        return ef
     except ImportError as e:  # pragma: no cover - exercised only without energyflow
         raise ImportError(
             "mbr_backend='energyflow' requires the optional [energyflow] extra: "
             "pip install 'energyflow>=1.3' (and a working `wasserstein` build)."
         ) from e
+    _guard_wasserstein_openmp()  # after energyflow, which is what pulls in torch's libomp
+    return ef
 
 
 class _NumpyCopyShim:
@@ -239,10 +342,14 @@ def _wasserstein_numpy2_compat():
 
 
 def _emds_block(ef, eventsC, eventsS, *, R, beta, norm, gdim, periodic_phi, shape):
-    """One batched, OpenMP-parallel ``emds`` call over the non-empty sub-block."""
+    """One batched, OpenMP-parallel ``emds`` call over the non-empty sub-block.
+
+    ``n_jobs`` is passed only when `_guard_wasserstein_openmp` pinned it, so the
+    default stays energyflow's own (every core) rather than a number we chose."""
+    extra = {} if _EMDS_N_JOBS is None else {"n_jobs": _EMDS_N_JOBS}
     return np.asarray(
         ef.emd.emds(eventsC, eventsS, R=R, beta=beta, norm=norm,
-                    gdim=gdim, periodic_phi=periodic_phi),
+                    gdim=gdim, periodic_phi=periodic_phi, **extra),
         dtype=float,
     ).reshape(shape)
 

@@ -91,40 +91,72 @@ each other.
 > install those first if absent. `--no-cache-dir` matters on any re-install: pip caches the
 > wheel it built under `~/.cache/pip/wheels/` and will silently reuse a stale NumPy-1 one.
 >
-> On Apple Silicon, also point the compiler at conda's OpenMP — Apple clang ships no
-> `<omp.h>`, which `wasserstein` `#include`s (`conda install -c conda-forge llvm-openmp`
-> if the env lacks it):
+> **3. macOS additionally needs `wasserstein` to share PyTorch's OpenMP runtime.**
+> Apple clang ships no `<omp.h>`, which `wasserstein` `#include`s, so the headers have to
+> come from conda (`conda install -c conda-forge llvm-openmp` if the env lacks it). The
+> *library*, however, must not: linking `$CONDA_PREFIX/lib/libomp.dylib` puts a **second**
+> LLVM OpenMP runtime in the process, because `import energyflow` already loaded PyTorch's
+> bundled `torch/lib/libomp.dylib` (energyflow → POT → `ot.backend` imports torch — you do
+> not have to `import torch` yourself). Two runtimes means the batched `emds` **segfaults**
+> when it creates its thread team: in Jupyter the kernel just dies, no traceback. Link the
+> copy PyTorch already loads instead — headers from conda, library from `torch/lib`:
 >
 > ```bash
+> TORCH_LIB=$(python -c "import torch, os; print(os.path.dirname(torch.__file__) + '/lib')")
 > CFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
 > CXXFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
-> LDFLAGS="-L$CONDA_PREFIX/lib -lomp -Wl,-rpath,$CONDA_PREFIX/lib" \
+> LDFLAGS="-L$TORCH_LIB -lomp -Wl,-rpath,$TORCH_LIB" \
 >   pip install --no-binary wasserstein --no-build-isolation --no-cache-dir \
 >     -e ".[energyflow]"
+>
+> # setup.py also bakes in an rpath to $CONDA_PREFIX/lib, and dyld searches rpaths in
+> # order — so that libomp still wins unless the entry is removed. Drop it, then re-sign
+> # (arm64 binaries carry a signature that install_name_tool invalidates).
+> python -c "import os, wasserstein as w; d = os.path.dirname(w.__file__); \
+> print('\n'.join(os.path.join(d, f) for f in os.listdir(d) if f.endswith('.so')))" \
+> | while read -r so; do
+>     install_name_tool -delete_rpath "$CONDA_PREFIX/lib" "$so" 2>/dev/null && \
+>       codesign -f -s - "$so"
+>   done
 > ```
 >
-> Two *runtime* quirks are then handled automatically by the package, so no action is
-> needed. PyTorch and `wasserstein` each link an OpenMP runtime (macOS would abort with
-> `OMP: Error #15`), so `inference.mbr` sets `KMP_DUPLICATE_LIB_OK=TRUE` before first use.
-> And `wasserstein`'s batched `emds` uses `np.array(..., copy=False)` on a *strided column
+> Verify with `otool -l …/wasserstein/_wasserstein_omp*.so | grep -A2 LC_RPATH`: only
+> `torch/lib` should remain. `mbr` then runs the parallel path and stays quiet.
+>
+> The NumPy-2 `emds` break is handled automatically, so no action is needed there:
+> `wasserstein`'s batched `emds` uses `np.array(..., copy=False)` on a *strided column
 > slice*, which raises under NumPy ≥ 2 (`Unable to avoid copy`) — a break in its *Python*
 > layer that rebuilding does not fix. `_matrix_ef` retries that one call with NumPy-1 copy
 > semantics restored in `wasserstein.wasserstein`'s namespace alone
 > (`_wasserstein_numpy2_compat`), which is what keeps the backend multi-core.
 >
+> **If the rebuild is skipped, `mbr` degrades instead of crashing.** `_guard_wasserstein_openmp`
+> dlopens the OpenMP extension (which resolves its rpath but starts no parallel region) and
+> counts the loaded runtimes. Finding two, it either takes `wasserstein`'s own documented
+> Darwin opt-out (`wasserstein.config.without_openmp()`, selecting the no-OpenMP build) or —
+> if something already ran an EMD and committed the OpenMP build — pins `emds` to
+> `n_jobs=1`, where no second thread team is spawned. Either way a `RuntimeWarning` names
+> the rebuild. Note that `inference.mbr` no longer sets `KMP_DUPLICATE_LIB_OK=TRUE`
+> unconditionally: that variable is exactly what turned OpenMP's self-explaining
+> `OMP: Error #15` abort into a silent SIGSEGV, and it is now set only in the pinned case,
+> where the abort would otherwise be unavoidable.
+>
 > **This matters more than it looks.** `emds` is the *only* parallel path —
 > `wasserstein.PairwiseEMD` fans the pairs out over OpenMP threads. The per-pair `emd`
 > fallback is single-threaded, so losing `emds` costs a factor of the core count for
-> bit-identical numbers. Measured on the GB10 (20 cores, 200×200 clouds of 3–20 points):
+> bit-identical numbers. Measured on the GB10 (20 cores, 200×200 clouds of 3–20 points),
+> and on an Apple-Silicon 16-core (100×100 clouds of 3–20 points):
 >
-> | path | µs/pair |
-> |---|---|
-> | `energyflow`, batched `emds` (all cores) | **2.3** |
-> | `energyflow`, per-pair `emd` fallback (1 core) | 34.9 |
-> | `pot` default backend (1 core) | 49.0 |
+> | path | µs/pair, GB10 | µs/pair, M-series |
+> |---|---|---|
+> | `energyflow`, batched `emds` (all cores) | **2.3** | **2.9** |
+> | `energyflow`, batched `emds` (1 thread — duplicate-libomp guard) | — | 32.7 |
+> | `energyflow`, per-pair `emd` fallback (1 core) | 34.9 | 43.1 |
+> | `pot` default backend (1 core) | 49.0 | — |
 >
-> If the fallback ever engages it now emits a `RuntimeWarning` rather than silently
-> costing ~15×. Note that energyflow's *other* batched entry point, `emds_pot`, is dead
+> All four agree elementwise (max deviation 0.0); only the wall clock differs. If the
+> per-pair fallback ever engages it emits a `RuntimeWarning` rather than silently costing
+> ~15×, as does the macOS OpenMP guard for its ~9×. Note that energyflow's *other* batched entry point, `emds_pot`, is dead
 > against POT ≥ 0.9.5 for an unrelated reason — a bare `except:` at `energyflow/emd.py:59`
 > swallows the failed `from ot.lp import emd_c` (POT moved it to `ot.lp.emd_wrap`) and
 > leaves `_distance_wrap` unbound, surfacing as a `NameError` only when called. `mbr.py`
