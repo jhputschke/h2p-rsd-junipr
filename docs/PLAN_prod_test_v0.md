@@ -345,6 +345,21 @@ deliberately not liftable.
    the missing diagnostic — the one scalar that separates "the ranking is good" from "the
    scale is wrong".
 
+   **Recalibrate the head first, and fit both on the training file's val split.**
+   `decode.length_temperature` + `decode.length_tilt` (`fit_length_recalibration`) landed
+   with the gate. On the 10-bin walkthrough they take mean `q(0|x)` from 0.085 to 0.143
+   against a truth 0.161, the NLL of `N` from 1.2133 to 1.1810, and the `n=0`
+   empirical/predicted ratio from 1.90 to 1.13. **A scalar temperature alone cannot do
+   this** — it is symmetric about the mode, so it pulls `q(0|x)` *down* toward `1/26`; the
+   measured error is a monotone ramp across `n` and needs the tilt. §6 must report the
+   uncalibrated numbers too, or the recalibration hides the defect it corrects.
+
+   Two things to re-measure at 30 bins rather than carry over: the fitted `(T, tilt)` are
+   sample- and geometry-dependent, and the ramp itself may differ once the split head has
+   900 classes. Note the recalibration also moves the **posterior series** in §7, since it
+   reaches `sample` — so `dist_closure_metrics.json` must record `(T, tilt)` or its empty
+   rate is unattributable.
+
    **Fit `tau` on the training file's val split, then apply it frozen to the test file.**
    `empty_threshold_for_rate` is a quantile of `q(0|x)` and reproduces its fitted rate by
    construction, so fitting and reporting on the same jets makes §6 circular — it would

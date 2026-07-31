@@ -198,6 +198,17 @@ class DecodeConfig:
     length_floor_quantile: float = 0.0 # per-jet MAP floor from the learned P(n|x): the
     #                                    effective floor is max(min_emissions, Q_alpha(P(n|x))).
     #                                    0.0 == off (short-circuits; merged behavior unchanged)
+    length_temperature: float = 1.0    # post-hoc scalar temperature on the multiplicity
+    #                                    head's logits: moves length_pmf and the N drawn by
+    #                                    sample, never log_prob (that is the trained
+    #                                    likelihood). 1.0 == off and bit-identical; a no-op
+    #                                    for families with no n_head. Fit on held-out jets
+    #                                    with inference.length.fit_length_temperature.
+    length_tilt: float = 0.0           # companion to length_temperature: a term LINEAR in
+    #                                    n on the same logits. A temperature is symmetric
+    #                                    about the mode and cannot produce the monotone
+    #                                    ramp the head shows; this is what moves mass
+    #                                    between short and long trees. 0.0 == off.
     empty_threshold: float = 0.0       # 0.0 == off. Decide the EMPTY tree when q(N=0|x) >=
     #                                    this, BEFORE any shape decode. The parton target
     #                                    really is empty for ~17% of jets
@@ -446,6 +457,8 @@ _DECODE_DEFAULTS: dict = {
     "min_emissions": 1,
     "length_penalty": 0.0,
     "length_floor_quantile": 0.0,
+    "length_temperature": 1.0,
+    "length_tilt": 0.0,
     "empty_threshold": 0.0,
     "point_estimator": "map",
     "mbr_backend": "pot",

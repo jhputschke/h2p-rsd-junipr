@@ -220,6 +220,10 @@ def cmd_eval(argv) -> int:
     _, val_ds = dm.datasets()
     dm_jets = dm.val_jets
     decode = decode_params(cfg_eval)  # tolerant of pre-decode-field checkpoint snapshots
+    # `build_model` already read this from the snapshot; re-apply so a LIFTED
+    # `decode.length_temperature=` wins, like every other decode override.
+    model.length_temperature = float(decode["length_temperature"])
+    model.length_tilt = float(decode["length_tilt"])
 
     model.eval()
     if not getattr(model, "exact_likelihood", True):

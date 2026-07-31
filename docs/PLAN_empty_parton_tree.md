@@ -1,6 +1,6 @@
 # PLAN — the empty parton tree is a valid answer, and no point estimator can give it
 
-Status: **the gate is implemented; the recalibration work item is not.** `decode.empty_threshold`
+Status: **both work items are implemented.** `decode.empty_threshold`
 (default `0.0` = off), `inference.length.empty_gate` / `empty_threshold_for_rate`, the stage
 in `models.base.map_or_mbr`, `run_closure`'s `p_empty_*` / `recall_empty` /
 `precision_empty` keys, and §5a's gated row all landed; `tests/test_empty_tree_gate.py`
@@ -8,8 +8,11 @@ pins them. Measured on the walkthrough `ar_junipr_v3`, fitting τ on one half of
 split and scoring on the other: `q(0\|x)` AUC **0.760**, under-confident **1.90×**,
 τ = 0.166 (83.7th pct), held-out predicted rate **0.172** against truth 0.159, recall
 **0.36**, precision **0.33** — close to this plan's projections (τ = 0.1675, 81.8th pct,
-F1 ≈ 0.40). The separable second work item — a scalar temperature on the `n_head` logits —
-remains **not started**.
+F1 ≈ 0.40). The second work item landed as `decode.length_temperature` +
+`decode.length_tilt` (`recalibrate_pmf`, `fit_length_recalibration`,
+`PosteriorModel.recalibrated_n_logits`), pinned by `tests/test_length_temperature.py` —
+**but the scalar temperature this plan proposed provably cannot do the job, and the fix
+needed one more parameter.** See the box in that section for the measurement.
 
 At parton level **17.2%** of jets in
 `cpp/test_data/jets.root` have zero primary splittings surviving grooming, so the empty
@@ -254,6 +257,36 @@ held-out set, done once and frozen.
   audit the rest.
 
 ## Second work item — recalibrate the length head (separable)
+
+> **Implemented, and this section's premise was wrong.** A single scalar temperature
+> cannot do this, for a structural reason: a temperature is *symmetric about the mode*,
+> so it can only pull a non-modal class toward uniform or toward zero. `q(0|x) = 0.085`
+> sits **above** uniform (`1/26 = 0.038`) and **below** the mode, so flattening pushes it
+> *down*. Sweeping `T` over `[0.1, 20]` tops out at `mean q(0|x) = 0.125` against a truth
+> of 0.161 — the NLL-fitted `T = 1.10` reaches only 0.091 and buys 0.0008 nat.
+>
+> The measured miscalibration is not a scaling but a **monotone ramp across n**
+> (empirical/predicted = 1.90, 0.96, 0.93, 0.80, 0.68 at `n = 0..4`), and the minimal
+> family that can produce a ramp adds a term **linear in n**. `decode.length_tilt` is that
+> term; `recalibrate_pmf` / `fit_length_recalibration` apply `softmax(z/T + tilt·n)` and
+> nest the scalar case at `tilt = 0` (`with_tilt=False` still fits it, as the baseline).
+>
+> Held-out, fitting on one half of the val split and scoring on the other:
+>
+> | | `T=1` | scalar | **+tilt** | truth |
+> |---|---|---|---|---|
+> | NLL of `N` | 1.2133 | 1.2125 | **1.1810** | |
+> | mean `q(0\|x)` | 0.0846 | 0.0910 | **0.1428** | 0.1610 |
+> | max `q(0\|x)` | 0.4261 | 0.4166 | **0.5089** | (≥ 0.5 needed) |
+> | AUC | 0.760 | 0.760 | 0.758 | |
+> | emp/pred at `n=0` | 1.90 | 1.77 | **1.13** | |
+>
+> Fitted `T = 1.21`, `tilt = −0.31`. Against the three claims below: the **cost-based
+> threshold is now usable** (the belief reaches 0.5093); the **posterior series is mostly
+> fixed** (0.085 → 0.143 against 0.161, not all the way); the **gate barely moves**
+> (recall 0.360 → 0.368, precision 0.333 → 0.340), because a monotone-in-n transform
+> largely preserves the cross-jet *ranking* of `q(0|x)` — which is also why the gate
+> worked without recalibration in the first place.
 
 F5's under-confidence is uniform and monotone, so a **single scalar temperature on the
 `n_head` logits**, fitted post-hoc on held-out jets, should absorb most of it. No

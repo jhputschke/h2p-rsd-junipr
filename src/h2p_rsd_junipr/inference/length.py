@@ -24,6 +24,8 @@ them, before any shape decode (docs/PLAN_empty_parton_tree.md).
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
@@ -38,6 +40,101 @@ def quantile_floor(pmf: np.ndarray, alpha: float) -> int:
     cdf = np.cumsum(pmf)
     n = int(np.searchsorted(cdf, alpha))
     return int(np.clip(n, 0, pmf.size - 1))
+
+
+def recalibrate_pmf(pmf, temperature: float = 1.0, tilt: float = 0.0) -> np.ndarray:
+    """`softmax(log p / T + tilt * n)` — post-hoc affine recalibration of a length belief.
+
+    Two scalars, fitted on held-out jets, no retraining:
+
+    * `temperature` rescales about the mode — `T > 1` flattens toward uniform, `T < 1`
+      sharpens. It is the plan's original proposal and is the `tilt = 0` special case.
+    * `tilt` adds a term LINEAR IN n, which is what moves mass between short and long
+      trees. A negative tilt shifts toward the empty end.
+
+    The tilt is not decoration: the measured miscalibration of `ar_junipr_v3`'s head is a
+    *monotone ramp* across n (empirical/predicted = 1.90, 0.96, 0.93, 0.80, 0.68, 0.50 at
+    n = 0..5), and a temperature cannot produce a ramp — it is symmetric about the mode.
+    See `fit_length_recalibration`.
+
+    Both defaults are the identity and return the input untouched."""
+    p = np.asarray(pmf, dtype=float)
+    if (temperature == 1.0 and tilt == 0.0) or p.size == 0:
+        return p
+    if temperature <= 0.0:
+        raise ValueError(f"length temperature must be > 0, got {temperature!r}")
+    z = np.log(np.clip(p, 1e-300, None)) / float(temperature)
+    if tilt:
+        z = z + float(tilt) * np.arange(p.size, dtype=float)
+    z -= z.max()
+    e = np.exp(z)
+    return e / e.sum()
+
+
+def _length_nll(logp, obs, temperature: float, tilt: float) -> float:
+    total = 0.0
+    for z, n in zip(logp, obs):
+        if n >= z.size:          # past the categorical support: skip, never clamp —
+            continue             # clamping is the bias the WP4 support guard exists for
+        s = z / temperature + (tilt * np.arange(z.size) if tilt else 0.0)
+        total += float(np.log(np.exp(s - s.max()).sum()) + s.max() - s[n])
+    return total / max(len(logp), 1)
+
+
+def _golden(f, lo: float, hi: float, tol: float) -> float:
+    inv_phi = (math.sqrt(5.0) - 1.0) / 2.0
+    a, b = lo, hi
+    c, d = b - inv_phi * (b - a), a + inv_phi * (b - a)
+    fc, fd = f(c), f(d)
+    while b - a > tol:
+        if fc < fd:
+            b, d, fd = d, c, fc
+            c = b - inv_phi * (b - a)
+            fc = f(c)
+        else:
+            a, c, fc = c, d, fd
+            d = a + inv_phi * (b - a)
+            fd = f(d)
+    return (a + b) / 2.0
+
+
+def fit_length_recalibration(pmfs, n_true, *, with_tilt: bool = True,
+                             tol: float = 1e-4) -> tuple[float, float]:
+    """`(temperature, tilt)` minimising the NLL of the observed multiplicities.
+
+    Takes the UNCALIBRATED pmfs (one per held-out jet) rather than logits, so it is
+    family-agnostic: softmax is shift-invariant, so `log p` serves as the logits.
+    Coordinate descent with golden-section on each axis — the objective is smooth and
+    2-D, and this keeps the package free of a scipy dependency.
+
+    `with_tilt=False` restricts it to the plan's original scalar temperature, which is
+    kept because it is the honest baseline: on `ar_junipr_v3` it fits `T = 1.10` and buys
+    0.0008 nat, leaving `mean q(0|x)` at 0.091 against a truth of 0.161. **No scalar
+    temperature can close that gap** — sweeping `T` over `[0.1, 20]` tops out at 0.125,
+    because `q(0|x)` sits above uniform and below the mode, so flattening pulls it *down*
+    toward `1/(max_emissions+1)` and sharpening pulls it to zero.
+
+    Fit on held-out jets and FREEZE, exactly like `empty_threshold_for_rate`."""
+    obs = np.asarray(n_true, dtype=int)
+    logp = [np.log(np.clip(np.asarray(p, dtype=float), 1e-300, None)) for p in pmfs]
+    if not logp or obs.size != len(logp):
+        raise ValueError("fit_length_recalibration needs one pmf per observed multiplicity")
+
+    t, b = 1.0, 0.0
+    for _ in range(6 if with_tilt else 1):
+        # `_b=b` / `_t=t` bind the current iterate into the closure rather than leaving it
+        # to late-binding: `_golden` runs immediately so it would be correct either way,
+        # but the default-arg form is what makes that independent of the caller.
+        t = math.exp(_golden(lambda lt, _b=b: _length_nll(logp, obs, math.exp(lt), _b),
+                             math.log(0.05), math.log(20.0), tol))
+        if not with_tilt:
+            break
+        nb = _golden(lambda x, _t=t: _length_nll(logp, obs, _t, x), -3.0, 3.0, tol)
+        if abs(nb - b) < tol:
+            b = nb
+            break
+        b = nb
+    return float(t), float(b)
 
 
 def empty_gate(pmf, tau: float) -> bool:

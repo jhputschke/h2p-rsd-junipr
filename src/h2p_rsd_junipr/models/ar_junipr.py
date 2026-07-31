@@ -368,7 +368,8 @@ class ARJunipr(PosteriorModel):
         kv = self.xattn_kv(xf, nx)  # once per jet, broadcast across the n draws
         if self.use_multiplicity_head:
             # first-class factorization: N_k ~ q(N|x), then decode exactly N_k cells.
-            n_probs = F.softmax(self.n_head(e[:1]), dim=-1).squeeze(0)  # (max+1,)
+            n_probs = F.softmax(self.recalibrated_n_logits(self.n_head(e[:1])),
+                                dim=-1).squeeze(0)  # (max+1,)
             lengths = torch.multinomial(n_probs, n, replacement=True).clamp(max=max_emissions)
             return ancestral_sample_cells_fixed_length(
                 self._bind(self._step_cells, kv), e, h0, self.start_token, lengths, dev,
@@ -549,7 +550,8 @@ class ARJunipr(PosteriorModel):
             return super().length_pmf(xf, nx, mults=mults, n_samples=n_samples)
         self.eval()
         e = self.encode(xf, nx)
-        return F.softmax(self.n_head(e), dim=-1).squeeze(0).cpu().numpy()
+        return F.softmax(self.recalibrated_n_logits(self.n_head(e)),
+                         dim=-1).squeeze(0).cpu().numpy()
 
     # beam-search keys map_estimate forwards to map_decode (sampling keys like
     # n_posterior_samples / cont_temperature are silently ignored, so a single

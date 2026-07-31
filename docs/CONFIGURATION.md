@@ -649,6 +649,8 @@ The serving layer reads the checkpoint's decode config. Source:
 | `min_emissions` | `1` | MAP | **hard floor** on MAP length — the "mincut" (never the unphysical empty tree) |
 | `length_penalty` | `0.0` | MAP | GNMT `score/len**α` at final beam rank; counters the brevity bias; `0` = off |
 | `length_floor_quantile` | `0.0` | MAP | **learned per-jet floor** at the α-quantile of `P(n|x)`; `0` = off |
+| `length_temperature` | `1.0` | posterior + point estimate | post-hoc scalar temperature on the multiplicity logits; `1` = off |
+| `length_tilt` | `0.0` | posterior + point estimate | companion term **linear in n** on the same logits — what actually moves mass between short and long trees; `0` = off |
 | `empty_threshold` | `0.0` | point estimate | **emptiness ceiling**: answer the empty tree when `q(N=0\|x) >= τ`, before any shape decode; `0` = off |
 | `point_estimator` | `"map"` | point estimate | `map` (beam-search joint mode) or `mbr` (minimum-Bayes-risk tree; §10 MBR) |
 | `mbr_backend` | `"pot"` | MBR | OT backend: `pot` (default, self-contained) / `energyflow` (reference) / `surrogate` (fast χ²) |
@@ -715,6 +717,51 @@ under `surrogate`. And it **changes what a point estimate can be**: downstream c
 that assume `multiplicity >= 1` must tolerate an empty `LundPointEstimate`
 (`leading_emission_cell` already returns `None`). Full analysis:
 [`PLAN_empty_parton_tree.md`](PLAN_empty_parton_tree.md).
+
+### `length_temperature` + `length_tilt` — recalibrating the length head
+
+`softmax(z/T + tilt·n)` on the multiplicity logits, both fitted post-hoc on held-out jets.
+No retraining, no new weights. This is a **decode-layer** transform: it moves `length_pmf`
+and the `N` drawn by `sample`, and deliberately never touches `log_prob` or the `logprob` a
+point estimate reports — those are the trained likelihood. Applied in one place,
+`PosteriorModel.recalibrated_n_logits`, so the belief and the draws cannot disagree. A
+no-op for families with no `n_head` (`ar_junipr_v1/v2`), where the length belief *is* the
+sampler histogram; `build_model` warns rather than half-applying it.
+
+```python
+from h2p_rsd_junipr.inference.length import fit_length_recalibration
+T, tilt = fit_length_recalibration(pmfs_heldout, n_true_heldout)   # then freeze
+```
+
+**Why two parameters and not one.** A temperature is symmetric about the mode, so it can
+only pull a non-modal class toward uniform or toward zero. `q(0|x) = 0.085` sits above
+uniform (`1/26 = 0.038`) and below the mode, so flattening pushes it *down*: no scalar `T`
+reaches the truth rate, and sweeping `[0.1, 20]` tops out at 0.125 against 0.161. The
+measured error is a **monotone ramp across n** (empirical/predicted = 1.90, 0.96, 0.93,
+0.80, 0.68 at `n = 0..4`), and a ramp needs a term linear in `n`. Measured on the
+walkthrough `ar_junipr_v3`, fit on half the val split and scored on the other:
+
+| | `T=1` | scalar only | **+tilt** | truth |
+|---|---|---|---|---|
+| NLL of `N` | 1.2133 | 1.2125 | **1.1810** | |
+| mean `q(0\|x)` | 0.0846 | 0.0910 | **0.1428** | 0.1610 |
+| max `q(0\|x)` | 0.4261 | 0.4166 | **0.5089** | |
+| emp/pred at `n=0` | 1.90 | 1.77 | **1.13** | |
+
+It fixes the length *mean* as well, not only the `n=0` cell: `E[N]` goes 1.628 → **1.429**
+against a truth of 1.435 on held-out jets. Watch one interaction, though —
+`run_closure`'s `mean_mult_posterior` and `mult_bias_posterior` are computed over the
+truth-**non**-empty jets only (the `ly is None` continue), and on that subset a tilt toward
+`n=0` reads as a *worse* bias even while the full-population mean improves. Quote the
+`p_empty_*` row and the multiplicity row together, or the two look contradictory.
+
+Fitted `T = 1.21`, `tilt = −0.31`. `with_tilt=False` restricts the fit to the scalar case
+and is kept as the honest baseline. What it buys: the **cost-based** `empty_threshold` form
+(`τ = c/(1+c)`) becomes usable, since the belief now reaches 0.5; the posterior series in
+the closure notebooks moves from 0.085 to 0.143 empty against a truth 0.161. What it does
+**not** buy is gate quality — recall 0.360 → 0.368, precision 0.333 → 0.340, AUC flat —
+because a monotone-in-n transform largely preserves the cross-jet *ranking* of `q(0|x)`.
+That is the same reason `empty_threshold` works without recalibrating first.
 
 ### v3 semantics — which of these knobs are still live
 

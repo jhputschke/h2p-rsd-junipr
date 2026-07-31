@@ -44,6 +44,34 @@ class PosteriorModel(nn.Module, ABC):
     # default is the off path, and it is what serving reads to decide whether a
     # request must carry the aux sources.
     aux_feature_names: tuple[str, ...] = ()
+    # Post-hoc scalar temperature on the multiplicity head's logits, fitted on held-out
+    # jets by `inference.length.fit_length_temperature` and set from
+    # `decode.length_temperature`. It is a DECODE-layer recalibration: it moves
+    # `length_pmf` and the N drawn by `sample`, and deliberately never touches
+    # `log_prob` or the `logprob` a point estimate reports — those are the trained
+    # likelihood. 1.0 is off and bit-identical (division by 1.0 is exact). A no-op for
+    # families with no explicit `n_head` (ar_junipr_v1/v2), where the length belief IS
+    # the sampler histogram and tempering one without the other would decouple them.
+    length_temperature: float = 1.0
+    # The companion tilt: a term LINEAR IN n added to the same logits. A temperature is
+    # symmetric about the mode and so cannot produce the monotone ramp the head actually
+    # shows (empirical/predicted = 1.90, 0.96, 0.93, 0.80, 0.68 at n = 0..4); the tilt is
+    # what moves mass between short and long trees. 0.0 is off.
+    length_tilt: float = 0.0
+
+    def recalibrated_n_logits(self, z):
+        """`z / T + tilt * n` — post-hoc affine recalibration of the multiplicity logits.
+
+        The single place the two knobs are applied, so `length_pmf` and the `N` drawn by
+        `sample` can never disagree. Returns `z` untouched when both are off, which is
+        what makes the default path bit-identical rather than merely close."""
+        if self.length_temperature == 1.0 and self.length_tilt == 0.0:
+            return z
+        out = z / self.length_temperature
+        if self.length_tilt:
+            n = torch.arange(z.shape[-1], device=z.device, dtype=z.dtype)
+            out = out + self.length_tilt * n
+        return out
     # Does the family have a continuous coordinate density, i.e. does
     # `sample_coordinates` return coordinates rather than None? False means its nodes
     # only ever carry the two Lund-cell coordinates, and ln z / psi are UNSET — a
@@ -217,7 +245,20 @@ def build_model(cfg, geometry: Geometry) -> PosteriorModel:
     name = cfg.model.name
     if name not in _REGISTRY:
         raise KeyError(f"unknown model {name!r}; registered: {sorted(_REGISTRY)}")
-    return _REGISTRY[name](cfg, geometry)
+    model = _REGISTRY[name](cfg, geometry)
+    # Read from the config snapshot so a checkpoint carries its own recalibration;
+    # `cmd_eval` re-applies it afterwards so a lifted `decode.length_temperature` wins.
+    from ..config import decode_params
+
+    dec = decode_params(cfg)
+    t, tilt = float(dec["length_temperature"]), float(dec["length_tilt"])
+    if (t != 1.0 or tilt != 0.0) and not hasattr(model, "n_head"):
+        print(f"[model] WARNING: decode.length_temperature={t:g}/length_tilt={tilt:g} "
+              f"is a NO-OP for "
+              f"{name!r} — it has no multiplicity head, so its length belief is the "
+              f"sampler histogram and tempering it would decouple the two.")
+    model.length_temperature, model.length_tilt = t, tilt
+    return model
 
 
 def registered_models() -> list[str]:

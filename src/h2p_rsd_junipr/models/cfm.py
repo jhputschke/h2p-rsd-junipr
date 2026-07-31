@@ -371,7 +371,8 @@ class CFM(PosteriorModel):
         `map_estimate`) integrates them itself."""
         self.eval()
         e = self.encode(xf, nx)
-        n_probs = F.softmax(self.n_head(e), dim=-1).squeeze(0)
+        n_probs = F.softmax(self.recalibrated_n_logits(self.n_head(e)),
+                            dim=-1).squeeze(0)
         cell_probs = F.softmax(self.cell_head(e), dim=-1).squeeze(0)
         ns = torch.multinomial(n_probs, n, replacement=True)
         out = []
@@ -418,7 +419,8 @@ class CFM(PosteriorModel):
         """Exact P(n|x) from the categorical multiplicity head (no sampling)."""
         self.eval()
         e = self.encode(xf, nx)
-        return F.softmax(self.n_head(e), dim=-1).squeeze(0).cpu().numpy()
+        return F.softmax(self.recalibrated_n_logits(self.n_head(e)),
+                         dim=-1).squeeze(0).cpu().numpy()
 
     @torch.inference_mode()
     def map_estimate(self, xf, nx, **kw) -> LundPointEstimate:
