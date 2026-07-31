@@ -53,6 +53,9 @@ class Diffusion(PosteriorModel):
     # THE one family whose `log_prob` is a training surrogate, not a density. Every
     # NLL/log-ratio consumer warns on this flag instead of naming the family.
     exact_likelihood = False
+    # It does have real coordinates (the reverse process emits them) -- it just has no
+    # closed-form CDF for them, hence True here and False for `supports_coordinate_pit`.
+    has_continuous_coords = True
 
     def __init__(self, cfg, geometry: Geometry):
         super().__init__()
@@ -169,6 +172,24 @@ class Diffusion(PosteriorModel):
     def sample_batch(self, xf, nx, n_samples, max_emissions: int = 25):
         return self.sample(xf, nx, n_samples)
 
+    def _coord_ctx(self, e, cells):
+        """`(L, ctx_dim + emb_dim)` conditioning for the denoiser: the jet embedding
+        tiled against the per-node cell embedding."""
+        return torch.cat([e.expand(len(cells), -1), self.cell_emb(cells)], dim=-1)
+
+    @torch.inference_mode()
+    def sample_coordinates(self, xf, nx, cells):
+        """A draw per cell from the reverse process — `_x0` verbatim, which already
+        starts from pure noise and injects noise at every step but the last, so it is
+        a genuine ancestral sample rather than a mode."""
+        cells = [int(c) for c in cells]
+        dev = xf.device
+        if not cells:
+            return torch.zeros(0, 4, device=dev)
+        self.eval()
+        return self._x0(self._coord_ctx(self.encode(xf, nx),
+                                        torch.tensor(cells, dtype=torch.long, device=dev)))
+
     @torch.inference_mode()
     def length_pmf(self, xf, nx, mults=None, n_samples: int = 500) -> np.ndarray:
         """Exact P(n|x) from the categorical multiplicity head (no sampling)."""
@@ -188,10 +209,12 @@ class Diffusion(PosteriorModel):
         n_star = max(n_star, int(kw.get("min_emissions", 1)))
         top = torch.topk(cell_lp, k=min(n_star, self.n_cells))
         cells = top.indices.tolist()
-        ctx = torch.cat(
-            [e.expand(len(cells), -1), self.cell_emb(torch.tensor(cells, device=dev))], dim=-1
-        )
-        coords = self._x0(ctx)  # posterior-mean surrogate
+        ctx = self._coord_ctx(e, torch.tensor(cells, dtype=torch.long, device=dev))
+        # NOT a mode: `_x0` is the ancestral reverse process, so these coordinates are a
+        # DRAW and this "MAP" is stochastic in its continuous half. Only the cells are
+        # argmaxed. Left as-is (changing it would move every diffusion MAP number); the
+        # honest reading is that `map_estimate` and `sample_coordinates` agree here.
+        coords = self._x0(ctx)
         nodes = []
         for t, c in enumerate(cells):
             c = int(c)

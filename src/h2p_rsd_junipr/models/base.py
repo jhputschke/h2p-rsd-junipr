@@ -44,6 +44,13 @@ class PosteriorModel(nn.Module, ABC):
     # default is the off path, and it is what serving reads to decide whether a
     # request must carry the aux sources.
     aux_feature_names: tuple[str, ...] = ()
+    # Does the family have a continuous coordinate density, i.e. does
+    # `sample_coordinates` return coordinates rather than None? False means its nodes
+    # only ever carry the two Lund-cell coordinates, and ln z / psi are UNSET — a
+    # consumer that plots or scores them is reading a filler constant as a prediction.
+    # Distinct from `supports_coordinate_pit`: `diffusion` has coordinates but no
+    # closed-form CDF, so it is True here and False there.
+    has_continuous_coords: bool = False
 
     @abstractmethod
     def log_prob(self, batch: dict) -> torch.Tensor:
@@ -88,31 +95,63 @@ class PosteriorModel(nn.Module, ABC):
     def map_estimate(self, xf: torch.Tensor, nx: torch.Tensor) -> LundPointEstimate:
         ...
 
-    def describe_cells(self, xf, nx, cells) -> LundPointEstimate:
-        """One posterior draw (a cell chain) -> LundPointEstimate: nodes placed at
-        their Lund-cell centres plus the model's joint log-density of that chain.
+    def sample_coordinates(self, xf, nx, cells) -> torch.Tensor | None:
+        """`(L, 4)` continuous coordinates drawn from `q(coords | cells, x)` for one
+        jet, in `features.node_raw` column order `(ln 1/DeltaR, ln kt, ln z, psi)` —
+        or **None** when the family has no continuous coordinate density.
 
-        The MBR winner (`inference.mbr.mbr_select`) is a genuine drawn tree, so its
-        coordinates are exactly its cell centres. This family-agnostic fallback
-        scores it via the trained density (`log_prob`); AR overrides it with its
-        staged decode (continuous within-cell coordinate modes). No new abstract
-        method — every family inherits MBR through `sample`/`log_prob` alone."""
+        This is the coordinate half of a posterior draw. `sample` deliberately returns
+        cell chains only, so without this hook the sole family-agnostic way to place a
+        drawn tree in the Lund plane is at cell centres — which leaves ln z and psi
+        with nothing to hold but a filler constant. Every consumer that wants a draw's
+        coordinates (`describe_cells`, and through it the MBR winner and the notebooks'
+        posterior-predictive series) goes through here, so the placeholder path is
+        entered only by families that genuinely have no coordinates to give.
+
+        Returning None and setting `has_continuous_coords = False` is a legitimate
+        implementation — `ar_junipr_v1` is exactly that model — but the two must agree.
+        """
+        return None
+
+    def describe_cells(self, xf, nx, cells) -> LundPointEstimate:
+        """One posterior draw (a cell chain) -> LundPointEstimate: the model's joint
+        log-density of that chain, with each node's coordinates drawn from
+        `sample_coordinates` when the family has them and placed at the Lund-cell
+        centre when it does not.
+
+        The MBR winner (`inference.mbr.mbr_select`) is a genuine drawn tree, so a draw
+        from `q(coords | cells, x)` is the coordinate-space completion of it. AR still
+        overrides this with its staged decode (head MODES rather than draws), which is
+        what a point estimate wants.
+
+        Without coordinates the ln z / psi entries are PLACEHOLDERS, not predictions:
+        `ln z = 0` means `z = 1`, the softer prong taking the whole jet, which is below
+        no grooming boundary because it is not physical at all. They are here so the
+        node type stays one shape across families; `has_continuous_coords` is the flag
+        that says whether they mean anything, and the log-density below is only exact
+        in the same case."""
         geom = self.geometry
         cells = [int(c) for c in cells]
+        L = len(cells)
         dev = xf.device
+        drawn = self.sample_coordinates(xf, nx, cells) if L else None
         nodes, rows = [], []
         for t, c in enumerate(cells):
-            u, v = geom.cell_center(c)
-            rows.append([u, v, 0.0, 0.0])
+            if drawn is None:
+                u, v = geom.cell_center(c)
+                lz, ps, zed = 0.0, 0.0, 1.0     # placeholders -- see the docstring
+            else:
+                u, v, lz, ps = (float(drawn[t, j]) for j in range(4))
+                zed = math.exp(lz)
+            rows.append([u, v, lz, ps])
             nodes.append(
                 LundNode(
                     depth=t, parent=t - 1, cell=c,
-                    ln_invDelta=u, ln_kt=v, ln_z=0.0, psi=0.0,
-                    kt=math.exp(v), delta_R=math.exp(-u), z=1.0,
+                    ln_invDelta=u, ln_kt=v, ln_z=lz, psi=ps,
+                    kt=math.exp(v), delta_R=math.exp(-u), z=zed,
                     logp_split=0.0, logp_coord=0.0, logp_cont=0.0,
                 )
             )
-        L = len(cells)
         if L > 0:
             yc = torch.tensor([cells], dtype=torch.long, device=dev)
             yraw = torch.tensor([rows], dtype=torch.float32, device=dev)

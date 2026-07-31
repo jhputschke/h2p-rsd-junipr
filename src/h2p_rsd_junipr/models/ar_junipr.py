@@ -24,8 +24,10 @@ from ..distributions import (
     gauss_logpdf,
     trunc_normal_cdf,
     trunc_normal_logpdf,
+    trunc_normal_sample,
     vonmises_cdf,
     vonmises_logpdf,
+    vonmises_sample,
 )
 from ..encoders.base import build_encoder
 from ..features import N_NODE_FEAT, configured_aux_names
@@ -66,6 +68,9 @@ class ARJunipr(PosteriorModel):
         self.continuous_coords = bool(m.continuous_coords)
         # exact closed-form coordinate CDFs exist exactly when the coordinate head does
         self.supports_coordinate_pit = self.continuous_coords
+        # v1 is THE family with no coordinates at all: its nodes carry cell centres and
+        # ln z / psi placeholders, and `sample_coordinates` returns None to say so.
+        self.has_continuous_coords = self.continuous_coords
         self.sigma_floor = float(m.sigma_floor)
         self.kappa_max = float(m.kappa_max)
         # default 0.0 == off; getattr tolerates old checkpoint configs lacking the field
@@ -414,6 +419,62 @@ class ARJunipr(PosteriorModel):
             cells.append(c)
             tok = torch.tensor([[c]], dtype=torch.long, device=dev)
         return cells
+
+    @torch.inference_mode()
+    def sample_coordinates(self, xf, nx, cells, *, generator=None):
+        """A genuine DRAW from every coordinate head, teacher-forced on `cells`:
+
+            du, dv ~ TruncNormal(mean, sigma) on (+-half_u, +-half_v) — the head's support
+            ln z   ~ Normal(mean, sigma)
+            psi    ~ vonMises(mu, kappa)
+
+        Same replay as `describe_sequence` (encode -> `_decode_states` ->
+        `_coord_params`), but sampled rather than moded. The distinction is the whole
+        point: a per-jet argmax is not a draw, and for ln z and psi the mode IS the
+        entire prediction, so a mode-based posterior-predictive series would carry
+        exactly the shrinkage such a series exists to expose.
+
+        v1 (`continuous_coords=False`) has no coordinate head, so it returns None and
+        callers fall back to cell centres. Reproducibility is the global torch RNG
+        (`train.trainer.seed_everything`) unless a `generator` is supplied."""
+        if not self.continuous_coords:
+            return None
+        dev = xf.device
+        if not len(cells):
+            return torch.zeros(0, 4, device=dev)
+        du_m, dv_m, du_s, dv_s, lnz_m, lnz_s, mu, kappa = self.coord_head_params(xf, nx, cells)
+        yc = torch.tensor([int(c) for c in cells], dtype=torch.long, device=dev)
+        du = trunc_normal_sample(du_m, du_s, -self.half_u, self.half_u, generator=generator)
+        dv = trunc_normal_sample(dv_m, dv_s, -self.half_v, self.half_v, generator=generator)
+        lnz = lnz_m + lnz_s * torch.randn(lnz_m.shape, device=dev, dtype=lnz_m.dtype,
+                                          generator=generator)
+        psi = vonmises_sample(mu, kappa, generator=generator)
+        return torch.stack(
+            [self.cell_cx[yc] + du, self.cell_cy[yc] + dv, lnz, psi], dim=-1
+        )
+
+    @torch.inference_mode()
+    def coord_head_params(self, xf, nx, cells):
+        """The eight coordinate-head parameters for `cells`, teacher-forced, each `(L,)`
+        — the `_coord_params` tuple `sample_coordinates` draws from.
+
+        Public because the von Mises `kappa` is a diagnostic in its own right: the psi
+        MODE that MAP/MBR report is near-arbitrary wherever kappa is small, so a psi
+        panel can only be read beside its kappa distribution. None for v1."""
+        if not self.continuous_coords:
+            return None
+        cells = [int(c) for c in cells]
+        dev = xf.device
+        if not cells:
+            return tuple(torch.zeros(0, device=dev) for _ in range(8))
+        self.eval()
+        L = len(cells)
+        e = self.encode(xf, nx)
+        yc = torch.tensor([cells], dtype=torch.long, device=dev)
+        out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
+        eh = torch.cat([out, e.unsqueeze(1).expand(-1, L + 1, -1)], dim=-1)[:, :L, :]
+        params = self._coord_params(torch.cat([eh, self.y_embed(yc)], dim=-1))
+        return tuple(p.squeeze(0) for p in params)
 
     @torch.inference_mode()
     def describe_sequence(self, xf, nx, cells) -> LundPointEstimate:

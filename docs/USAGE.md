@@ -506,6 +506,16 @@ The contract every model family implements is **`log_prob`** (exact per-jet
 `log q_φ(y|x)`), **`sample`** (posterior draws), and **`map_estimate`** (the MAP
 Lund tree). Everything below is built on those three.
 
+`sample` returns **cell chains only**, so a fourth method completes a draw:
+**`sample_coordinates(xf, nx, cells)`** draws the four continuous coordinates
+`(ln 1/ΔR, ln k_t, ln z, ψ)` for a given chain — AR from its four heads, `cinn`
+through `flow.inverse`, `cfm` by integrating its ODE forward, `diffusion` from the
+reverse process. It returns `None` only for **`ar_junipr_v1`**, the one family with
+no coordinate density; check `model.has_continuous_coords` before reading `ln z` or
+`ψ`, because without a coordinate head those fields hold `0.0` placeholders (i.e.
+`z = 1`, the softer prong taking the whole jet — not physical, and not a prediction).
+`describe_cells`, and through it the MBR winner, goes through this method.
+
 ### 5.1 Load a trained model once
 
 Two equivalent ways. The shortest is the serving helper (no FastAPI needed — it is

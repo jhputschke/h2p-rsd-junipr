@@ -105,6 +105,7 @@ class CINN(PosteriorModel):
     # exact change-of-variables log-density; PIT available in the flow's base space
     exact_likelihood = True
     supports_coordinate_pit = True
+    has_continuous_coords = True
 
     def __init__(self, cfg, geometry: Geometry):
         super().__init__()
@@ -217,6 +218,27 @@ class CINN(PosteriorModel):
     def sample_batch(self, xf, nx, n_samples, max_emissions: int = 25):
         return self.sample(xf, nx, n_samples)
 
+    def _coord_ctx(self, e, cells):
+        """`(L, ctx_dim + emb_dim)` conditioning for the flow, for ONE jet's chain: the
+        jet embedding tiled against the per-node cell embedding. `map_estimate` and
+        `sample_coordinates` share it so the mode and the draws cannot come from
+        different conditioning; `per_jet_nll` builds the batched `(B, L, ·)` form."""
+        return torch.cat([e.expand(len(cells), -1), self.cell_emb(cells)], dim=-1)
+
+    @torch.inference_mode()
+    def sample_coordinates(self, xf, nx, cells):
+        """A draw from the flow per cell — `flow.inverse` of a standard-normal base
+        point, which is the same map `map_estimate` evaluates at z = 0 for the mode.
+        The flow's support is the whole of R^4, so nothing needs clamping here."""
+        cells = [int(c) for c in cells]
+        dev = xf.device
+        if not cells:
+            return torch.zeros(0, 4, device=dev)
+        self.eval()
+        ctx = self._coord_ctx(self.encode(xf, nx),
+                              torch.tensor(cells, dtype=torch.long, device=dev))
+        return self.flow.inverse(torch.randn(len(cells), 4, device=dev), ctx)
+
     @torch.inference_mode()
     def length_pmf(self, xf, nx, mults=None, n_samples: int = 500) -> np.ndarray:
         """Exact P(n|x) from the categorical multiplicity head (no sampling)."""
@@ -237,9 +259,7 @@ class CINN(PosteriorModel):
         top = torch.topk(cell_lp, k=min(n_star, self.n_cells))
         cells = top.indices.tolist()
 
-        ctx = torch.cat(
-            [e.expand(len(cells), -1), self.cell_emb(torch.tensor(cells, device=dev))], dim=-1
-        )
+        ctx = self._coord_ctx(e, torch.tensor(cells, dtype=torch.long, device=dev))
         coords = self.flow.inverse(torch.zeros(len(cells), 4, device=dev), ctx)  # flow mode
         nodes, total = [], 0.0
         n_lp = F.log_softmax(self.n_head(e), dim=-1).squeeze(0)
