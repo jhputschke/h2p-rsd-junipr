@@ -369,7 +369,13 @@ def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=50
     """Per-jet point estimate: plain RSD (hadron x) vs model MAP vs truth (jet 0).
     `decode` is a decode_params(cfg) dict (beam keys steer the MAP, e.g. min_emissions).
     When `decode.length_floor_quantile > 0` the MAP multiplicity is floored per jet at
-    the learned quantile of P(n|x), reusing the posterior draws below."""
+    the learned quantile of P(n|x), reusing the posterior draws below.
+
+    The MAP row goes through `map_or_mbr`, not `map_estimate`, so `decode.empty_threshold`
+    reaches it. It used to call `map_estimate` directly, which cannot return the empty
+    tree — so with the gate on, this block printed a non-empty MAP for the very jets
+    `run_closure`'s `p_empty_pred` had just counted as empty, and the two halves of one
+    `eval` disagreed (docs/PLAN_prod_test_v0.md check 7)."""
     dec = dict(decode or {})
     want_mbr = str(dec.get("point_estimator", "map")) == "mbr"
     item = val_ds[0]
@@ -383,8 +389,9 @@ def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=50
             model, xf, nx, quantile=alpha,
             base_floor=int(dec.get("min_emissions", 1)), mults=mults,
         )
-    # the MAP is always shown; MBR (floor-free) is shown beside it when opted in
-    y_hat = model.map_estimate(xf, nx, **{k: v for k, v in dec.items() if k != "point_estimator"})
+    # the MAP is always shown; MBR (floor-free) is shown beside it when opted in.
+    # `point_estimator="map"` pins the branch while still passing through the empty gate.
+    y_hat = model.map_or_mbr(xf, nx, draws=draws, **{**dec, "point_estimator": "map"})
     mbr_hat = model.map_or_mbr(xf, nx, draws=draws, **dec) if want_mbr else None
 
     x_raw = node_raw(*val_jets[0]["x"])

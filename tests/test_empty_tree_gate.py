@@ -157,6 +157,74 @@ def test_the_gate_beats_min_emissions_zero(small_jets):
     assert gated.multiplicity == 0
 
 
+# --- check 7: every consumer must tolerate the empty tree once the gate can fire ----
+def _always_empty(dec):
+    """A tau small enough to fire on every jet — the audit condition."""
+    return {**dec, "empty_threshold": 1e-12}
+
+
+def test_print_point_estimate_honours_the_gate(small_jets, capsys):
+    """It used to call `map_estimate` directly, which structurally cannot return the
+    empty tree. With the gate on, this block printed a non-empty MAP for the very jets
+    `run_closure`'s `p_empty_pred` had just counted as empty — one `eval`, two answers."""
+    from h2p_rsd_junipr.eval.closure import print_point_estimate
+
+    model, ds, dec = _model("ar_junipr_v4", small_jets)
+    geom = Geometry.from_config(load_config(["model=ar_junipr_v4"]).geometry)
+    print_point_estimate(model, ds, small_jets[:16], geom, torch.device("cpu"),
+                         n_samples=8, decode=_always_empty(dec))
+    out = capsys.readouterr().out
+    assert "model MAP = 0" in out, out
+    assert "(empty)" in out, "the MAP tree block must render the empty tree, not nothing"
+
+
+def test_generator_spread_takes_a_decode_and_defaults_to_the_old_behaviour(small_jets):
+    """The "dominant systematic" was measured under `map_estimate()`'s signature
+    defaults — no `min_emissions`, no gate, whatever the run was configured with."""
+    from h2p_rsd_junipr.eval.systematics import generator_spread
+
+    model_a, ds, dec = _model("ar_junipr_v4", small_jets)
+    torch.manual_seed(11)
+    model_b, _, _ = _model("ar_junipr_v4", small_jets)
+    geom = Geometry.from_config(load_config(["model=ar_junipr_v4"]).geometry)
+    dev = torch.device("cpu")
+
+    base = generator_spread(model_a, model_b, ds, geom, dev, n_jets=6, verbose=False)
+    assert base["empty_threshold"] == 0.0            # decode=None == the old defaults
+    assert base["point_estimator"] == "map"
+
+    # both models gated empty => they agree exactly, so the spread collapses to 0
+    gated = generator_spread(model_a, model_b, ds, geom, dev, n_jets=6, verbose=False,
+                             decode=_always_empty(dec))
+    assert gated["empty_threshold"] == 1e-12
+    assert gated["mult_spread_mean"] == 0.0
+    assert np.isnan(gated["lead_lund_spread_mean"]), (
+        "two empty trees have no leading emission to compare; the spread must be NaN, "
+        "not a silent 0 that reads as perfect agreement"
+    )
+
+
+def test_serving_predict_and_run_closure_agree_under_the_gate(small_jets):
+    """The two consumers that already honoured the gate must keep doing so, and must
+    report the SAME emptiness for the same jet."""
+    from h2p_rsd_junipr.eval.closure import run_closure
+    from h2p_rsd_junipr.serving.api import predict
+
+    model, ds, dec = _model("ar_junipr_v4", small_jets)
+    geom = Geometry.from_config(load_config(["model=ar_junipr_v4"]).geometry)
+    dev = torch.device("cpu")
+    gate = _always_empty(dec)
+
+    r = run_closure(model, ds, small_jets[:16], geom, dev, K=8, n_closure=8,
+                    verbose=False, decode=gate)
+    assert r["p_empty_pred"] == 1.0
+
+    x = {"lnInvDelta": [0.3, 1.3], "lnkt": [4.7, 4.4], "lnz": [-1.1, -0.2],
+         "psi": [-3.0, -2.8]}
+    out = predict(model, geom, dev, x, decode=gate)
+    assert out["map_multiplicity"] == 0 and out["map_nodes"] == []
+
+
 def test_decode_params_backfills_on_a_pre_field_snapshot():
     """A checkpoint written before this field must evaluate with the gate off rather
     than crash — the same tolerance contract as every other decode knob."""
