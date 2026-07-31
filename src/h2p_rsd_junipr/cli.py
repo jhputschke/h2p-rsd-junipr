@@ -251,6 +251,7 @@ def cmd_eval(argv) -> int:
     metrics["closure"] = run_closure(
         model, val_ds, dm_jets, geometry, device,
         K=exp["n_closure_samples"], n_closure=exp["closure_jets"], decode=decode,
+        continuous=exp["closure_continuous"],
     )
     metrics["calibration"] = run_calibration(
         model, val_ds, geometry, device,

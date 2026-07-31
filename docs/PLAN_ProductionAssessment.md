@@ -71,8 +71,10 @@ Machinery this protocol reuses rather than reinvents:
 [`learned_min_emissions`](../src/h2p_rsd_junipr/inference/length.py),
 [`mbr_select`](../src/h2p_rsd_junipr/inference/mbr.py),
 [`select_pt_range`](../src/h2p_rsd_junipr/data/datamodule.py),
-[`save_metrics` / `plot_calibration`](../src/h2p_rsd_junipr/eval/report.py), and the
-arm / cell / markdown-table idiom of [`scripts/ab_v2_v3.py`](../scripts/ab_v2_v3.py).
+[`save_metrics` / `plot_calibration`](../src/h2p_rsd_junipr/eval/report.py),
+[`medoid_cell` / `geometric_median`](../src/h2p_rsd_junipr/eval/closure.py) with
+[`scripts/leading_estimators.py`](../scripts/leading_estimators.py) behind the §9.1 criterion,
+and the arm / cell / markdown-table idiom of [`scripts/ab_v2_v3.py`](../scripts/ab_v2_v3.py).
 
 ---
 
@@ -125,7 +127,7 @@ a separate probe (§7.6). One seed each.
 
 | Arm | Preset | Selectors | What it adds over the rung below | Verified today? |
 |---|---|---|---|---|
-| **A0** | — (free) | identity(x) | the plain-RSD hadron sequence used *as* the parton estimate; zero parameters. Already reported by `run_closure` as `dlund_identity` / `mult_bias_identity` on every eval | n/a — the floor every arm must beat |
+| **A0** | — (free) | identity(x) | the plain-RSD hadron sequence used *as* the parton estimate; zero parameters. Already reported by `run_closure` as `dlund_identity` / `mult_bias_identity` on every eval (and `dlund_identity_cont` under `experiment.closure_continuous`). Compare against `dlund_posterior_medoid`, **not** `dlund_posterior_mode` — see §9.1 | n/a — the floor every arm must beat |
 | **A1** | `t1_v1_cells.yaml` | `model=ar_junipr_v1` | discrete Lund cells only (`continuous_coords=false`) | — |
 | **A2** | `t2_v2_reference.yaml` | `model=ar_junipr_v2` | continuous within-cell coordinates | ✅ parity + closure (synthetic) |
 | **A3** | `t3_v3_multhead.yaml` | `model=ar_junipr_v3` | first-class `q(N\|x)`: `q(y\|x) = q(N\|x)·q(y\|N,x)` | — |
@@ -384,8 +386,27 @@ Every arm at E1; the arms that clear §9 also at E2. Headline numbers are comput
 
 ## 9. Exit criteria — what makes an arm shippable
 
-1. **Beats A0 identity** on `dlund_posterior_mode` and on `|mult_bias|`. An arm that does not
+1. **Beats A0 identity** on `dlund_posterior_medoid` and on `|mult_bias|`. An arm that does not
    beat copying the hadron tree is not a model, whatever its NLL.
+
+   **Not `dlund_posterior_mode`** — that key gates on the wrong estimator. The modal leading
+   cell minimises expected 0-1 loss, but the score is `lund_distance`, so the mode is optimal
+   for a loss nobody measures; the medoid ([`medoid_cell`](../src/h2p_rsd_junipr/eval/closure.py))
+   is the argmin over the same support of the quantity actually reported. Measured on the
+   walkthrough `ar_junipr_v3` (2000 val jets, K=200): mode **1.030×** identity, medoid
+   **0.944×** — the criterion flips on the estimator alone. The mode is still reported, for
+   continuity with tables written before this change; it is not what an arm is judged on.
+
+   **Quote the un-quantised row too.** At the default geometry a cell is ~0.6 wide and these
+   distances are ~0.6, so the cell-level metric is largely measuring the grid. Run with
+   `experiment.closure_continuous=true` and quote `dlund_posterior_geomedian_cont` against
+   `dlund_identity_cont` beside the cell numbers; on the same checkpoint that pair reads
+   **0.905×** (95% CI [0.882, 0.928], paired bootstrap). An arm whose two rows disagree in
+   *sign* is quantisation-limited, not better or worse than A0.
+
+   Stratify by leading `ln kt` before concluding — `scripts/leading_estimators.py` prints the
+   thirds. On the walkthrough checkpoint the model wins the hard and middle thirds and *loses*
+   the soft one (1.088×), which is a localized under-conditioning finding, not a pooled verdict.
 2. `coverage_68` inside a stated band around 0.68; `sbc_rank_mean` and `pit_mean` near 0.5.
 3. `pit_coords_ks_max` below the `1.36/√n` critical value at the printed emission count, **and
    the histogram shape recorded** — U-shaped ⇒ over-confident, dome ⇒ over-dispersed — including

@@ -268,7 +268,7 @@ checkpoint is the default for everything — architecture, geometry, sample, dec
 ```
 closure + calibration on held-out jets:
   mean multiplicity            :  true y = 5.30   hadron x = 5.15   posterior = 5.54
-  leading-emission Lund distance to true y :  identity(x) = 0.558   posterior-mode = 1.745
+  leading-emission Lund distance to true y :  identity(x) = 0.558   posterior-mode = 1.745   posterior-medoid = 1.602   (lower is better; medoid is the loss-matched estimator, mode is kept for continuity)
   multiplicity signed bias  <n - n_true>   :  identity(x) = -0.150   posterior-mean = +0.245   posterior-median = +0.180
   posterior 68% coverage of true leading cell = 0.42   (target ~0.68; <0.68 => over-confident)
   multiplicity signed bias stratified by true N (mean over jets in bin):
@@ -290,6 +290,20 @@ per-jet point estimate q_phi(y | x) for one validation jet:
 (Numbers above are from a deliberately under-trained 3-epoch demo; a fully trained
 `ar_junipr_v2` reaches val NLL ≈ 20.7 and ~0.68 coverage — see
 `scripts/verify_synthetic_result.txt`.)
+
+> **Read `posterior-medoid`, not `posterior-mode`.** Both are on the leading-emission line.
+> The **mode** is the most frequent leading cell — the estimator that minimises expected 0-1
+> loss — while the score beside it is a *distance*, so the mode is optimal for a loss nobody
+> is measuring. The **medoid** ([`medoid_cell`](../src/h2p_rsd_junipr/eval/closure.py)) is the
+> argmin over the same draws of the quantity actually reported, so under the model's own
+> posterior it cannot do worse. On the walkthrough `ar_junipr_v3` (2000 val jets, K=200) the
+> mode reads **1.030×** identity and the medoid **0.944×** — "plain RSD wins the leading
+> emission" was the estimator, not the model. The mode is still printed so tables written
+> before this change stay readable.
+>
+> The cell-level row is also **quantisation-limited**: cells are ~0.6 wide and these distances
+> are ~0.6. `experiment.closure_continuous=true` repeats the comparison off the grid (below),
+> where the same checkpoint reads **0.905×**, 95% CI [0.882, 0.928].
 
 > **MAP multiplicity floor.** The MAP is the *joint mode* `argmax_y q_φ(y|x)`; for a
 > discrete autoregressive posterior it is length-biased and, un-floored, collapses to
@@ -454,6 +468,43 @@ How to read them:
 **beside the checkpoint**. Figures need matplotlib, which is not a core dependency but an
 opt-in extra (`pip install -e ".[plots]"`) — without it you still get the JSON. A worked walkthrough on real PYTHIA data is
 [`notebooks/calibration_v2_walkthrough.ipynb`](../notebooks/calibration_v2_walkthrough.ipynb).
+
+### The leading emission off the cell grid
+
+The leading-emission line above scores cell *centres*, and at the default geometry a cell is
+`(6-0)/10 = 0.6` wide while the distances are ~0.6 — so it is largely measuring the grid.
+A fourth opt-in switch repeats the comparison with no quantisation:
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt experiment.closure_continuous=true
+```
+
+```
+  the same, OFF the cell grid (336 jets) :  identity(x) = 0.643   posterior-mode = 0.714
+     posterior-geo-median = 0.594
+      (cells are ~0.60 wide, so the cell-level row above is quantisation-limited)
+```
+
+Each draw's leading emission is placed by `sample_coordinates` and summarised by
+[`geometric_median`](../src/h2p_rsd_junipr/eval/closure.py) — the L1 Bayes point, and unlike the
+cell medoid not restricted to the drawn support. Adds `dlund_identity_cont`,
+`dlund_posterior_mode_cont`, `dlund_posterior_geomedian_cont` and `n_continuous_jets`; costs
+`closure_jets × n_closure_samples` forward passes, which is why it is opt-in. A family with no
+coordinate density (`ar_junipr_v1`) yields **NaN** for those keys rather than omitting them.
+
+For the full study behind these two changes — the oracle, per-jet win rates, stratification by
+leading `ln kt`, and a paired bootstrap on the ratio — run the script:
+
+```bash
+python scripts/leading_estimators.py runs/<id>/best.ckpt --jets 2000 --draws 200
+python scripts/leading_estimators.py runs/<id>/best.ckpt --out runs/<id>   # + json/md
+```
+
+It prints the `ln kt` thirds, which is where the pooled number can mislead: on the walkthrough
+`ar_junipr_v3` the model beats identity on the hard and middle thirds and **loses** the soft one
+(1.088×). A calibrated, fully conditional posterior beats *any* function of `x`, including the
+identity, so a ratio above 1 in one region is a localized under-conditioning finding — and it
+lands in the same corner where `experiment.stratify_regions` shows the worst coverage.
 
 ### The v2-vs-v3 A/B, and which decode knobs are still live
 

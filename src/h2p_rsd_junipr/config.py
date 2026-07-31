@@ -228,6 +228,9 @@ class ExperimentConfig:
     tarp: bool = False              # TARP expected-coverage curve on tree-valued posteriors
     tarp_refs: int = 100            # size of the TARP reference pool
     tarp_reference: str = "pooled"  # pooled (posterior draws of other jets) | prior (truth trees)
+    closure_continuous: bool = False  # leading-emission distances OFF the cell grid, via
+    #                                   sample_coordinates (the cell metric is quantisation-
+    #                                   limited); costs closure_jets * n_closure_samples passes
 
 
 @dataclass
@@ -460,6 +463,7 @@ _EXPERIMENT_DEFAULTS: dict = {
     "tarp": False,
     "tarp_refs": 100,
     "tarp_reference": "pooled",
+    "closure_continuous": False,
 }
 
 

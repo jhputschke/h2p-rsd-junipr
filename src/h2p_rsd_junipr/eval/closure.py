@@ -45,6 +45,50 @@ def lund_distance(cell_a, cell_b, geometry: Geometry):
     return math.hypot(ax - bx, ay - by)
 
 
+def medoid_cell(cells, geometry: Geometry):
+    """The drawn leading cell of least MEAN `lund_distance` to all the draws.
+
+    The loss-matched counterpart of the modal cell: `mode` is the argmin of expected
+    0-1 loss, but this observable is scored by `lund_distance`, so the mode is the
+    estimator for a loss nobody is measuring. The medoid is MBR (`inference.mbr`)
+    applied to a one-node cloud — argmin over the same support of the quantity
+    actually reported — so under the model's own posterior it cannot do worse.
+
+    Empirically (2000 val jets, ar_junipr_v3): mode 1.030x identity(x), medoid
+    0.944x. The whole "plain RSD wins the leading emission" result was the mode."""
+    if not cells:
+        return None
+    vals, counts = np.unique(np.asarray(cells), return_counts=True)
+    ctr = np.array([geometry.cell_center(int(c)) for c in vals])
+    risk = (np.linalg.norm(ctr[:, None, :] - ctr[None, :, :], axis=-1) * counts[None, :]).sum(1)
+    return int(vals[int(risk.argmin())])
+
+
+def geometric_median(points, iters: int = 64, eps: float = 1e-9) -> np.ndarray:
+    """`argmin_a sum_i ||a - p_i||` by Weiszfeld — the L1 Bayes point in the plane.
+
+    Unlike `medoid_cell` this is not restricted to the drawn support, so it is the
+    exact minimiser rather than the best available draw (the restriction exists for
+    trees, which cannot be averaged; a point in the Lund plane can)."""
+    P = np.asarray(points, dtype=float)
+    a = P.mean(0)
+    for _ in range(iters):
+        d = np.maximum(np.linalg.norm(P - a, axis=1), eps)
+        a_new = (P / d[:, None]).sum(0) / (1.0 / d).sum()
+        if np.linalg.norm(a_new - a) < eps:
+            return a_new
+        a = a_new
+    return a
+
+
+def _leading_coords(arr):
+    """Hardest-kt row of an `(n, 4)` node_raw table, as `(ln 1/DeltaR, ln kt)`."""
+    a = np.asarray(arr, dtype=float)
+    if a.ndim != 2 or a.shape[0] == 0:
+        return None
+    return a[int(np.argmax(a[:, 1])), :2]
+
+
 def _tree_coords(obj):
     if isinstance(obj, LundPointEstimate):
         return [(n.ln_invDelta, n.ln_kt, n.ln_z, n.psi) for n in obj.nodes]
@@ -78,7 +122,7 @@ def lund_tree_str(obj, title: str, geometry: Geometry, ref=None) -> str:
 
 
 def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
-                verbose=True, decode=None):
+                verbose=True, decode=None, continuous=False):
     """Closure + calibration on held-out jets (cell-level, as the v2 script). Returns
     a metrics dict and (optionally) prints the same summary lines. `decode` is a
     decode_params(cfg) dict threaded into sampling (n_posterior_samples ignored here;
@@ -89,12 +133,26 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     posterior-mode estimator, so the leading-emission-distance and multiplicity-bias
     panels can be compared MBR-vs-mode. This is O(K^2) EMD solves per jet — shrink it
     with `decode.mbr_n_candidates` / a smaller `experiment.closure_jets`. The default
-    (`point_estimator="map"`) skips it entirely (no cost, no OT-backend import)."""
+    (`point_estimator="map"`) skips it entirely (no cost, no OT-backend import).
+
+    `dlund_posterior_medoid` is reported beside `dlund_posterior_mode` unconditionally
+    (it is pure numpy over cells already drawn, so it costs nothing) — see
+    `medoid_cell` for why the mode is the wrong estimator for a distance-valued score.
+
+    `continuous=True` adds the same comparison OFF the cell grid, via
+    `sample_coordinates`. At this geometry cells are ~0.6 wide and the cell-level
+    distances are ~0.6, so the cell metric is quantisation-limited and cannot resolve
+    what the model is doing; `*_cont` can. Cost is one `sample_coordinates` call per
+    draw per jet (`n_closure * K` forward passes), which is why it is opt-in
+    (`experiment.closure_continuous`). Families with no coordinate density
+    (`ar_junipr_v1`) return None from the hook and the `*_cont` keys come back NaN."""
     dec = dict(decode or {})
     want_mbr = str(dec.get("point_estimator", "map")) == "mbr"
-    d_id, d_mode = [], []
+    d_id, d_mode, d_medoid = [], [], []
     n_id_bias, n_mean_bias, n_median_bias = [], [], []
     d_mbr, n_mbr_bias = [], []
+    dc_id, dc_mode, dc_geomed = [], [], []   # continuous (no grid), opt-in
+    cont_ok = bool(continuous)
     true_ns = []  # true N per kept jet, aligned with the bias lists (for the per-N table)
     covered = []
     n_closure = min(n_closure, len(val_ds))
@@ -117,7 +175,30 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         vals, counts = np.unique(cells_arr, return_counts=True)
         mode_cell = int(vals[counts.argmax()])
         d_mode.append(lund_distance(mode_cell, ly, geometry))
+        d_medoid.append(lund_distance(medoid_cell(lead, geometry), ly, geometry))
         d_id.append(lund_distance(leading_emission_cell(x_cells, geometry), ly, geometry))
+
+        if cont_ok:  # the same three estimators, off the grid
+            pts = []
+            for d in draws:
+                if not len(d):
+                    continue
+                c = model.sample_coordinates(xf, nx, list(d))
+                if c is None:      # family has no coordinate density -> stop asking
+                    cont_ok = False
+                    break
+                p = _leading_coords(c.detach().cpu().double().numpy().reshape(-1, 4))
+                if p is not None:
+                    pts.append(p)
+            y_lead = _leading_coords(item["yraw"].numpy())
+            x_lead = _leading_coords(node_raw(*val_jets[i]["x"]))
+            if cont_ok and len(pts) >= 2 and y_lead is not None:
+                pts = np.asarray(pts)
+                dc_id.append(float(np.linalg.norm(x_lead - y_lead))
+                             if x_lead is not None else float("nan"))
+                dc_mode.append(float(np.linalg.norm(
+                    np.asarray(geometry.cell_center(mode_cell)) - y_lead)))
+                dc_geomed.append(float(np.linalg.norm(geometric_median(pts) - y_lead)))
 
         n_id_bias.append(len(x_cells) - ny_true)
         n_mean_bias.append(mults.mean() - ny_true)
@@ -146,6 +227,7 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         ),
         "dlund_identity": float(np.nanmean(d_id)),
         "dlund_posterior_mode": float(np.nanmean(d_mode)),
+        "dlund_posterior_medoid": float(np.nanmean(d_medoid)) if d_medoid else float("nan"),
         "mult_bias_identity": float(np.mean(n_id_bias)),
         "mult_bias_posterior": float(np.mean(n_mean_bias)),
         "mult_bias_posterior_median": float(np.mean(n_median_bias)),
@@ -155,6 +237,16 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         metrics["dlund_mbr"] = float(np.nanmean(d_mbr)) if d_mbr else float("nan")
         metrics["mult_bias_mbr"] = float(np.mean(n_mbr_bias)) if n_mbr_bias else float("nan")
         metrics["mbr_backend"] = str(dec.get("mbr_backend", "pot"))
+    if continuous:
+        # NaN (not absent) when the family has no coordinate density, so a consumer
+        # reading these keys sees "asked, unavailable" rather than "never asked".
+        nan = float("nan")
+        metrics["dlund_identity_cont"] = float(np.nanmean(dc_id)) if dc_id else nan
+        metrics["dlund_posterior_mode_cont"] = float(np.nanmean(dc_mode)) if dc_mode else nan
+        metrics["dlund_posterior_geomedian_cont"] = (
+            float(np.nanmean(dc_geomed)) if dc_geomed else nan
+        )
+        metrics["n_continuous_jets"] = int(len(dc_geomed))
 
     # Signed multiplicity bias stratified by true N: does the marginal-multiplicity bias
     # (posterior-mean/median) survive in MBR, and does it vary with the true length?
@@ -183,8 +275,21 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         )
         print(
             f"  leading-emission Lund distance to true y :  identity(x) = {metrics['dlund_identity']:.3f}"
-            f"   posterior-mode = {metrics['dlund_posterior_mode']:.3f}   (lower is better)"
+            f"   posterior-mode = {metrics['dlund_posterior_mode']:.3f}"
+            f"   posterior-medoid = {metrics['dlund_posterior_medoid']:.3f}   (lower is better;"
+            f" medoid is the loss-matched estimator, mode is kept for continuity)"
         )
+        if continuous:
+            print(
+                f"  the same, OFF the cell grid ({metrics['n_continuous_jets']} jets) :"
+                f"  identity(x) = {metrics['dlund_identity_cont']:.3f}"
+                f"   posterior-mode = {metrics['dlund_posterior_mode_cont']:.3f}"
+                f"   posterior-geo-median = {metrics['dlund_posterior_geomedian_cont']:.3f}"
+            )
+            print(
+                f"      (cells are ~{(geometry.ln_kt_range[1] - geometry.ln_kt_range[0]) / geometry.n_bins:.2f}"
+                " wide, so the cell-level row above is quantisation-limited)"
+            )
         print(
             f"  multiplicity signed bias  <n - n_true>   :  identity(x) = {metrics['mult_bias_identity']:+.3f}"
             f"   posterior-mean = {metrics['mult_bias_posterior']:+.3f}"

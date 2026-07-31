@@ -1,8 +1,10 @@
 from .calibration import cell_region, coordinate_pits, run_calibration, run_tarp
 from .closure import (
+    geometric_median,
     leading_emission_cell,
     lund_distance,
     lund_tree_str,
+    medoid_cell,
     print_point_estimate,
     run_closure,
 )
@@ -15,6 +17,8 @@ __all__ = [
     "leading_emission_cell",
     "lund_distance",
     "lund_tree_str",
+    "medoid_cell",
+    "geometric_median",
     "run_calibration",
     "coordinate_pits",
     "run_tarp",

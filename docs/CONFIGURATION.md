@@ -738,6 +738,7 @@ Controls the §8 closure / calibration / systematic run (`h2p-rsd-junipr eval`).
 | `tarp` | `False` | TARP expected-coverage curve on tree-valued posteriors |
 | `tarp_refs` | `100` | size of the TARP reference pool |
 | `tarp_reference` | `"pooled"` | `pooled` (posterior draws of other jets) or `prior` (their truth trees) |
+| `closure_continuous` | `False` | leading-emission distances **off** the cell grid, via `sample_coordinates` |
 
 Trade cost vs. precision with `closure_jets` and `n_closure_samples`.
 
@@ -806,6 +807,47 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt \
 `eval` writes `eval_metrics.json` plus `calibration_pit_coords.png`,
 `calibration_tarp.png` and `calibration_by_region.png` beside the checkpoint (figures need
 matplotlib — not a core dependency, but the `[plots]` extra; without it you still get the JSON).
+
+### `closure_continuous` — the leading-emission metric off the grid
+
+`run_closure` scores the leading emission by `lund_distance` between **cell centres**. At the
+default geometry a cell is `(6-0)/10 = 0.6` wide and the distances themselves are ~0.6, so that
+metric is largely measuring the grid: it cannot resolve what the model is doing, and it can make
+the model look worse than plain RSD when it is in fact better.
+
+`closure_continuous=true` repeats the comparison with no quantisation — each draw's leading
+emission is placed by [`sample_coordinates`](../src/h2p_rsd_junipr/models/base.py) and summarised
+by [`geometric_median`](../src/h2p_rsd_junipr/eval/closure.py) (the L1 Bayes point, which unlike
+the cell medoid is not restricted to the drawn support). Four keys are added:
+`dlund_identity_cont`, `dlund_posterior_mode_cont`, `dlund_posterior_geomedian_cont` and
+`n_continuous_jets`.
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt experiment.closure_continuous=true
+```
+
+```
+  leading-emission Lund distance to true y :  identity(x) = 0.694   posterior-mode = 0.714
+     posterior-medoid = 0.642   (lower is better; medoid is the loss-matched estimator, ...)
+  the same, OFF the cell grid (336 jets) :  identity(x) = 0.643   posterior-mode = 0.714
+     posterior-geo-median = 0.594
+      (cells are ~0.60 wide, so the cell-level row above is quantisation-limited)
+```
+
+**Cost** is `closure_jets × n_closure_samples` forward passes — one `sample_coordinates` call
+per draw per jet — which is why it is opt-in. Like the WP2 switches it only *adds* keys, so
+existing tables do not move. A family with no coordinate density (`ar_junipr_v1`) returns `None`
+from the hook and the `*_cont` keys come back **NaN** rather than absent: "asked, unavailable"
+is a different fact from "never asked".
+
+> **`dlund_posterior_medoid` needs no switch.** It is reported on every eval beside
+> `dlund_posterior_mode`, because it is pure numpy over cells already drawn. The mode minimises
+> expected 0-1 loss while the score is a distance, so it is optimal for a loss nobody measures;
+> the medoid is the argmin over the same support of the quantity actually reported, and under the
+> model's own posterior it cannot do worse. Judge an arm on the medoid — see
+> [PLAN_ProductionAssessment §9.1](PLAN_ProductionAssessment.md) — and use
+> [`scripts/leading_estimators.py`](../scripts/leading_estimators.py) for the oracle, per-jet win
+> rates, `ln kt` stratification and a paired bootstrap.
 
 ---
 
