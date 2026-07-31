@@ -400,6 +400,25 @@ A checkpoint trained with `encoder.aux_features` still requires the aux source c
 whatever file you point it at; the reader's NaN/`-1` sentinels make that fail loudly at
 dataset build time rather than silently conditioning on garbage.
 
+**First, prove the test file is actually held out.** `pythia_driver` does
+`Random:seed = seed % 900000000`, so two files generated from the same card differ only by
+a seed that can, in principle, collide — and if the streams overlap, "held-out" is false
+and every number above is a training number. Nothing in the eval path can detect that, so
+check it once, before you quote anything:
+
+```bash
+python scripts/check_disjoint.py jets_train.root jets_test.root --json-out disjoint.json
+```
+
+It asserts three things and exits non-zero on any of them: the two files' grooming
+provenance `(z_cut, beta, kt_floor, kt_floor_sec, generator)` is **equal** (different
+cards would make the assessment a covariate shift, not a generalisation test), their
+content fingerprints **differ**, and no jet appears in both. That last comparison runs in
+two flavours because the groomed sequences are short (~1.8 nodes on this physics): `full`
+hashes the sequences plus the jet four-vector and so covers every jet read, while `seq`
+hashes the sequences alone and only counts jets with `>= --min-emissions` — on a typical
+sample that is under a tenth of them, which is why `full` is the headline.
+
 ### Configuring decode from a preset instead of a CLI chain
 
 `decode` is liftable the same way, through the full composition surface — `decode=<name>`,
@@ -442,15 +461,17 @@ per-coordinate PIT (physical space, 300 jets, 1624 emissions):
       psi    1624   0.0154   0.499
     KS 95% critical value at this sample size = 0.0337   (KS above it => significant miscalibration)
 
+  leading-cell 68% coverage = 0.66  95% Wilson [0.60, 0.71] on 300 jets   (target 0.68 — inside the interval)
   region-stratified (leading-emission Lund quadrant):
-        region   jets  SBC chi2  rank mean   cov68   (targets: low, 0.5, 0.68)
-     wide_soft    118     12.40      0.492    0.66
-     wide_hard     96     14.10      0.507    0.69
-   narrow_soft     54     18.20      0.463    0.61
-   narrow_hard     32     21.00      0.518    0.72
+        region   jets  SBC chi2  rank mean   cov68       95% Wilson     n   (targets: low, 0.5, 0.68)
+     wide_soft    118     12.40      0.492    0.66   [0.57, 0.74]   118
+     wide_hard     96     14.10      0.507    0.69   [0.59, 0.77]    96
+   narrow_soft     54     18.20      0.463    0.61   [0.48, 0.73]    54
+   narrow_hard     18     21.00      0.518    0.72   [0.49, 0.88]    18  < n=30, NOT SCORED
+    quadrant split at u = 3.00, v = 3.00;  u = ln(1/DeltaR) >= ln(1/R) = 0.92 at R = 0.4, so the low-u strip is kinematically unreachable
 
 TARP expected coverage (pooled references, 100 refs, 300 jets, EMD backend pot):
-  max |ECP(alpha) - alpha| = 0.061   mean signed deviation = -0.018
+  max |ECP(alpha) - alpha| = 0.061   (95% null floor 1.36/sqrt(300) = 0.079; below it => consistent with calibrated)   mean signed deviation = -0.018
     ECP(0.50) = 0.472   ECP(0.68) = 0.651   ECP(0.90) = 0.878   ECP(0.95) = 0.933   => consistent with calibrated
 ```
 
@@ -470,10 +491,20 @@ How to read them:
   note; `cinn`/`cfm` report the flow's *base space* instead (tagged `latent`).
 - **region stratification** — the same metrics per Lund quadrant of the leading emission.
   A model calibrated *on average* but not per region cannot support a localized claim.
+  **Every coverage carries its Wilson interval and its count**, and a quadrant below
+  `min_region_n` (default 30) is printed but flagged `NOT SCORED`: these are binomial
+  proportions on a few dozen jets, and "0.72 vs 0.68" on 18 of them is a coin flip, not a
+  measurement. The quadrants are also not equally reachable — `u = ln(1/ΔR) ≥ ln(1/R)`, so
+  at `R = 0.4` the strip below `u = 0.92` is empty by kinematics rather than by the model,
+  which is why the split points are printed beside the table.
 - **TARP** — expected coverage of the *whole tree* under the perturbative-Lund EMD.
   `ECP(0.68) = 0.651` reads directly as "at 68% credibility the posterior covered 65% of
   the time". **The sign is the diagnosis**: below the diagonal ⇒ over-confident, above ⇒
-  over-dispersed. Needs the `[mbr]` extra and costs `closure_jets × (K+1)` EMD solves.
+  over-dispersed. `tarp_max_dev` is a sup-norm CDF deviation — a KS statistic — so it is
+  quoted against its `1.36/√n` null floor: at 300 jets anything under 0.079 is a pass, not
+  a small failure. Needs the `[mbr]` extra and costs `closure_jets × (K+1)` EMD solves.
+- **`sbc_chi2_uniform`** is likewise quoted against the 95% point of `χ²(n_rank_bins − 1)`
+  (16.90 at the default 10 bins), because the raw number means nothing without its dof.
 
 `eval` writes `eval_metrics.json` and the three figures
 (`calibration_pit_coords.png`, `calibration_tarp.png`, `calibration_by_region.png`)
@@ -534,6 +565,25 @@ every decode cell; the output is `ab_table.md` + `ab_results.json`. See
 [`CONFIGURATION.md` §7 "v3 semantics"](CONFIGURATION.md#7-decode--inference--map--posterior-knobs)
 for the per-knob verdict and the recorded decision rule for the deferred
 feed-N-into-decoder extension.
+
+**`eval` now answers the same question for free.** `eval_metrics.json` dumps the whole
+decode config, which makes it an equally faithful record of settings that changed nothing
+— so a `decode_inert` list sits beside it naming each dead knob and why, and the same list
+is printed before the closure block:
+
+```
+[eval] decode knobs that did NOT reach these numbers:
+    cont_temperature = 1.0   — PosteriorModel.sample_batch takes no cont_temperature; every posterior draw here is at T=1
+    max_emissions = 25   — sample_batch uses its own signature default (25); the decode value reaches map_estimate but not the draws
+    beam_width = 8   — use_multiplicity_head=true routes map_decode to _map_decode_fixed_length (greedy argmax per step); beam_search_cells is never called
+    mbr_R = 8.485   — point_estimator != 'mbr'; no OT backend is imported
+    ...
+```
+
+The list is derived from the model's own flags, not hand-maintained per preset: with
+`use_multiplicity_head: true` (v3/v4) the beam keys are structurally dead, and with
+`point_estimator: map` every `mbr_*` knob is. Without this, comparing two runs on
+`beam_width` compares a knob neither of them consulted.
 
 > **The multiplicity-support guard.** A categorical `q(N|x)` head has finite support
 > `N = 0..model.max_emissions`; a longer truth is clamped into the last bin and gets the

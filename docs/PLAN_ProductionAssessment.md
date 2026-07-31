@@ -331,10 +331,16 @@ Every arm at E1; the arms that clear §9 also at E2. Headline numbers are comput
    or only on average? Uses the existing half-open window in
    [`select_pt_range`](../src/h2p_rsd_junipr/data/datamodule.py), so adjacent windows tile the
    sample without double-counting.
-3. **Grooming / aux shift.** The same checkpoint on `cpp/test_data/jets_aux.root` (asymmetric
-   `SoftDrop:ktFloorSec`) vs `jets.root`. **Caveat stated up front:** the asymmetric floor leaves
-   the `x`/`y` sequences bit-for-bit unchanged and only redefines `x_mg` / `x_ptg`, so this axis
-   is **inert for the default `aux_features=[]` arms** and bites only once aux conditioning is on.
+3. **Grooming / aux shift.** The same checkpoint on an asymmetric-floor file
+   (`SoftDrop:ktFloorSec`) vs `jets.root`. **`cpp/test_data/jets_aux.root` is NOT that file** —
+   it predates the `kt_floor_sec` column entirely (`read_lund_rntuple` prints no
+   `kt_floor_sec` line for it) and is symmetric at 1 GeV; it adds the aux *columns*, not the
+   asymmetric *floor*. Generate one with
+   [`cpp/cards/pp_dijet_asym_floor.cmnd`](../cpp/cards/pp_dijet_asym_floor.cmnd), as
+   [`PLAN_prod_test_v0.md`](PLAN_prod_test_v0.md) step i does. **Caveat stated up front:** the
+   asymmetric floor leaves the `x`/`y` sequences bit-for-bit unchanged and only redefines
+   `x_mg` / `x_ptg`, so this axis is **inert for the default `aux_features=[]` arms** and bites
+   only once aux conditioning is on.
 4. **Aux conditioning.** `encoder.aux_features=[]` vs `[ln_mg_pt,nsec,ln_pt]` on the best arm.
    One seed cannot re-open the adoption verdict, so the protocol *reports the existing three-seed
    finding* (−0.029 nat/jet against a 0.029 spread — gate failed, aux stays opt-in) and re-checks

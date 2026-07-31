@@ -1,9 +1,10 @@
 # PLAN_prod_test_v0 — one end-to-end production test
 
-*Status: proposed (not yet run).* Unlike the other `PLAN_*.md` files this one describes a
-**run**, not a code change — keep the status line current, and note that four sibling plans
+*Status: **RUN. Results in [§Results](#results-2026-07-31) below.*** Unlike the other
+`PLAN_*.md` files this one describes a **run**, not a code change — keep the status line
+current. The four sibling plans it flagged as carrying stale "proposed" headers
 (`PLAN_MBR_PerturbativeLund`, `PLAN_MultHead`, `PLAN_NsplitMinCut`, `PLAN_QuantileMinCut`)
-still carry stale "proposed" headers while their code is merged.
+have been corrected to state what shipped.
 
 ## Context
 
@@ -441,11 +442,323 @@ deliberately not liftable.
 
 ---
 
+## Results (2026-07-31)
+
+Executed as written, with one deliberate widening: the aux ablation of check 2 was run as
+the **full two-by-two** (aux on/off × `trainer.seed` 0/1, four 60-epoch trainings) rather
+than dropped. At ~30 s/epoch on one GB10 the whole grid cost about two hours, so the
+"budget allows only one training" escape hatch never applied. Two seeds turned out to be
+the *minimum* rather than the sufficient configuration — see the ablation section for why
+the band a two-seed grid buys is too loose to be the load-bearing statistic.
+
+**Inputs.** `pythia_driver` produced 495 071 train jets from 230 000 events (seed 1, 3 min)
+and 97 018 test jets from 45 000 events (seed 2, 36 s), both from
+`pp_dijet_asym_floor.cmnd`. `read_lund_rntuple` confirms `kt_floor = 1.0`,
+`kt_floor_sec = 0.2` on both. The new
+[`scripts/check_disjoint.py`](../scripts/check_disjoint.py) found **0 shared jets of
+20 000 compared** and identical provenance tuples: the seeds did not collide.
+
+On that script — the plan's "hash the (x, y) buffers" is necessary but not sufficient
+here. The mean groomed sequence is ~1.8 nodes, so hashing the sequences alone leaves only
+**7%** of jets identifying (1 349 of 20 000 at a ≥3-emission bar); every empty-tree jet
+hashes like every other. The script therefore compares two sets and reports both: `full`
+(sequences **plus** the jet four-vector, covering every jet read) and `seq` (the plan's
+definition, restricted to long jets). Both are empty.
+
+**The asymmetric floor did what it was built to do.** Over all 97 018 test jets
+`⟨x_nsec⟩ = 2.10` with a **21.9%** zero fraction, against 0.25 and 82.6% on the symmetric
+reference. The five secondary-plane features are no longer constant-zero four times in
+five.
+
+**Train/test agreement — the substitute for the blocked generator systematic.** The two
+files differ only by seed, so their disagreement is the same-generator noise floor. Every
+marginal agrees to better than 1.5% relative: `⟨n_y⟩` +0.08%, `P(n_y = 0)` +0.11%,
+`⟨n_x⟩` −0.34%, `P(n_x = 0)` +1.47%, `⟨x_nsec⟩` −0.50%, `⟨jet p_T⟩` −0.33%. Any future
+PYTHIA-vs-HERWIG spread is only a finding where it exceeds these.
+
+**The aux ablation — the headline scientific result.** Held-out on the full 97 018-jet
+test file, four arms at 60 epochs each:
+
+| arm | aux | seed | held-out NLL/jet | best epoch |
+|---|---|---|---|---|
+| `aux_s0` (the headline arm) | on | 0 | **4.0864** | 49 |
+| `aux_s1` | on | 1 | 4.1056 | 47 |
+| `noaux_s0` | off | 0 | 4.1391 | 45 |
+| `noaux_s1` | off | 1 | 4.1687 | 50 |
+
+aux ON − aux OFF = **−0.0579 ± 0.0071 nat/jet** (paired SEM over 97 018 jets); seed band
+(max within-arm spread) **0.0296**, so `|delta| / band = 1.96`.
+
+**Read that ratio carefully — this is where the previous A/B went wrong, and it is easy to
+repeat.** The delta is well determined: the paired SEM bounds it at ±0.007. The *band* is
+not: it is `max` over two arms of a **two-seed range**, a statistic with roughly 60%
+relative uncertainty and no error bar of its own. A third seed could move it by half its
+size in either direction, and a factor of 1.96 is no margin at all against something that
+loose. An earlier pass of this same comparison on a 40 000-jet subsample — noise only, the
+same four checkpoints — returned band 0.0575 and delta −0.0560, i.e. **the opposite
+verdict**, purely because the per-jet NLL has an SD near 5 and the band is a difference of
+differences. The notebook now evaluates the ablation on the whole file for exactly this
+reason, and prints an explicit caution whenever the ratio is under 3 — as it does here.
+
+**The control is what actually carries the result, and it needs no band at all.** Aux
+rides as *constant per-node columns of `xf`*, so a jet with an empty groomed hadron tree
+(`nx == 0`) receives no aux signal whatsoever — a gain there is arithmetically impossible
+to attribute to aux:
+
+| stratum | jets | aux on | aux off | delta |
+|---|---|---|---|---|
+| **`nx == 0` (control)** | 6 856 | 4.7867 | 4.7732 | **+0.0135** |
+| `nx > 0` | 90 162 | 4.0435 | 4.1068 | **−0.0633** |
+| `n_sec == 0` | 21 241 | 3.5507 | 3.6096 | −0.0589 |
+| `n_sec = 1` | 25 445 | 3.4647 | 3.5249 | −0.0602 |
+| `n_sec = 2–3` | 31 128 | 4.2498 | 4.3033 | −0.0534 |
+| `n_sec ≥ 4` | 19 204 | 5.2862 | 5.3472 | −0.0610 |
+
+The control moves the **wrong way** (+0.0135, aux-on marginally worse) while every stratum
+that can carry aux gains ~0.06 — a 0.077 separation, more than 2.5× the seed band, between
+two groups of the same jets under the same four checkpoints. That is not something seed
+spread produces: a seed effect moves both. So the reading is **aux conditioning helps** —
+the finding the exercise existed to obtain, and one that could not have been obtained on
+`cpp/test_data/jets_aux.root`, which (deliverable 6) is not an asymmetric-floor file at
+all. But it rests on the control and a tight paired SEM, **not** on clearing a two-seed
+band; a third seed per arm is what would make the band itself quotable.
+
+**What this ablation does *not* isolate.** The preset's `aux_features` is nine columns of
+three different kinds, and the A/B measures all nine at once:
+
+| columns | kind | defined for |
+|---|---|---|
+| `nsec`, `has_sec`, `ln_kt_sec`, `ln_kt_sec_sum`, `sec_depth` | secondary plane — what `ktFloorSec` unlocks | non-degenerate only when `n_sec > 0` |
+| `ln_mg_pt`, `ln_ptg_pt` | groomed mass / momentum — **also redefined by the floor** (check 5) | every jet with a node |
+| `ln_pt`, `abs_eta` | jet kinematics, floor-independent | every jet with a node |
+
+So the `n_sec == 0` stratum — 21 241 jets with no secondary plane at all — still gains
+0.0588, because four of the nine columns are defined for it regardless. The honest claim
+is therefore **"the nine-column aux set helps"**, not "the secondary-plane features help";
+and the gain being flat across `n_sec` (−0.054 to −0.065, with none of the symmetric
+file's `n_sec = 2–3` peak) is consistent with a large share coming from the always-defined
+four.
+
+Isolating the part `SoftDrop:ktFloorSec` was actually built for needs a third arm, and the
+right control is **`[ln_pt, abs_eta]`** — *not* all four non-secondary columns, since
+`ln_mg_pt`/`ln_ptg_pt` are themselves complements of the off-spine tree and carry floor
+information of their own. That is +2 trainings for a two-seed band (~1 h at this scale),
+and together with the third seed the band wants, it is the obvious next run.
+
+**Which NLL numbers survive the geometry change** (check 1). `nll_terms` now returns the
+decomposition, so the report says which term moved rather than warning about all of them:
+
+| term | value | unit | 10-bin-comparable? |
+|---|---|---|---|
+| total | 4.0864 | per jet | **yes** — a density on the (ln 1/ΔR, ln k_t) plane |
+| length `−ln q(N\|x)` | 1.1271 | per jet | **yes** — references no cell grid |
+| split `−ln q(cell)` | 3.8982 | per emission | **no** — shifts by `2·ln 3 = 2.197` |
+| coord `−ln p(du,dv,ln z,ψ)` | −1.8079 | per emission | **no** — pays that shift back |
+| split + coord | 2.0903 | per emission | **yes** — the product is a density |
+
+over 137 353 emissions in 97 018 jets (1.416 per jet).
+
+`cell_label_smoothing` is 0.0, so the split term is a genuine log-probability.
+[`tests/test_nll_terms.py`](../tests/test_nll_terms.py) pins the `2·ln 3` shift and the
+invariance of the sum on an untrained model, where both are exactly computable.
+`per_jet_nll` is now `-(length + split + coord)` over that decomposition rather than an
+independent expression, so the parts cannot drift from the whole;
+`scripts/verify_parity.py` still reports **max |Δ| = 0.0** against the original v2 script.
+
+**Acceptance: FAILED on the pooled criterion — but see the stratification below, which
+says the pooled number is the wrong summary.** From the notebook's tiers —
+cell level on 2 000 jets (1 667 with a truth leading emission, i.e. an 83.4% kept
+fraction, so every `dlund_*` is `p(leading | n_y > 0)` per check 9), off-grid on 300:
+
+| estimator | cell (2 000 jets) | off-grid (300 jets) |
+|---|---|---|
+| identity(x) | 0.651 | 0.646 |
+| posterior mode | 0.799 | 0.786 |
+| **medoid / geo-median** | **0.696** | **0.670** |
+
+Ratios **1.069** and **1.037** — the arm **loses to identity**, and the two estimators
+**agree in sign**, which per the amended §9 rules out "quantisation-limited". The CLI's
+300-jet run agrees on the verdict (1.112 / 1.111) but not on the size, which is the
+sample-size lesson again: quote the 2 000-jet row.
+
+The 30-bin geometry is visibly doing its job — cell and off-grid now differ by 0.026 where
+the plan expected the 0.6-wide cell to dominate the score entirely.
+`lund_distribution_closure_v2.ipynb` on the same file concurs from the population side:
+the decode-free posterior series is a wash (W1 gmean ratio 0.977, 7/14 wins) while MAP and
+MBR are 2.9× and 1.9× **worse** than plain RSD.
+
+**But the failure is not uniform, and this is the run's most actionable result.**
+Stratified by the truth's leading `ln k_t` (thirds, 556/555/556 jets):
+
+| truth leading `ln k_t` | jets | identity | medoid | medoid / identity |
+|---|---|---|---|---|
+| **[0.00, 0.79] — soft** | 556 | 0.709 | 1.078 | **1.520** |
+| [0.79, 1.53] — middle | 555 | 0.656 | 0.523 | **0.798** |
+| [1.53, 3.79] — hard | 556 | 0.598 | 0.477 | **0.798** |
+
+The model **beats identity by 20% on two thirds of the data** and loses by 52% on the
+soft third — and that one third is enough to drag the pooled ratio to 1.064. So "the arm
+loses to identity" is true but badly incomplete: the arm is genuinely better than any
+function of `x` over most of the Lund plane and collapses in the soft/wide-angle corner.
+
+That is a **localized under-conditioning** finding, and three independent measurements now
+point at the same corner: the soft `ln k_t` third here, the two failing coverage quadrants
+(`wide_soft` 0.48, `narrow_soft` 0.17 — both `*_soft`), and `narrow_soft`'s SBC χ² of 126
+against a 16.9 reference. A calibrated, fully conditional posterior beats any function of
+`x` everywhere, so losing there is a real defect rather than a decode artefact — and it is
+a far more specific target for the next iteration than "improve the model".
+
+**Calibration is over-confident, and now says so with its error bars** (check 12). Every
+statistic is quoted against its null for the first time:
+
+- leading-cell 68% coverage **0.46**, 95% Wilson **[0.43, 0.48]** on 1 667 jets — 0.68 is
+  far outside, so this is a real failure, not a small-sample wobble;
+- `sbc_chi2_uniform` **359.4** against the χ²(9) 95% point **16.90** — decisively
+  non-uniform;
+- `tarp_max_dev` **0.097** against the null floor `1.36/√300 = 0.079` — above it, and the
+  sign says over-confident (ECP(0.68) = 0.591);
+- per-coordinate PIT over 4 disjoint 5 000-jet chunks: `ln z` KS **0.047 ± 0.004** against
+  a 0.016 critical value is the one failing coordinate; `du` (0.015 ± 0.005),
+  `dv` (0.012 ± 0.003) and `ψ` (0.013 ± 0.003) all pass.
+
+That last line answers a preset question directly: **`sigma_floor: 0.005` was the right
+call.** `du`/`dv` are the within-cell offsets whose support narrowed 3× with `n_bins`, and
+a binding floor shows up as a U-shaped, over-confident PIT. They are the two
+best-calibrated coordinates. (The CLI's 300-jet run flagged `dv` as miscalibrated at
+KS 0.078; the 20 000-jet chunked measurement says 0.012. Same lesson as the seed band —
+the small sample was the problem, not the model.)
+
+`by_emission_index` shows the exposure-bias signature plainly: KS on `ln z` runs
+0.052 → 0.049 → 0.050 → 0.143 → 0.229 across `t = 0…4`, i.e. calibration degrades on the
+model's own generated prefix — though the last two bins hold 97 and 9 emissions, so read
+them as a direction, not a measurement.
+
+Region stratification is where the interval machinery earns itself. `wide_hard` reads
+coverage 0.45 on **22 jets**, interval [0.27, 0.65] — wide enough to be consistent with
+almost anything, so it is reported with `scored: false` and drawn hollow rather than
+counted. The two scoreable quadrants both fail, and they fail *differently*:
+`wide_soft` 0.48 [0.45, 0.50] on 1 533 jets, `narrow_soft` **0.17 [0.11, 0.25]** on 112.
+The collinear corner is far worse than the average, which the pooled 0.46 hides entirely —
+and it is the same corner where the `ln k_t`-stratified leading-emission ratio is worst.
+[`PLAN_ProductionAssessment.md`](PLAN_ProductionAssessment.md) §9.4's "no Lund quadrant
+fails the band" is now answerable, and the answer is that both scoreable quadrants do.
+
+**The empty tree: the ranking is fine, the scale was wrong, and only the tilt fixes it**
+(check 3). `q(0|x)` AUC **0.724** — the model separates the two classes perfectly well.
+What was broken is the *scale*, which SBC/PIT structurally cannot see because SBC ranks
+against the sampler's own draws. The Brier decomposition is what exposes it, and the
+recalibration — `(T, tilt)` fitted on the **training file's** val split (20 000 jets) and
+applied frozen to the test file — is what repairs it:
+
+| variant | mean `q(0\|x)` | truth | emp/pred | NLL of N | AUC | Brier | **reliability** |
+|---|---|---|---|---|---|---|---|
+| uncalibrated | 0.0518 | 0.1605 | **3.10×** | 1.3361 | 0.724 | 0.1400 | 0.0170 |
+| temperature only (`T = 1.340`) | 0.0716 | 0.1605 | 2.24× | 1.3165 | 0.725 | 0.1348 | 0.0119 |
+| **temperature + tilt** (`T = 1.372`, `tilt = −0.511`) | 0.1497 | 0.1605 | **1.07×** | 1.2217 | 0.720 | 0.1251 | **0.0018** |
+
+This confirms the plan's claim exactly: **a scalar temperature cannot close the gap.** It
+is symmetric about the mode, so it pulls `q(0|x)` down toward `1/(max_emissions+1)`; it
+recovers only a third of the deficit (3.10× → 2.24×) while the tilt takes it to 1.07×. The
+reliability term falls 9× while the AUC does not move — recalibration fixes the scale, not
+the ranking, which is precisely what the decomposition said was broken. The 10-bin
+walkthrough measured 1.90× under-confidence; at 30 bins on an independent file it is
+3.10×, so the numbers were right to re-measure rather than carry over.
+
+The gate transfers. `tau = 0.1034`, fitted to reproduce the training-val empty rate
+(0.1663) and applied **frozen**, yields `p_empty_pred = 0.164` against a test truth of
+**0.161** — a rate error of 2%, at recall 0.283 / precision 0.277, MBR backend `pot`.
+Because `empty_threshold_for_rate` is a quantile of `q(0|x)` it would reproduce its own
+fitted rate by construction on the jets it was fitted to; that this holds on a *different
+file* is the measurement, and it is the one thing an independent test file was needed for.
+
+**900 cells were affordable; the head's rank is the thing to watch** (check 10). Truth
+occupies **275 of 900** cells (30.6%) over 137 353 emissions; the posterior emits 273,
+covers 255 of the truth-occupied ones and **misses 20**, while emitting 18 the truth never
+visits. So 30 bins did not starve the head — but the support is under-covered at the
+margin, and `split_head` ends in `Linear(64, 900)`, a rank bound of 64 with no analogue at
+100 cells. Its measured effective rank (spectral entropy) is **37.9 of 64**, with 40
+singular values holding 99% of the energy. The bound is not yet saturated, so the
+under-coverage argues for more capacity in the *decoder* before more cells — not for more
+data.
+
+**§7 stayed a pointer, and its staleness guard did real work.** The notebook does not
+re-implement the population-level W1/KS/χ² — it accepts
+`dist_closure_metrics.json` only after checking that its `data.path` names the test file
+and its `checkpoint` sits in *this* run directory (not merely that the basename is
+`best.ckpt`). It also compares the artifact's recorded `(length_temperature,
+length_tilt) = (1.0, 0.0)` against §6's fitted `(1.372, −0.511)` and says so: recalibration
+reaches `sample`, so that artifact's empty rate describes the **uncalibrated** head. Both
+are legitimate numbers; without this line they are indistinguishable.
+
+**Support and validity** (§8). Truth and identity(x) both sit at exactly 0 out-of-window,
+0 soft-drop violation, 0 `k_t`-floor violation over 137 353 and 168 521 emissions — the
+generator enforces the fiducial window, so the floor is a hard zero rather than a small
+number. Against that floor the posterior's **0.61% soft-drop violation rate** is entirely
+the model's: it occasionally places an emission below the `z_cut` boundary the training
+data never crosses. Small, but it is a support error rather than a calibration error, and
+nothing else in the suite would have surfaced it.
+
+**What did not need re-litigating.** `p_empty_true` reads 0.167 rather than exactly 0.0,
+confirming the empty-tree accounting still sits *before* `run_closure`'s leading-emission
+`continue` (check 9); the notebook asserts this against an independently computed truth
+rate. The support guard is silent: over the whole test file `max N = 6` against
+`model.max_emissions = 25`, so `P(N > support) = 0` exactly. Weights are constant
+(`n_eff = n = 97 018`), so `eval/`'s unweighted averaging is exact here and check 13's
+caveat does not bite — but the notebook prints it either way.
+
+**Check 7 was in scope after all, and it found two things.** The plan defers the
+empty-tree consumer audit on the grounds that it "is only exercisable once the gate can
+fire" — but §6 fits a `tau` and fires it, so the audit was run here. Driving every
+consumer with a `tau` that fires on every jet turned up two that could not answer
+"nothing":
+
+- **`print_point_estimate` bypassed the gate.** It called `map_estimate` directly, which
+  structurally cannot return the empty tree. With the gate on it therefore printed a
+  non-empty MAP for the very jets `run_closure`'s `p_empty_pred` had just counted as
+  empty — one `eval`, two contradictory answers. Now routed through `map_or_mbr`.
+- **`generator_spread` took no decode at all.** It called `map_estimate()` with no
+  arguments, so the quantity the module bills as "the dominant systematic" was measured
+  under signature defaults rather than the run's configured decode, and could never see
+  the empty tree. It now accepts `decode=` (applied identically to both models, since a
+  spread between differently-decoded models is meaningless), records
+  `point_estimator` / `empty_threshold` / `min_emissions` in its output, and returns
+  **NaN** rather than 0 for the leading-emission spread when neither model has a leading
+  emission to compare — a 0 there would read as perfect agreement.
+
+`serving.predict` and `run_closure` already handled it correctly.
+[`tests/test_empty_tree_gate.py`](../tests/test_empty_tree_gate.py) now pins all four.
+
+**A trap the notebook hit, worth recording.** §6 has to rebuild the *training* run's val
+split to fit `tau` and `(T, tilt)` on it, which means handing `LundDataModule` the
+checkpoint's own `cfg.data.path`. That path is stored **repo-relative**, and a notebook
+kernel runs in `notebooks/` — so `load_rntuple` missed the file. It does not raise when
+that happens: it prints a note, returns `None`, and the datamodule **silently substitutes
+synthetic jets**. The run only failed because this checkpoint conditions on aux and the
+synthetic generator has no secondary planes; an aux-free checkpoint would have sailed
+through and reported a recalibration fitted on synthetic data as "the training file's val
+split". §6 now resolves the path against the repo root and hard-asserts both
+`generator != "synthetic"` and a jet count matching §1's independent read.
+
+Remaining honest gaps, unchanged and stated rather than skipped:
+
+- **PYTHIA vs HERWIG** — no `herwig_driver` in WP5, so the generator systematic is not
+  measured. The §2 train/test deltas above are the same-generator, different-seed noise
+  floor it would have to exceed.
+- **The encoder A/B** — `lundnet` is the pairing
+  [`PLAN_ProductionAssessment.md`](PLAN_ProductionAssessment.md) §4 names for A4, not a
+  measured winner. Its `k: 4` is dead code and the mean hadron sequence is 1.74 nodes, so
+  there is very little for a chain EdgeConv to message-pass over. `encoder=gru` and
+  `encoder=deepsets` arms are +2 trainings (~1 h at this scale) and would close §7's open
+  probe.
+- **v3 vs v4** — not run. The plan flags cross-attention as likely a wash on real PYTHIA
+  for the same multiplicity reason, and this test deliberately fields one architecture.
+  Nothing here confirms or refutes it; the four arms differ only in aux and seed.
+
 ## Verification
 
 - `ctest --test-dir cpp/build` green; `read_lund_rntuple` shows `kt_floor_sec: 0.2` on both
   files and jet counts ≈ 497k / 97k.
-- `pytest tests/ -q` green (342 today) after any source change.
+- `pytest tests/ -q` green after any source change.
 - Training: `best.ckpt` written, `metrics.csv` val curve monotone-ish, support guard silent
   (it reads `max_emissions`, not `n_cells`, so 30 bins does not affect it).
 - The `eval` command above runs clean and writes `eval_metrics.json` + three PNGs.

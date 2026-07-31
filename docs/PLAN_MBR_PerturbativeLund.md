@@ -1,6 +1,7 @@
 # PLAN — MBR point estimate under a perturbative Lund (EMD) metric
 
-Status: proposed (not yet implemented). Adds a *minimum Bayes risk* point estimator that
+Status: **implemented, opt-in** — `inference/mbr.py`, `decode.point_estimator`,
+`decode.mbr_*`, covered by `tests/test_mbr.py`. Adds a *minimum Bayes risk* point estimator that
 selects, from the posterior draws callers already take, the tree of least expected
 perturbative-Lund distance to the posterior. Opt-in via `decode.point_estimator="mbr"`;
 the default (`"map"`) short-circuits before any new code, so the likelihood and the MAP

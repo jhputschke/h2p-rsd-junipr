@@ -1,6 +1,8 @@
 # PLAN — Eliminate the unphysical MAP = 0 (empty-tree) collapse
 
-Status: proposed (not yet implemented). Adds a minimum-emission floor (`N_split ≥
+Status: **implemented and on by default** — `decode.min_emissions: 1`,
+`decode.length_penalty`, `inference/point_estimate.py::beam_search_cells`, covered by
+`tests/test_length_floor.py`. Adds a minimum-emission floor (`N_split ≥
 min_emissions`) and length-normalized beam search so the MAP point estimate is never
 the unphysical empty tree, plus median reporting and a training probe.
 

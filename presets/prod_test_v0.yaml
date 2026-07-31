@@ -1,0 +1,50 @@
+# presets/prod_test_v0.yaml — the end-to-end production test arm.
+#
+#   h2p-rsd-junipr train base=presets/prod_test_v0.yaml
+#   h2p-rsd-junipr train base=presets/prod_test_v0.yaml trainer=fast_dev data.n_jets=256  # smoke
+#
+# One arm, one seed, on data built for the question: an asymmetric-floor file
+# (kt_floor 1.0 spine / 0.2 off-spine) at n_bins: 30, assessed on an independent
+# file. See docs/PLAN_prod_test_v0.md. This is a production test of the PIPELINE,
+# not a model ranking — nothing here is rankable without a seed band.
+#
+# Layered over configs/config.yaml, so any group not named below keeps the repo
+# default. See docs/CONFIGURATION.md §0.
+
+defaults:
+  model: ar_junipr_v4        # v3 + decoder cross-attention (the A4 "SOTA AR" arm)
+  encoder: lundnet           # returns_sequence=True; the documented v4 pairing
+  data: rntuple
+  optim: default
+  trainer: default
+  decode: default
+  experiment: closure
+
+geometry:
+  n_bins: 30                 # 900 cells; cell 0.6 -> 0.2, half_u/half_v 0.3 -> 0.1
+
+data:
+  path: data/jet_aux_asym.root
+  # min_val is deliberately left at its default: n_val = max(min_val, len//10), and
+  # len//10 ~= 50k dominates any sane min_val here, so setting it would be a no-op.
+
+encoder:
+  num_layers: 5
+  aux_features: [ln_mg_pt, ln_ptg_pt, ln_pt, abs_eta,
+                 nsec, has_sec, ln_kt_sec, ln_kt_sec_sum, sec_depth]
+
+model:
+  dec_dim: 64
+  dec_layers: 2
+  xattn_heads: 4             # must divide dec_dim
+  sigma_floor: 0.005         # half_u/half_v shrank 3x with n_bins; the default 0.01
+                             # did not, and would start to bind. The per-coordinate
+                             # PIT on du/dv is what says whether it was needed.
+
+trainer:
+  max_epochs: 60             # early stopping is NOT wired (train/callbacks.py defines
+                             # EarlyStopping, Trainer.fit never calls it), and resume
+                             # cannot extend a finished run — so 60 is a commitment.
+  batch_size: 256
+
+run_root: runs/prod_test_v0

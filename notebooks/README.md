@@ -94,6 +94,28 @@ the docs:
   length floor lifted. Everything else is identical, and
   `REQUIRE_TRUTH_SPLITTING = True` reproduces v1's population exactly.
 
+- **prod_test_v0.ipynb** — the end-to-end production test of
+  [`docs/PLAN_prod_test_v0.md`](../docs/PLAN_prod_test_v0.md), and the only notebook
+  here that reports on a genuinely **independent file**: `data/jet_aux_asym_test.root`,
+  a different PYTHIA seed from the one the checkpoint trained on, with
+  [`scripts/check_disjoint.py`](../scripts/check_disjoint.py) asserting the two streams
+  never collided. Four nested jet tiers over one frozen shuffled index list keep every
+  comparison paired while bounding a per-jet cost that spans four orders of magnitude.
+  What it carries that no other notebook does: the **aux ablation with a seed band**
+  (aux on/off × seed 0/1 — a single pair cannot conclude, and the previous A/B failed
+  exactly there), the per-term NLL table with a **`10-bin-comparable?` column** (the
+  total is a density on the plane and *is* comparable across `n_bins`; `split_ll` alone
+  shifts by `2·ln 3`), **split-head occupancy and effective rank** (900 cells behind a
+  `Linear(64, 900)`), and a `q(0|x)` **reliability diagram with the Brier
+  reliability/resolution decomposition** — the diagnostic SBC/PIT structurally cannot
+  provide, since SBC ranks against the sampler's own draws. Both the empty-gate `tau`
+  and the `(temperature, tilt)` length recalibration are fitted on the **training
+  file's** val split and applied frozen, because `empty_threshold_for_rate` is a
+  quantile and would otherwise reproduce its own fitted rate by construction. §7 is a
+  deliberate *pointer* to `lund_distribution_closure_v2.ipynb` rather than a second
+  implementation of the headline distances, with a staleness guard that refuses to
+  quote a `dist_closure_metrics.json` describing a different run.
+
 - **closure.ipynb** — leading-emission Lund distance, multiplicity bias, MAP vs
   plain-RSD vs truth trees (§8 closure).
 - **calibration.ipynb** — SBC rank histogram, PIT, coverage (Talts et al.,

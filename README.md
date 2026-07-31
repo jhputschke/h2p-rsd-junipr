@@ -342,7 +342,8 @@ read — the reader guards on the RNTuple descriptor.
 
 `src/h2p_rsd_junipr/` — `config` · `geometry` · `features` · `distributions` ·
 `data/` · `encoders/` · `models/` · `inference/` · `eval/` · `train/` · `serving/`
-· `cli`. `configs/` — YAML group files composed by `config.py`. `cpp/` — the
-generation stage. `tests/` — pytest mirror. See
+· `cli`. `configs/` — YAML group files composed by `config.py`. `presets/` — whole-run
+tops passed as `base=`, searched before `configs/` for group files (`prod_test_v0.yaml`
+is the production-test arm). `cpp/` — the generation stage. `tests/` — pytest mirror. See
 [`docs/PRODUCTION-PLAN-v4.md`](docs/PRODUCTION-PLAN-v4.md) for the full design and
 the §14 phased roadmap.
