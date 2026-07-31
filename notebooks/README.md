@@ -63,6 +63,29 @@ the docs:
   posterior, so it never collapses to `n=0` even with no floor; a one-line `MBR_BACKEND`
   toggle (`pot` default, `energyflow` optional) runs the demo without `energyflow`
   installed. See `scripts/probe_map_collapse.py` for the floor/training sweep.
+
+- **lund_distribution_closure.ipynb** — the **population** counterpart to
+  `inference_demo.ipynb`. Where `eval/closure.py` and `eval/calibration.py` ask per-jet
+  questions, this asks whether the predicted *ensemble* of primary-Lund splittings looks
+  like the parton-level ensemble — and whether it looks more like it than **plain RSD**
+  (the file's own hadron-level `x_*` branches) already does. Five series on shared axes:
+  truth `y`, plain RSD `x`, the **MAP** and **MBR** point estimates, and a
+  posterior-predictive draw whose *continuous coordinates are sampled*, not moded — the
+  only honest comparator for point estimates, since a per-jet argmax is narrower than
+  truth by construction. Figures: the primary Lund plane with ratio-to-truth maps; the
+  four coordinate marginals pooled **and split by splitting index**; the angular-ordering
+  ladder profiles; the `k_t`-cut multiplicity spectrum `N(k_t > c)`; leading-emission
+  kinematics and multiplicity. Each observable is scored with **W1, KS and χ²/ndf**
+  (weight-aware throughout; ψ uses circular W1 and Kuiper's V), and the headline is the
+  **improvement ratio** `d(ŷ,y)/d(x,y)` — below 1 when the model beat doing nothing.
+  Reports the out-of-window, soft-drop-violation and `k_t`-floor-violation fractions up
+  front, since the model cannot emit outside the geometry window and its unbounded `ln z`
+  head knows nothing about the grooming boundary. Writes `dist_closure_metrics.json` and
+  `dist_closure_table.md` beside the checkpoint, which is the runtime harness
+  [`docs/PLAN_ProductionAssessment.md`](../docs/PLAN_ProductionAssessment.md) §7/§10 needs
+  per pT window. ~10 min for 600 jets with the `pot` MBR backend; a cost probe cell sizes
+  the run before you commit to it.
+
 - **closure.ipynb** — leading-emission Lund distance, multiplicity bias, MAP vs
   plain-RSD vs truth trees (§8 closure).
 - **calibration.ipynb** — SBC rank histogram, PIT, coverage (Talts et al.,
