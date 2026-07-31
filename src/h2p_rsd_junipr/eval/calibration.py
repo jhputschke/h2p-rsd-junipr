@@ -43,6 +43,38 @@ from .closure import leading_emission_cell
 REGION_LABELS = ("wide_soft", "wide_hard", "narrow_soft", "narrow_hard")
 
 
+def wilson_interval(k, n, z=1.96) -> tuple[float, float]:
+    """Wilson score interval for a binomial proportion — the honest error bar on
+    `coverage_68` and every per-region coverage beside it.
+
+    These are proportions on a few hundred jets (a few dozen per region), where the
+    normal approximation `p +- z*sqrt(p(1-p)/n)` is both too wide in the middle and
+    nonsensical at the edges (it can leave [0, 1], and it collapses to zero width at
+    p = 0 or 1 — exactly where a near-empty Lund quadrant lands). Wilson does neither.
+    Returns `(nan, nan)` for n = 0."""
+    n = int(n)
+    if n <= 0:
+        return (float("nan"), float("nan"))
+    p = float(k) / n
+    d = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / d
+    half = (z / d) * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (float(max(0.0, centre - half)), float(min(1.0, centre + half)))
+
+
+def chi2_crit95(dof: int) -> float:
+    """95% point of chi^2(dof), via Wilson-Hilferty — no scipy dependency.
+
+    `sbc_chi2_uniform` is quoted with no scale, which makes "2.4" and "24" read the
+    same. The reference is chi^2(n_bins - 1): at the default 10 bins that is 16.92,
+    and the approximation below returns 16.90 (0.1% low, and it improves with dof).
+    Below 5 dof it degrades, so it is documented as indicative there, not exact."""
+    if dof <= 0:
+        return float("nan")
+    z95 = 1.6448536269514722
+    return float(dof * (1.0 - 2.0 / (9.0 * dof) + z95 * np.sqrt(2.0 / (9.0 * dof))) ** 3)
+
+
 def cell_region(cell, geometry) -> str | None:
     """Lund-plane quadrant of a cell id, as a stable string label (or None)."""
     if cell is None:
@@ -261,11 +293,18 @@ def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
     # ("at 90% credibility the posterior actually covered X%"). The endpoints alpha=0/1
     # are pinned by construction, so the *interior* levels carry the diagnosis.
     ecp_at = {f"{a:.2f}": float(np.interp(a, alpha, ecp)) for a in (0.5, 0.68, 0.9, 0.95)}
+    # `tarp_max_dev` is a sup-norm deviation of an empirical CDF from the diagonal —
+    # i.e. a KS statistic, whose 95% null value is ~1.36/sqrt(n). At 300 jets that is
+    # 0.078, so a "max dev = 0.06" is a PASS, not a small failure. Quoted, because the
+    # bare number invites reading any nonzero deviation as a defect.
+    null_floor = 1.36 / np.sqrt(max(n_jets, 1))
     metrics = {
         "alpha": [float(a) for a in alpha],
         "ecp": [float(e) for e in ecp],
         "ecp_at": ecp_at,
         "tarp_max_dev": max_dev,
+        "tarp_null_floor95": float(null_floor),
+        "tarp_exceeds_null": bool(max_dev > null_floor),
         "tarp_signed_bias": signed,
         "n_jets": int(n_jets),
         "n_refs": int(len(pool)),
@@ -281,7 +320,9 @@ def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
               f"{metrics['n_refs']} refs, {n_jets} jets, EMD backend "
               f"{metrics['backend']}):")
         print(f"  max |ECP(alpha) - alpha| = {max_dev:.3f}   "
-              f"mean signed deviation = {signed:+.3f}")
+              f"(95% null floor 1.36/sqrt({n_jets}) = {null_floor:.3f};"
+              f" {'ABOVE it => real deviation' if metrics['tarp_exceeds_null'] else 'below it => consistent with calibrated'})"
+              f"   mean signed deviation = {signed:+.3f}")
         print("    " + "   ".join(f"ECP({a}) = {v:.3f}" for a, v in ecp_at.items())
               + f"   => {verdict}")
     return metrics
@@ -292,12 +333,18 @@ def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
 # ---------------------------------------------------------------------------
 def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_bins=10,
                     verbose=True, pit_coords=False, stratify_regions=False, tarp=False,
-                    tarp_refs=100, tarp_reference="pooled", mbr_kwargs=None, seed=0):
+                    tarp_refs=100, tarp_reference="pooled", mbr_kwargs=None, seed=0,
+                    min_region_n=30):
     """SBC / PIT / coverage on held-out jets, plus the opt-in WP2 additions.
 
     With `pit_coords=stratify_regions=tarp=False` (the defaults) the returned dict is
-    exactly the v1 dict — same keys, same values, same RNG consumption — so existing
-    numbers do not move. Each switch only ADDS keys."""
+    exactly the v1 dict plus the *uncertainty* keys — same RNG consumption, same
+    values for every key that already existed. Each switch only ADDS keys.
+
+    `min_region_n` is the per-region jet count below which a Lund quadrant is reported
+    but marked `scored: false`. The quadrants are not equally populated (and the low-u
+    strip is kinematically unreachable), so without a stated floor a 40-jet region's
+    coverage gets quoted with the same confidence as a 200-jet one."""
     ranks = []
     coverage_hits = []
     pit_values = []
@@ -336,20 +383,37 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
     hist, _ = np.histogram(ranks, bins=n_rank_bins, range=(0.0, 1.0))
     expected = len(ranks) / n_rank_bins if len(ranks) else 1.0
     chi2 = float(np.sum((hist - expected) ** 2 / max(expected, 1e-8)))
+    cov_hits = np.array(coverage_hits, dtype=float)
+    cov_lo, cov_hi = wilson_interval(cov_hits.sum(), cov_hits.size)
+    crit = chi2_crit95(n_rank_bins - 1)
     metrics = {
         "sbc_chi2_uniform": chi2,
+        # Without its reference the chi^2 is unreadable: the same number is a pass at
+        # 10 bins and a failure at 3. Quote the 95% point of chi^2(n_bins - 1) beside it.
+        "sbc_chi2_dof": int(n_rank_bins - 1),
+        "sbc_chi2_crit95": crit,
+        "sbc_chi2_exceeds_crit95": bool(chi2 > crit),
         "sbc_rank_mean": float(np.mean(ranks)) if len(ranks) else float("nan"),
         "pit_mean": float(np.mean(pit_values)) if pit_values else float("nan"),
         "coverage_68": float(np.mean(coverage_hits)) if coverage_hits else float("nan"),
+        # `coverage_68` is a binomial proportion on a few hundred jets; without its
+        # interval "0.66 vs 0.68" reads as a finding when it is a coin flip.
+        "n_coverage": int(cov_hits.size),
+        "coverage_68_ci": [cov_lo, cov_hi],
+        "coverage_68_consistent": bool(cov_lo <= 0.68 <= cov_hi) if cov_hits.size else False,
         "n_jets": int(n_jets),
     }
     if verbose:
         print("\nposterior calibration (SBC / PIT / coverage):")
         print(f"  SBC rank-uniformity chi^2 ({n_rank_bins} bins) = {metrics['sbc_chi2_uniform']:.2f}"
-              f"   (lower => more uniform => better calibrated)")
+              f"   (95% point of chi^2({metrics['sbc_chi2_dof']}) = {crit:.2f};"
+              f" {'ABOVE it => non-uniform' if metrics['sbc_chi2_exceeds_crit95'] else 'below it => consistent with uniform'})")
         print(f"  SBC mean rank = {metrics['sbc_rank_mean']:.3f}   PIT mean = {metrics['pit_mean']:.3f}"
               f"   (target ~0.5)")
-        print(f"  leading-cell 68% coverage = {metrics['coverage_68']:.2f}   (target ~0.68)")
+        print(f"  leading-cell 68% coverage = {metrics['coverage_68']:.2f}"
+              f"  95% Wilson [{cov_lo:.2f}, {cov_hi:.2f}] on {cov_hits.size:d} jets"
+              f"   (target 0.68 —"
+              f" {'inside' if metrics['coverage_68_consistent'] else 'OUTSIDE'} the interval)")
         if not getattr(model, "exact_likelihood", True):
             print("  NOTE: this family reports a SURROGATE log_prob (exact_likelihood=False);"
                   " the SBC/PIT/coverage above are sampling-based and still valid, its NLL is not.")
@@ -366,6 +430,8 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
             sel_c = cov_reg == label
             if not sel_r.any() and not sel_c.any():
                 continue
+            n_cov = int(sel_c.sum())
+            lo, hi = wilson_interval(cov[sel_c].sum() if sel_c.any() else 0, n_cov)
             by_region[label] = {
                 "n_jets": int(sel_r.sum()),
                 "sbc_chi2_uniform": _chi2_uniform(ranks[sel_r], n_rank_bins) if sel_r.any() else float("nan"),
@@ -373,15 +439,39 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
                 "sbc_rank_ks": _ks_uniform(ranks[sel_r]) if sel_r.any() else float("nan"),
                 "pit_mean": float(pit[sel_r].mean()) if sel_r.any() else float("nan"),
                 "coverage_68": float(cov[sel_c].mean()) if sel_c.any() else float("nan"),
+                # A quadrant with 40 jets carries a +-0.15 interval: quoting it beside a
+                # quadrant with 200 as though both were measurements is how "no quadrant
+                # fails the band" gets asserted about a coin flip.
+                "n_coverage": n_cov,
+                "coverage_68_ci": [lo, hi],
+                "coverage_68_consistent": bool(lo <= 0.68 <= hi) if n_cov else None,
+                # Below `min_region_n` the region is REPORTED but not SCORED — the
+                # verdict column is None rather than a number a reader would act on.
+                "scored": bool(n_cov >= int(min_region_n)),
             }
         metrics["by_region"] = by_region
+        metrics["region_min_n"] = int(min_region_n)
+        # The split points, so a reader can check them against the kinematics rather
+        # than assume all four quadrants are reachable. u = ln(1/DeltaR) is bounded
+        # below by ln(1/R) (0.92 for R = 0.4), so the low-u strip of the `wide_*`
+        # quadrants is empty by construction, not by the model's choice — and whichever
+        # quadrant that leaves near-empty is a geometry fact, not a calibration failure.
+        lo_u, hi_u = geometry.ln_invdelta_range
+        lo_v, hi_v = geometry.ln_kt_range
+        metrics["region_split"] = {"u": 0.5 * (lo_u + hi_u), "v": 0.5 * (lo_v + hi_v)}
         if verbose:
             print("  region-stratified (leading-emission Lund quadrant):")
             print(f"    {'region':>12} {'jets':>6} {'SBC chi2':>9} {'rank mean':>10}"
-                  f" {'cov68':>7}   (targets: low, 0.5, 0.68)")
+                  f" {'cov68':>7} {'95% Wilson':>16} {'n':>5}   (targets: low, 0.5, 0.68)")
             for label, e in by_region.items():
+                ci = e["coverage_68_ci"]
+                flag = "" if e["scored"] else f"  < n={min_region_n}, NOT SCORED"
                 print(f"    {label:>12} {e['n_jets']:>6} {e['sbc_chi2_uniform']:>9.2f}"
-                      f" {e['sbc_rank_mean']:>10.3f} {e['coverage_68']:>7.2f}")
+                      f" {e['sbc_rank_mean']:>10.3f} {e['coverage_68']:>7.2f}"
+                      f"   [{ci[0]:.2f}, {ci[1]:.2f}] {e['n_coverage']:>5}{flag}")
+            print(f"    quadrant split at u = {metrics['region_split']['u']:.2f},"
+                  f" v = {metrics['region_split']['v']:.2f};  u = ln(1/DeltaR) >= ln(1/R)"
+                  f" = 0.92 at R = 0.4, so the low-u strip is kinematically unreachable")
 
     # --- WP2.1: per-coordinate PITs -------------------------------------------
     if pit_coords:

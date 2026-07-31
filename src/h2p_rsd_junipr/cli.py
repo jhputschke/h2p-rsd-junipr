@@ -177,7 +177,7 @@ def cmd_eval(argv) -> int:
     from .config import OmegaConf, decode_params, experiment_params
     from .eval.calibration import run_calibration
     from .eval.closure import print_point_estimate, run_closure
-    from .eval.report import plot_calibration, save_metrics
+    from .eval.report import inert_decode_keys, plot_calibration, save_metrics
     from .inference.mbr import mbr_kwargs_from_decode
     from .models.base import build_model
     from .train.checkpoint import load_for_inference
@@ -250,8 +250,16 @@ def cmd_eval(argv) -> int:
         },
         "decode": dict(decode),
         "decode_overrides": {k: n for k, (_o, n) in overrides["decode"].items()},
+        # ...and which of those knobs never reached a number below. Without this the
+        # JSON faithfully records settings that did nothing, and a reader comparing two
+        # runs on `beam_width` compares a knob neither consulted.
+        "decode_inert": inert_decode_keys(model, dict(decode)),
         "experiment": dict(exp),
     }
+    if metrics["decode_inert"]:
+        print("\n[eval] decode knobs that did NOT reach these numbers:")
+        for e in metrics["decode_inert"]:
+            print(f"    {e['key']} = {e['value']!r}   — {e['reason']}")
     metrics["closure"] = run_closure(
         model, val_ds, dm_jets, geometry, device,
         K=exp["n_closure_samples"], n_closure=exp["closure_jets"], decode=decode,
