@@ -83,8 +83,16 @@ the docs:
   head knows nothing about the grooming boundary. Writes `dist_closure_metrics.json` and
   `dist_closure_table.md` beside the checkpoint, which is the runtime harness
   [`docs/PLAN_ProductionAssessment.md`](../docs/PLAN_ProductionAssessment.md) §7/§10 needs
-  per pT window. ~10 min for 600 jets with the `pot` MBR backend; a cost probe cell sizes
-  the run before you commit to it.
+  per pT window. ~4 min for 2000 jets with the `pot` MBR backend; a cost probe cell sizes
+  the run before you commit to it. **Read the population caveat under v2 below before
+  quoting any number from this one.**
+
+- **lund_distribution_closure_v2.ipynb** — the same study on the population you could
+  actually select on data. **Prefer this one; see the note below for why both exist.**
+  Adds §5a, the observable v1 structurally could not have: the **empty-tree rate**
+  `P(n = 0)` per series, plus a `MAP_ALLOW_EMPTY` control that re-decodes the MAP with the
+  length floor lifted. Everything else is identical, and
+  `REQUIRE_TRUTH_SPLITTING = True` reproduces v1's population exactly.
 
 - **closure.ipynb** — leading-emission Lund distance, multiplicity bias, MAP vs
   plain-RSD vs truth trees (§8 closure).
@@ -94,6 +102,73 @@ the docs:
   region + multiplicity distribution.
 - **generator_systematic.ipynb** — PYTHIA-trained vs HERWIG-trained MAP/posterior
   spread (§8); the inter-model spread is the dominant systematic.
+
+### Why there are two distribution-closure notebooks
+
+v1 (and `inference_demo.ipynb`) select jets with at least one primary splitting **at both
+levels**:
+
+```python
+jets = [j for j in jets if len(j["x"][0]) and len(j["y"][0])]
+```
+
+The second condition reads the **parton** sequence — the thing being predicted. No analysis
+can apply it to data. On `cpp/test_data/jets.root` it discards 8 631 jets, **17.2% of
+everything selectable on data**, and they are not a random 17%: every one is a jet whose
+correct answer is the *empty tree*, where hadronisation manufactured all the visible
+structure from a parton jet with no splitting surviving grooming.
+
+| population | selection | jets | mean `n_x` | mean `n_y` | `x/y` | `P(n_y=0)` |
+|---|---|---|---|---|---|---|
+| train | none — `LundDataModule` filters nothing | 54 007 | 1.744 | 1.420 | 1.228 | 16.0% |
+| **deploy** | `len(x)>0` — **all you can apply on data** (v2) | 50 290 | 1.873 | 1.436 | 1.305 | 17.2% |
+| v1 eval | `len(x)>0 and len(y)>0` | 41 659 | 1.973 | 1.733 | 1.139 | 0.0% |
+
+Three consequences, all of which flatter the result:
+
+1. **The rate gap is understated by half.** Plain RSD over-counts primary splittings by
+   30% on the deployable population, not the 14% v1 reports.
+2. **Training never applied the cut.** `MatchedLundDataset` builds `n_y = 0` items and
+   `log_prob` scores them, so the model learned these jets; v1 just never tested it on them.
+3. **It silently rigs the MAP-vs-MBR comparison** by removing exactly the jets where MAP
+   structurally fails and MBR most clearly wins.
+
+What v2 then exposes on the walkthrough `ar_junipr_v3` checkpoint: the model holds real
+information about which jets are empty (mean `q(N=0|x)` = 0.16 on truth-empty jets against
+0.08 on the rest, AUC 0.77), and **no point estimator under the default decode can use
+it** — both read `P(n̂ = 0) ≈ 0%` against a truth rate of 17.4%, for two unrelated reasons:
+
+- **MAP** — *not* the `decode.min_emissions = 1` floor. Lifting the floor changes nothing,
+  because with a multiplicity head the MAP is `argmax q(n|x)`, and the peak lands at 0
+  essentially never however much mass sits there. The same mode-vs-distribution effect the
+  rest of the notebook is about, one level up — applied to the *length*.
+- **MBR** — mode-free and floor-free, so it *could* answer "nothing", but the
+  perturbative-Lund EMD charges an imbalance penalty (`mbr_R`) for unmatched weight, and an
+  empty cloud is entirely unmatched weight. Its risk is near-maximal, so it is close to the
+  worst answer available rather than a cheap one.
+
+Only the posterior draws produce empty trees at all (9.7% against truth's 17.4%). Getting
+these jets right needs a decision rule that can express emptiness — thresholding
+`q(0|x)` — not a different floor.
+
+**This one column is backend-dependent, and the shape panels are not.** On identical draws
+`pot` and `energyflow` both give `P(n̂=0) ≈ 0.2%` and recover 0% of the truth-empty jets,
+while `surrogate` gives 57% and 82% — a normalised binned-image χ² does not punish an empty
+image the way an EMD with an imbalance term does. Neither is "right"; they are different
+risk functions, and this is where they diverge hardest. Quote §5a together with the
+`MBR_BACKEND` it was run under.
+
+Relatedly, `beam_search_cells` calls the empty tree "unphysical (a groomed jet has >=1
+primary splitting)". At parton level that is false for 17.2% of jets in this file. The
+floor is a real fix for MAP length collapse, but its stated premise does not hold for the
+target distribution — a decode-layer question for the package, which is why v2 measures the
+cost rather than working around it.
+
+**Which to use.** v2 for anything you report or compare against data. v1 remains valid but
+narrower — it answers "given a jet with parton-level substructure, is the predicted
+substructure right?", which is a real question, just not one an analysis gets to ask. Their
+numbers are **not comparable**: different populations, so every distance, ratio and rate
+moves.
 
 Generate the underlying metrics with `h2p-rsd-junipr eval <ckpt>` (writes a JSON
 metrics record + the CSV/JSONL training curves in the run dir).
