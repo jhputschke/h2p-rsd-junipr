@@ -81,6 +81,14 @@ def geometric_median(points, iters: int = 64, eps: float = 1e-9) -> np.ndarray:
     return a
 
 
+def _rate(num, cond):
+    """Mean of `num` over the entries where `cond` is true — recall with
+    `(pred, true)`, precision with `(true, pred)`. NaN on an empty denominator, which
+    is the honest answer: a sample with no truth-empty jet has no recall."""
+    n, c = np.asarray(num, dtype=bool), np.asarray(cond, dtype=bool)
+    return float(n[c].mean()) if c.any() else float("nan")
+
+
 def _leading_coords(arr):
     """Hardest-kt row of an `(n, 4)` node_raw table, as `(ln 1/DeltaR, ln kt)`."""
     a = np.asarray(arr, dtype=float)
@@ -152,6 +160,7 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     n_id_bias, n_mean_bias, n_median_bias = [], [], []
     d_mbr, n_mbr_bias = [], []
     dc_id, dc_mode, dc_geomed = [], [], []   # continuous (no grid), opt-in
+    empty_true, empty_pred = [], []          # the FULL population, incl. truth-empty jets
     cont_ok = bool(continuous)
     true_ns = []  # true N per kept jet, aligned with the bias lists (for the per-N table)
     covered = []
@@ -168,6 +177,17 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         mults = np.array([len(d) for d in draws])
         lead = [c for c in (leading_emission_cell(d, geometry) for d in draws) if c is not None]
         ly = leading_emission_cell(y_true, geometry)
+
+        # --- empty-tree accounting: BEFORE the `continue` below, deliberately -------
+        # `ly is None` IS the truth-empty case, so the leading-emission selection that
+        # follows drops exactly the jets this measures. Anything computed after it is
+        # blind to them by construction and `p_empty_true` would read a flat 0.0.
+        # The point estimate is taken here (not after) for the same reason, and reused
+        # by the MBR block below so the `point_estimator="mbr"` path pays for it once.
+        hat = model.map_or_mbr(xf, nx, draws=draws, **dec)
+        empty_true.append(ny_true == 0)
+        empty_pred.append(hat.multiplicity == 0)
+
         if ly is None or not lead:
             continue
 
@@ -205,12 +225,11 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         n_median_bias.append(np.median(mults) - ny_true)
         true_ns.append(ny_true)
 
-        if want_mbr:  # MBR reuses the same draws (no resample); O(K^2) EMD per jet
-            mbr_hat = model.map_or_mbr(xf, nx, draws=draws, **dec)
-            lead_mbr = leading_emission_cell([n.cell for n in mbr_hat.nodes], geometry)
+        if want_mbr:  # `hat` above already IS the MBR estimate under this `dec`
+            lead_mbr = leading_emission_cell([n.cell for n in hat.nodes], geometry)
             if lead_mbr is not None:
                 d_mbr.append(lund_distance(lead_mbr, ly, geometry))
-            n_mbr_bias.append(mbr_hat.multiplicity - ny_true)
+            n_mbr_bias.append(hat.multiplicity - ny_true)
 
         order = np.argsort(-counts)
         cum = np.cumsum(counts[order]) / counts.sum()
@@ -225,6 +244,19 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         "mean_mult_posterior": float(
             np.mean([b + len(val_ds[i]["yc"]) for i, b in enumerate(n_mean_bias)])
         ),
+        # The empty tree. `mult_bias_*` is provably blind to this failure — a MAP that
+        # answers 1 wherever the truth is 0 lands at mean multiplicity 1.41 against a
+        # true 1.42 while recovering 0% of them — so it is reported explicitly.
+        # Computed over EVERY jet, unlike the dlund_* keys below (see `n_kept`).
+        "p_empty_true": float(np.mean(empty_true)) if empty_true else float("nan"),
+        "p_empty_pred": float(np.mean(empty_pred)) if empty_pred else float("nan"),
+        "recall_empty": _rate(empty_pred, empty_true),
+        "precision_empty": _rate(empty_true, empty_pred),
+        "n_empty_true": int(np.sum(empty_true)),
+        "n_jets_scored": len(empty_true),
+        # ...whereas every dlund_* number below is conditioned on the TRUTH having a
+        # leading emission (the `ly is None` continue), i.e. it is p(leading | n_y > 0).
+        "n_kept_leading": len(d_id),
         "dlund_identity": float(np.nanmean(d_id)),
         "dlund_posterior_mode": float(np.nanmean(d_mode)),
         "dlund_posterior_medoid": float(np.nanmean(d_medoid)) if d_medoid else float("nan"),
@@ -298,6 +330,19 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         print(
             f"  posterior 68% coverage of true leading cell = {metrics['coverage_68']:.2f}"
             f"   (target ~0.68; <0.68 => over-confident)"
+        )
+        _tau = float(dec.get("empty_threshold", 0.0))
+        print(
+            f"  empty parton tree (ALL {metrics['n_jets_scored']} jets; the dlund_* rows"
+            f" above keep only the {metrics['n_kept_leading']} with a truth leading"
+            f" emission):\n"
+            f"      truth = {metrics['p_empty_true']:.3f}"
+            f"   predicted = {metrics['p_empty_pred']:.3f}"
+            f"   recall = {metrics['recall_empty']:.3f}"
+            f"   precision = {metrics['precision_empty']:.3f}"
+            f"   (decode.empty_threshold = {_tau:g}"
+            + ("; 0 == off, so predicted ~0 is the DECODE, not the fit)" if _tau <= 0
+               else ")")
         )
         if want_mbr:
             print(

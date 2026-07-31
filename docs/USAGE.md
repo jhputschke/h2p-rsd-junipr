@@ -271,6 +271,8 @@ closure + calibration on held-out jets:
   leading-emission Lund distance to true y :  identity(x) = 0.558   posterior-mode = 1.745   posterior-medoid = 1.602   (lower is better; medoid is the loss-matched estimator, mode is kept for continuity)
   multiplicity signed bias  <n - n_true>   :  identity(x) = -0.150   posterior-mean = +0.245   posterior-median = +0.180
   posterior 68% coverage of true leading cell = 0.42   (target ~0.68; <0.68 => over-confident)
+  empty parton tree (ALL 300 jets; the dlund_* rows above keep only the 251 with a truth leading emission):
+      truth = 0.163   predicted = 0.000   recall = 0.000   precision = nan   (decode.empty_threshold = 0; 0 == off, so predicted ~0 is the DECODE, not the fit)
   multiplicity signed bias stratified by true N (mean over jets in bin):
      true N   jets   post-mean  post-median
         1-3     29      +2.517       +2.379
@@ -304,6 +306,16 @@ per-jet point estimate q_phi(y | x) for one validation jet:
 > The cell-level row is also **quantisation-limited**: cells are ~0.6 wide and these distances
 > are ~0.6. `experiment.closure_continuous=true` repeats the comparison off the grid (below),
 > where the same checkpoint reads **0.905×**, 95% CI [0.882, 0.928].
+
+> **The empty-tree row reads `predicted = 0.000` by default, and that is the decode, not the
+> fit.** At parton level ~17% of jets have no primary splitting; no point estimator under the
+> default decode ever says so (the MAP is `argmax_n q(n|x)`, whose peak lands at 0 essentially
+> never; MBR's imbalance penalty makes an empty cloud near-maximal risk). The model does hold
+> the information — `q(0|x)` separates the classes at AUC 0.76. Turn the decision on with
+> `decode.empty_threshold`, fitting τ with `inference.length.empty_threshold_for_rate` on
+> held-out jets; see [CONFIGURATION §7](CONFIGURATION.md). Note this row is computed over
+> **every** jet, while the `dlund_*` row above keeps only those with a truth leading emission
+> — the two denominators are printed so they cannot be confused.
 
 > **MAP multiplicity floor.** The MAP is the *joint mode* `argmax_y q_φ(y|x)`; for a
 > discrete autoregressive posterior it is length-biased and, un-floored, collapses to

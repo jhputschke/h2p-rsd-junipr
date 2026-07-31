@@ -1,6 +1,17 @@
 # PLAN — the empty parton tree is a valid answer, and no point estimator can give it
 
-Status: proposed (not yet implemented). At parton level **17.2%** of jets in
+Status: **the gate is implemented; the recalibration work item is not.** `decode.empty_threshold`
+(default `0.0` = off), `inference.length.empty_gate` / `empty_threshold_for_rate`, the stage
+in `models.base.map_or_mbr`, `run_closure`'s `p_empty_*` / `recall_empty` /
+`precision_empty` keys, and §5a's gated row all landed; `tests/test_empty_tree_gate.py`
+pins them. Measured on the walkthrough `ar_junipr_v3`, fitting τ on one half of the val
+split and scoring on the other: `q(0\|x)` AUC **0.760**, under-confident **1.90×**,
+τ = 0.166 (83.7th pct), held-out predicted rate **0.172** against truth 0.159, recall
+**0.36**, precision **0.33** — close to this plan's projections (τ = 0.1675, 81.8th pct,
+F1 ≈ 0.40). The separable second work item — a scalar temperature on the `n_head` logits —
+remains **not started**.
+
+At parton level **17.2%** of jets in
 `cpp/test_data/jets.root` have zero primary splittings surviving grooming, so the empty
 tree is the correct target for roughly one jet in six. Every point estimator in the tree
 returns it for ~0% of jets, for three unrelated reasons, none of which is a coding error.

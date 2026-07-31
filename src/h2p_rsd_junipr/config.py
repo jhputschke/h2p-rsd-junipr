@@ -198,6 +198,16 @@ class DecodeConfig:
     length_floor_quantile: float = 0.0 # per-jet MAP floor from the learned P(n|x): the
     #                                    effective floor is max(min_emissions, Q_alpha(P(n|x))).
     #                                    0.0 == off (short-circuits; merged behavior unchanged)
+    empty_threshold: float = 0.0       # 0.0 == off. Decide the EMPTY tree when q(N=0|x) >=
+    #                                    this, BEFORE any shape decode. The parton target
+    #                                    really is empty for ~17% of jets
+    #                                    (docs/PLAN_empty_parton_tree.md); min_emissions
+    #                                    cannot express that (it clamps the output length,
+    #                                    it does not choose emptiness) and MBR's imbalance
+    #                                    penalty prices it out. A ceiling where
+    #                                    length_floor_quantile is a floor. Fit with
+    #                                    inference.length.empty_threshold_for_rate and FREEZE:
+    #                                    it is a quantile, so it is sample-dependent.
     # --- MBR point estimator (docs/PLAN_MBR_PerturbativeLund.md). All default so
     #     point_estimator="map" reproduces today exactly and imports no OT backend.
     point_estimator: str = "map"        # map | mbr
@@ -436,6 +446,7 @@ _DECODE_DEFAULTS: dict = {
     "min_emissions": 1,
     "length_penalty": 0.0,
     "length_floor_quantile": 0.0,
+    "empty_threshold": 0.0,
     "point_estimator": "map",
     "mbr_backend": "pot",
     "mbr_n_candidates": 0,

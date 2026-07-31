@@ -649,6 +649,7 @@ The serving layer reads the checkpoint's decode config. Source:
 | `min_emissions` | `1` | MAP | **hard floor** on MAP length — the "mincut" (never the unphysical empty tree) |
 | `length_penalty` | `0.0` | MAP | GNMT `score/len**α` at final beam rank; counters the brevity bias; `0` = off |
 | `length_floor_quantile` | `0.0` | MAP | **learned per-jet floor** at the α-quantile of `P(n|x)`; `0` = off |
+| `empty_threshold` | `0.0` | point estimate | **emptiness ceiling**: answer the empty tree when `q(N=0\|x) >= τ`, before any shape decode; `0` = off |
 | `point_estimator` | `"map"` | point estimate | `map` (beam-search joint mode) or `mbr` (minimum-Bayes-risk tree; §10 MBR) |
 | `mbr_backend` | `"pot"` | MBR | OT backend: `pot` (default, self-contained) / `energyflow` (reference) / `surrogate` (fast χ²) |
 | `mbr_n_candidates` | `0` | MBR | `0` = every draw is a candidate; `k>0` = only the first `k` (asymmetric MBR, faster) |
@@ -665,6 +666,55 @@ The serving layer reads the checkpoint's decode config. Source:
 `min_emissions`, `length_penalty`, and `length_floor_quantile` are explained in depth in
 §10; `point_estimator` / `mbr_*` — the whole second point-estimate family — are covered in
 the §10 MBR subsection. All are inference-time only, so you can A/B them on a fixed checkpoint.
+
+### `empty_threshold` — the one decision the other knobs cannot express
+
+At parton level **~17% of jets have no primary splitting at all**: hadronisation
+manufactured every splitting you see at hadron level, and the correct answer is nothing.
+Under the default decode no point estimator ever says so, for two unrelated reasons — and
+neither is a fitting failure:
+
+- **MAP.** With a multiplicity head the estimate is `argmax_n q(n|x)`. A model can hold 16%
+  of its length mass at `n=0` and still never put its *peak* there, because that mass has to
+  beat `n=1` and `n=2` outright. **Lifting `min_emissions` to 0 changes nothing** — the clamp
+  was never the binding constraint.
+- **MBR.** Mode-free and floor-free, so it *could* return the empty tree, but the
+  perturbative-Lund EMD charges `mbr_R` for unmatched weight and an empty cloud is nothing
+  but unmatched weight. Its risk is near-maximal: not merely unlikely, close to the worst
+  answer available.
+
+`min_emissions` and `length_floor_quantile` clamp the output *length*; they cannot
+distinguish "this jet's structure is spurious" from "this jet is short". `empty_threshold`
+is the missing decision — a **ceiling** where `length_floor_quantile` is a floor, taken on
+the model's own belief before either shape decode runs
+([`models/base.py::map_or_mbr`](../src/h2p_rsd_junipr/models/base.py)).
+
+Fit it, never guess it:
+
+```python
+from h2p_rsd_junipr.inference.length import empty_threshold_for_rate
+tau = empty_threshold_for_rate(pmfs_heldout, rate=0.17)   # then freeze
+```
+
+**It thresholds the ranking, not the scale.** Measured on the walkthrough `ar_junipr_v3`:
+`q(0|x)` separates the classes at **AUC 0.76** while its mean is 0.085 against a true rate
+of 0.161 — the head is under-confident by **1.9×**. A quantile threshold is invariant to
+that monotone squash, which is why the gate works without recalibrating first. Note the
+existing suite does **not** flag the under-confidence: SBC ranks against the sampler's own
+draws, so a uniformly squashed `q(N|x)` passes.
+
+Held-out (fit on one half of the val split, scored on the other): predicted rate 0.172
+against a truth 0.159, **recall 0.36, precision 0.33**. The population becomes right and the
+per-jet call goes from impossible to a third correct — it is not a solved classification
+problem, so report both. τ is a *quantile*, hence sample-dependent: re-fit per pT window,
+and never carry one across a selection change.
+
+Two consequences worth internalising. The gate is **backend-independent** — it never touches
+the MBR risk, unlike the empty-tree column itself, which reads ~0.2% under `pot` and ~57%
+under `surrogate`. And it **changes what a point estimate can be**: downstream consumers
+that assume `multiplicity >= 1` must tolerate an empty `LundPointEstimate`
+(`leading_emission_cell` already returns `None`). Full analysis:
+[`PLAN_empty_parton_tree.md`](PLAN_empty_parton_tree.md).
 
 ### v3 semantics — which of these knobs are still live
 

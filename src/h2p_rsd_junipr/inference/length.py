@@ -1,4 +1,5 @@
-"""A learned per-jet lower bound on MAP multiplicity (quantile floor of P(n|x)).
+"""Per-jet length decisions read off the model's own P(n|x): a lower bound (the
+quantile floor) and an emptiness ceiling (the empty gate).
 
 The joint-argmax MAP is length-biased *low* even after the hard `min_emissions`
 floor. The model's own length distribution P(n|x) is its unbiased length belief, so
@@ -11,6 +12,14 @@ These helpers are deliberately kept out of the parity-critical `point_estimate.p
 the effective floor `max(min_emissions, quantile_floor(P(n|x)))` is passed straight
 into the unchanged `map_estimate` as `min_emissions=`, so `alpha=0.0` short-circuits
 before any new code path runs (structural parity preserved).
+
+`empty_gate` / `empty_threshold_for_rate` are the mirror image — a *ceiling* rather
+than a floor. The parton target really is the empty tree for ~17% of jets, and no
+point estimator under the default decode can say so: the MAP is `argmax_n q(n|x)`,
+whose peak lands at 0 essentially never, and MBR's imbalance penalty makes an empty
+cloud near-maximal risk. That is a property of the decision rule, not of the fit —
+the model separates the two classes at AUC 0.77. `models.base.map_or_mbr` consumes
+them, before any shape decode (docs/PLAN_empty_parton_tree.md).
 """
 
 from __future__ import annotations
@@ -29,6 +38,42 @@ def quantile_floor(pmf: np.ndarray, alpha: float) -> int:
     cdf = np.cumsum(pmf)
     n = int(np.searchsorted(cdf, alpha))
     return int(np.clip(n, 0, pmf.size - 1))
+
+
+def empty_gate(pmf, tau: float) -> bool:
+    """True when the model's own `P(N=0|x)` clears `tau` — decide the EMPTY tree.
+
+    `tau <= 0` is always False, so the default decode never enters this path. The
+    comparison is `>=` so a `tau` returned by `empty_threshold_for_rate` fires on the
+    jet that defined it."""
+    if tau <= 0.0:
+        return False
+    pmf = np.asarray(pmf, dtype=float)
+    return bool(pmf.size) and bool(pmf[0] >= tau)
+
+
+def empty_threshold_for_rate(pmfs, rate: float) -> float:
+    """The `tau` reproducing a target empty `rate` over `pmfs` (one per held-out jet).
+
+    Thresholds the RANKING of `q(0|x)`, so the head's miscalibrated *scale* (the ~2x
+    under-confidence in docs/PLAN_empty_parton_tree.md F5) does not move it — only the
+    ordering matters. Fit on held-out jets and FREEZE: this is a quantile, hence
+    sample-dependent, and a tau carried across a selection change silently mis-sets the
+    rate. Re-fit per pT window.
+
+    Ties are resolved in favour of firing, so the achieved rate is `rate` or slightly
+    above it — except for jets holding exactly zero mass at n=0, which can never be
+    called empty and so cap the achievable rate from below."""
+    q0 = np.array([float(p[0]) if len(p) else 0.0 for p in pmfs], dtype=float)
+    if q0.size == 0:
+        return float("inf")                       # nothing to fit on -> never fire
+    if rate <= 0.0:                               # above every jet's q0 -> never fire
+        return float(np.nextafter(float(q0.max()), np.inf))
+    k = min(max(int(round(float(rate) * q0.size)), 1), q0.size)
+    tau = float(np.sort(q0)[::-1][k - 1])
+    # tau <= 0 is `empty_gate`'s "off" sentinel, and a jet with q(0|x) == 0 must never be
+    # called empty anyway, so lift it just above zero rather than silently disabling.
+    return tau if tau > 0.0 else float(np.nextafter(0.0, 1.0))
 
 
 def learned_min_emissions(

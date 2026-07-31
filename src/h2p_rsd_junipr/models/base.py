@@ -169,7 +169,23 @@ class PosteriorModel(nn.Module, ABC):
         (default) -> ``map_estimate``; ``"mbr"`` -> minimum-Bayes-risk selection over
         posterior draws (`inference.mbr.mbr_select`, reusing ``draws`` when given).
         A thin convenience so all three families gain MBR with no per-family code;
-        the ``"map"`` branch imports no OT backend, preserving parity."""
+        the ``"map"`` branch imports no OT backend, preserving parity.
+
+        ``decode['empty_threshold']`` (default 0.0 == off) adds an emptiness decision
+        *before* either shape decode: when ``q(N=0|x) >= tau`` the answer is the empty
+        tree. The parton target genuinely is empty for ~17% of jets, and neither
+        estimator can say so — the MAP because ``argmax_n q(n|x)`` lands at 0 essentially
+        never however much mass sits there, MBR because the perturbative-Lund EMD's
+        imbalance term makes an empty cloud near-maximal risk
+        (docs/PLAN_empty_parton_tree.md). Living here rather than per family gives every
+        family the stage at once and keeps ``map_estimate`` a pure shape decode."""
+        tau = float(decode.get("empty_threshold", 0.0))
+        if tau > 0.0:  # local import: the default decode enters no new code path
+            from ..inference.length import empty_gate
+
+            pmf = self.length_pmf(xf, nx, mults=[len(d) for d in draws] if draws else None)
+            if empty_gate(pmf, tau):
+                return self.describe_cells(xf, nx, [])
         if str(decode.get("point_estimator", "map")) == "mbr":
             from ..inference.mbr import mbr_kwargs_from_decode, mbr_select
 
