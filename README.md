@@ -60,30 +60,58 @@ outputs stripped. The key list is duplicated in `setup_nbstripout.sh` and
 `.pre-commit-config.yaml`; change both together or the two strippers will undo
 each other.
 
-> **ARM64 (Dell GB10, Apple Silicon):** the `[energyflow]` extra pulls in
-> `wasserstein`, a C++ extension with no prebuilt ARM wheel, so pip compiles it
-> from source. Its headers declare `enum ... : char` members with value `-1`,
-> which is out of range because `char` is *unsigned* by default on ARM — the
-> build fails with `enumerator value '-1' is outside the range of underlying
-> type 'char'`. `wasserstein` also `#include`s `<omp.h>`, which Apple clang does not
-> ship, so the build additionally needs an OpenMP include/lib (conda's `llvm-openmp`,
-> already present in most envs; `conda install -c conda-forge llvm-openmp` otherwise).
-> Force a signed `char` **and** point the compiler at conda's OpenMP:
+> **`[energyflow]` under NumPy ≥ 2, and on ARM64 (Dell GB10, Apple Silicon):** the extra
+> pulls in `wasserstein`, a SWIG/C++ extension. Two *independent* things bite — a NumPy
+> ABI mismatch on every platform, and a compile failure specific to Linux ARM.
+>
+> **1. Every published `wasserstein` 1.1.0 binary is NumPy-1 ABI.** Its `pyproject.toml`
+> lists `oldest-supported-numpy` as a build requirement, so pip's build isolation compiles
+> against NumPy 1.26 headers regardless of what the target env holds — and the PyPI wheels
+> (`macosx_11_0_arm64` and `manylinux_x86_64` exist; `linux_aarch64` does not) were built
+> the same way. Under NumPy ≥ 2 the result is `A module that was compiled using NumPy 1.x
+> cannot be run in NumPy 2.x`. The package lazy-imports its extension, so `import
+> energyflow` *succeeds* and only the first `emd()` call fails — which makes
+> `tests/test_mbr.py` **skip** its energyflow cases (`energyflow solver unavailable`)
+> instead of failing. Fix: force a source build with build isolation off, so the compiler
+> sees the env's own NumPy 2 headers.
+>
+> **2. Linux ARM additionally fails to compile.** `wasserstein`'s headers declare
+> `enum ... : char` members with value `-1`, out of range because `char` is *unsigned* by
+> default on ARM: `enumerator value '-1' is outside the range of underlying type 'char'`.
+> Force a signed `char`.
+>
+> ```bash
+> # Linux aarch64 — GCC ships <omp.h>, and setup.py adds -fopenmp itself
+> CFLAGS="-fsigned-char" CXXFLAGS="-fsigned-char" \
+>   pip install --no-binary wasserstein --no-build-isolation --no-cache-dir \
+>     -e ".[energyflow]"
+> ```
+>
+> `--no-build-isolation` builds against the env's own `setuptools`, `wheel` and `numpy` —
+> install those first if absent. `--no-cache-dir` matters on any re-install: pip caches the
+> wheel it built under `~/.cache/pip/wheels/` and will silently reuse a stale NumPy-1 one.
+>
+> On Apple Silicon, also point the compiler at conda's OpenMP — Apple clang ships no
+> `<omp.h>`, which `wasserstein` `#include`s (`conda install -c conda-forge llvm-openmp`
+> if the env lacks it):
 >
 > ```bash
 > CFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
 > CXXFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
 > LDFLAGS="-L$CONDA_PREFIX/lib -lomp -Wl,-rpath,$CONDA_PREFIX/lib" \
->   pip install --no-binary wasserstein -e ".[energyflow]"
+>   pip install --no-binary wasserstein --no-build-isolation --no-cache-dir \
+>     -e ".[energyflow]"
 > ```
 >
-> Two *runtime* quirks on this platform are handled automatically by the package, so
-> no action is needed: PyTorch and `wasserstein` each link an OpenMP runtime (macOS
-> would abort with `OMP: Error #15`), so `inference.mbr` sets `KMP_DUPLICATE_LIB_OK=TRUE`
-> before first use; and `wasserstein`'s batched `emds` uses `np.array(..., copy=False)`,
-> which raises under NumPy ≥ 2, so the energyflow backend falls back to the (identical)
-> per-pair `emd`. The `[mbr]` default (`pot` backend) needs no compilation and none of
-> this applies. On x86-64 (`char` is signed there, OpenMP is found) no flags are needed.
+> Two *runtime* quirks are then handled automatically by the package, so no action is
+> needed: PyTorch and `wasserstein` each link an OpenMP runtime (macOS would abort with
+> `OMP: Error #15`), so `inference.mbr` sets `KMP_DUPLICATE_LIB_OK=TRUE` before first use;
+> and `wasserstein`'s batched `emds` uses `np.array(..., copy=False)`, which raises under
+> NumPy ≥ 2 — a break in its *Python* layer that rebuilding does not fix — so the
+> energyflow backend falls back to the (identical) per-pair `emd`. On x86-64 the compile
+> flags are unnecessary (`char` is signed, OpenMP is found) but the rebuild in (1) still
+> applies. The `[mbr]` default (`pot` backend) needs no compilation and none of this
+> applies.
 
 ## Quickstart
 
