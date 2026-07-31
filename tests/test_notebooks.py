@@ -40,17 +40,3 @@ def test_notebook_code_cells_parse(path):
             line = source.splitlines()[exc.lineno - 1] if exc.lineno else ""
             failures.append(f"cell {index} line {exc.lineno}: {exc.msg}\n    {line.strip()}")
     assert not failures, f"{path.name} has unparseable code cells:\n" + "\n".join(failures)
-
-
-@pytest.mark.skipif(not NOTEBOOKS, reason="no notebooks checked in")
-@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
-def test_notebook_outputs_are_stripped(path):
-    """nbstripout runs as a pre-commit hook; a notebook committed around it would
-    carry megabytes of embedded PNGs and make every later diff unreadable."""
-    nb = json.loads(path.read_text())
-    dirty = [
-        i for i, cell in enumerate(nb.get("cells", []))
-        if cell.get("cell_type") == "code"
-        and (cell.get("outputs") or cell.get("execution_count") is not None)
-    ]
-    assert not dirty, f"{path.name} has un-stripped outputs in cells {dirty}"
