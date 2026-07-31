@@ -359,6 +359,54 @@ def load_config(argv: list[str] | None = None) -> DictConfig:
     return cfg
 
 
+def explicit_group_keys(argv: list[str] | None, group: str) -> set[str]:
+    """Which `<group>` fields THIS invocation named explicitly.
+
+    `load_config` cannot answer that. It always returns a fully populated group, seeded
+    from `configs/config.yaml`'s defaults, so "the user asked for `beam_width=16`" and
+    "nobody said anything and the default is 8" come back identical. `eval` needs the
+    distinction because its baseline is the CHECKPOINT's snapshot, not the repo default:
+    a group nobody named must stay exactly as the checkpoint left it, or every eval would
+    silently re-decode a trained model with `configs/decode/default.yaml`.
+
+    Explicit means, in the same precedence order `load_config` merges them: every field of
+    the group file picked by `group=name` (or by `defaults.<group>` inside a `base=` file),
+    the keys of an inline `<group>:` block in that base file, and the dotted
+    `group.field=value` CLI tokens.
+
+    Only the NAMES are returned. Read the values off the composed config, so
+    interpolations (`mbr_lnkt_cut: ${geometry.ln_kt_range[0]}`) are already resolved —
+    a group file loaded on its own cannot resolve a cross-group reference."""
+    argv = list(argv or [])
+    base_path, rest = _pop_base(argv)
+    roots: tuple[Path, ...] = (CONFIGS,)
+    keys: set[str] = set()
+    selector: str | None = None
+
+    if base_path is not None and base_path.is_file():
+        base = OmegaConf.load(base_path)
+        roots = tuple(dict.fromkeys((base_path.parent, CONFIGS)))
+        sel = OmegaConf.select(base, f"defaults.{group}")
+        if sel is not None:
+            selector = str(sel)
+        block = OmegaConf.select(base, group)
+        if block is not None:
+            keys |= {str(k) for k in block.keys()}
+
+    for tok in rest:
+        if "=" not in tok:
+            continue
+        key, val = tok.split("=", 1)
+        if key == group:
+            selector = val                       # a later selector wins, as in load_config
+        elif key.startswith(f"{group}."):
+            keys.add(key[len(group) + 1:].split(".", 1)[0])
+
+    if selector is not None:
+        keys |= {str(k) for k in OmegaConf.load(_group_file(roots, group, selector)).keys()}
+    return keys
+
+
 def config_hash(cfg: DictConfig) -> str:
     """Stable hash of the resolved config — used for run-dir naming and the
     checkpoint config_hash guard (§6)."""

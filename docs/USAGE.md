@@ -261,7 +261,9 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt
 ```
 
 This rebuilds the model from the checkpoint, regenerates the **same held-out
-val set** (from the snapshotted config), and runs the §8 validation suite:
+val set** (from the snapshotted config), and runs the §8 validation suite. The
+checkpoint is the default for everything — architecture, geometry, sample, decode — and
+[two groups can be lifted over it](#evaluating-on-a-different-sample-a-held-out-test-set):
 
 ```
 closure + calibration on held-out jets:
@@ -340,6 +342,57 @@ What the metrics mean:
 
 Tune cost vs. precision with `experiment.closure_jets` and
 `experiment.n_closure_samples`.
+
+### Evaluating on a different sample (a held-out test set)
+
+The datamodule only ever produces train/val, so by default `eval` reports on the very
+jets model selection used. Name a different sample and it becomes the eval set:
+
+```bash
+# the checkpoint stays the model; only WHICH jets it is reported on changes
+h2p-rsd-junipr eval runs/<id>/best.ckpt data.source=rntuple data.path=jets_test.root
+
+# one slice of the spectrum (half-open, pt_min <= jet_pt < pt_max)
+h2p-rsd-junipr eval runs/<id>/best.ckpt data.path=jets_test.root \
+    data.pt_var=jet_pt data.pt_min=100 data.pt_max=150
+```
+
+```
+[eval] data lifted over the checkpoint snapshot: path: 'jets.root' -> 'jets_test.root'
+[eval] 54007 eval jets, every jet (explicitly named eval sample), from rntuple:jets_test.root (fingerprint=899397aac7bb)
+```
+
+An explicitly named sample is treated as a **test set and evaluated whole**, not re-split
+90/10 — keeping the split would silently report on a tenth of the file, and on a
+*different* tenth as soon as its length changed. Plain `eval <ckpt>` is unchanged: the
+snapshot's own val split. Either way the jet count and the data fingerprint are printed
+and recorded in `eval_metrics.json`, so a metrics file always names the jets it describes.
+
+`geometry` and `encoder` are deliberately **not** liftable — they set tensor widths and
+the model contract, so changing them describes a different model rather than a re-run.
+A checkpoint trained with `encoder.aux_features` still requires the aux source columns in
+whatever file you point it at; the reader's NaN/`-1` sentinels make that fail loudly at
+dataset build time rather than silently conditioning on garbage.
+
+### Configuring decode from a preset instead of a CLI chain
+
+`decode` is liftable the same way, through the full composition surface — `decode=<name>`,
+a `base=` preset's `defaults:`/inline block, or dotted tokens, in `load_config`'s
+precedence order with the CLI last:
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt base=presets/mbr_study.yaml   # the preset's decode
+h2p-rsd-junipr eval runs/<id>/best.ckpt base=presets/mbr_study.yaml \
+    decode.min_emissions=0                                            # ...CLI still wins
+```
+
+```
+[eval] decode lifted over the checkpoint snapshot: mbr_lnkt_cut: None -> 0.0, mbr_resample_to_qn: False -> True, point_estimator: 'map' -> 'mbr'
+```
+
+Only the fields the preset actually names move; everything else stays as the checkpoint
+left it. `experiment` is different again — it is the eval suite's own configuration and
+always comes from the CLI/preset, never from the checkpoint.
 
 ### The full calibration suite (per-coordinate PITs, region strata, TARP)
 

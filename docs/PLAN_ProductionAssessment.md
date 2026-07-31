@@ -17,7 +17,11 @@ question well. What is missing is the protocol that spans them.
 Everything below is expressed as `base=` presets so a number can be re-derived from a filename
 rather than from a shell history.
 
-**Status: not started.** This document is the protocol; no presets, driver or runs exist yet.
+**Status: enabling fixes landed; the assessment itself is not started.** §8 G1 and G2 are
+implemented ([`cli.py`](../src/h2p_rsd_junipr/cli.py), `config.explicit_group_keys`,
+[`tests/test_eval_overrides.py`](../tests/test_eval_overrides.py)), so the held-out test set,
+the pT-window axis and preset-driven decode cells are all runnable. No presets, driver or runs
+exist yet.
 
 ---
 
@@ -45,21 +49,20 @@ protocol spends its breadth there rather than on more arms.
 Each of these silently changes what a reported number means, so the protocol is fixed in advance
 rather than discovered mid-run.
 
-1. **`eval` with a checkpoint rebuilds the checkpoint's own val split and ignores CLI `data.*`.**
-   [`cli.py`](../src/h2p_rsd_junipr/cli.py) builds `dm2` from the snapshotted `cfg2` and discards
-   the `dm` built from the CLI config a few lines above. There is today no way to point `eval` at
-   a held-out file, and the sample is read **twice**. This blocks both the test set (§3) and the
-   pT-window axis (§7.2). Fix G1.
-2. **`eval` ignores preset `decode:` blocks and `decode=<group>` selectors.** Only dotted
-   `decode.*` CLI tokens are lifted over the checkpoint snapshot. The decode ladder is therefore
-   written as literal `decode.<field>=` tokens; a decode preset used at eval would be silently
-   inert.
-3. **`experiment.*` is the opposite** — it comes from the CLI-composed config, so an experiment
-   preset *does* bind at eval. This asymmetry is the reason §6 is a token table and §5 has an
-   `experiment/` preset directory.
+1. ~~**`eval` with a checkpoint rebuilds the checkpoint's own val split and ignores CLI
+   `data.*`.**~~ **Fixed (G1).** `eval` now lifts explicitly named `data` fields over the
+   snapshot, treats a named sample as a test set (every jet, not a re-split), reads it once, and
+   records the fingerprint / jet count / overrides in `eval_metrics.json`.
+2. ~~**`eval` ignores preset `decode:` blocks and `decode=<group>` selectors.**~~ **Fixed (G2).**
+   `decode` binds through the full composition surface at eval, CLI last. The §6 ladder can be
+   run either as literal tokens or as preset files.
+3. **`experiment.*` comes from the CLI-composed config, never the checkpoint** — unchanged, and
+   now the deliberate third case rather than an accident: `data` and `decode` default to the
+   checkpoint and are liftable, `experiment` is the eval suite's own configuration.
+   `geometry` / `encoder` are pinned to the checkpoint and are **not** liftable.
 4. **There is no test split.** [`LundDataModule`](../src/h2p_rsd_junipr/data/datamodule.py)
    produces train/val only. An independent `jets_test.root` plus G1 is the entire mechanism; no
-   schema change is needed.
+   schema change was needed.
 
 Machinery this protocol reuses rather than reinvents:
 [`run_closure`](../src/h2p_rsd_junipr/eval/closure.py),
@@ -166,7 +169,7 @@ presets/production/
   experiment/e0_smoke.yaml     #  25 x  20, WP2 switches off
   experiment/e1_standard.yaml  # 300 x 200, + pit_coords + stratify_regions
   experiment/e2_full.yaml      # 300 x 500, + tarp
-  decode/d0..d6.yaml           # DOCUMENTATION of the §6 CLI tokens — inert at eval, see §2.2
+  decode/d0..d6.yaml           # the §6 cells; selectable at eval as `decode=d4_mbr` (G2)
   t0_smoke.yaml  t1_v1_cells.yaml  t2_v2_reference.yaml
   t3_v3_multhead.yaml  t4_v4_xattn.yaml
   f_cinn.yaml  f_cfm.yaml  f_diffusion.yaml
@@ -287,8 +290,10 @@ Decode is **inference-time only**, so every cell runs on the already-trained arm
 7 trainings, not 7 × |grid|. This is the `ab_v2_v3.py` insight, and it is what makes a single-seed
 budget buy a wide decode study.
 
-Per §2.2 these are **literal CLI tokens**; the `presets/production/decode/*.yaml` files document
-them but do not bind at eval.
+Since G2, a cell can be given either way — as the literal tokens below, or as the matching
+`presets/production/decode/*.yaml` selected with `decode=d4_mbr` (or through a `base=` preset).
+The tokens are what the driver passes; the files are what a human reproduces a row with. Either
+way only the named fields move and the rest stay as the checkpoint left them.
 
 | Cell | Tokens appended to `h2p-rsd-junipr eval <ckpt>` | What it isolates |
 |---|---|---|
@@ -353,17 +358,22 @@ Every arm at E1; the arms that clear §9 also at E2. Headline numbers are comput
 
 ## 8. Fixes the protocol needs
 
-- **G1 — `eval` honours dotted `data.*` over the checkpoint config.** Mirror the existing
-  `cli_decode` idiom in [`cli.py`](../src/h2p_rsd_junipr/cli.py): collect `data.*` tokens, merge
-  into `cfg2.data` before `LundDataModule(cfg2, …)`, print the resulting fingerprint and jet
-  count, and record both in `eval_metrics.json` so a metrics file always names the jets it
-  describes. ~8 lines. **Restricted to `data.*` on purpose** — `geometry` and
-  `encoder.aux_features` change tensor widths and must keep coming from the checkpoint. The same
-  edit should drop the discarded first datamodule load, which currently reads the sample twice.
-  *Without G1 there is no held-out test set and no §7.2 axis.*
-- **G2 — decode presets are inert at eval.** Either document the constraint (this plan's default,
-  §6) or extend the same filter to accept a `decode=<name>` selector by loading the group file.
-  Stated as a choice rather than left implicit.
+- **G1 — `eval` honours an explicitly named `data` group over the checkpoint config. ✅ landed.**
+  `config.explicit_group_keys` answers "did this invocation *name* the field?", which
+  `load_config` cannot: it always returns a fully populated group seeded from
+  `configs/config.yaml`, so an unrequested group is indistinguishable from a requested default.
+  `cli._lift_onto_snapshot` copies only the named fields onto the snapshot, and an explicitly
+  named sample is evaluated **whole** — a test set, not a corpus to re-split. The fingerprint,
+  jet count, scope and the overrides themselves land in `eval_metrics.json`. The discarded first
+  datamodule load is gone, so the sample is read once.
+  **Restricted to `data` and `decode` on purpose** — `geometry` and `encoder` change tensor
+  widths and the model contract and stay pinned to the checkpoint.
+- **G2 — decode binds from a preset at eval. ✅ landed.** The same mechanism, so `decode=<name>`,
+  a `base=` preset's `defaults:`/inline block and dotted tokens all work, CLI last. The §6
+  ladder is runnable either way.
+- Both are covered by [`tests/test_eval_overrides.py`](../tests/test_eval_overrides.py),
+  including the negative case (a CLI `geometry.n_bins` must not reach the model) and the
+  precedence case (a dotted token outranks the preset that selected the group file).
 - **G3 — no runtime harness.** Nothing in `src/`, `scripts/` or `tests/` measures latency,
   throughput or memory. Out of scope by decision (§1) and recorded here so this assessment is not
   mistaken for a production-readiness sign-off. A later pass would cover: batched `log_prob`

@@ -625,8 +625,15 @@ run by resuming (start a fresh run instead). See [`USAGE.md` §3](USAGE.md#3-res
 ## 7. `decode` — inference / MAP / posterior knobs
 
 **These are inference-time only** — they never touch the trained likelihood, so you can
-A/B them on a fixed checkpoint. At `eval`, the checkpoint's snapshot decode is the default,
-but an explicit CLI `decode.*` override wins (e.g. `eval <ckpt> decode.length_floor_quantile=0.9`).
+A/B them on a fixed checkpoint. At `eval`, the checkpoint's snapshot decode is the default
+and anything this invocation names explicitly wins over it — `decode=<name>`, a `base=`
+preset's `defaults:`/inline block, or a dotted `decode.*` token, in the §0 precedence order
+with the CLI last (e.g. `eval <ckpt> decode.length_floor_quantile=0.9`). Only the fields
+actually named move; the rest stay as the checkpoint left them, and every move is printed
+and recorded in `eval_metrics.json`. The same applies to `data` — see
+[USAGE §4](USAGE.md#evaluating-on-a-different-sample-a-held-out-test-set) for evaluating a
+checkpoint on a held-out test file. `geometry` and `encoder` are **not** liftable this way:
+they set tensor widths and the model contract.
 The serving layer reads the checkpoint's decode config. Source:
 [`point_estimate.py`](../src/h2p_rsd_junipr/inference/point_estimate.py),
 [`sampling.py`](../src/h2p_rsd_junipr/inference/sampling.py),

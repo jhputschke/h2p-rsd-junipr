@@ -95,7 +95,85 @@ def cmd_train(argv) -> int:
     return 0
 
 
+def _lift_onto_snapshot(snapshot, cfg, argv, group: str) -> dict:
+    """Lift the `<group>` fields this invocation named explicitly (`explicit_group_keys`)
+    from the composed CLI config onto a checkpoint snapshot, in place.
+
+    Returns `{field: (old, new)}` for the ones that actually moved. Both the eval log and
+    `eval_metrics.json` report it: a metrics file that does not name the jets and the
+    decode it describes is not a record of anything.
+
+    Values come from `cfg` — already schema-validated and interpolation-resolved by
+    `load_config` — so the snapshot only ever receives well-typed data. `force_add`
+    because a snapshot predating a field has no key to update (the same tolerance
+    `decode_params` provides on the read side)."""
+    from .config import OmegaConf, explicit_group_keys
+
+    applied: dict = {}
+    for key in sorted(explicit_group_keys(argv, group)):
+        new = OmegaConf.select(cfg, f"{group}.{key}")
+        if OmegaConf.is_config(new):
+            new = OmegaConf.to_object(new)
+        old = OmegaConf.select(snapshot, f"{group}.{key}")
+        if OmegaConf.is_config(old):
+            old = OmegaConf.to_object(old)
+        if new == old:
+            continue
+        OmegaConf.update(snapshot, f"{group}.{key}", new, force_add=True)
+        applied[key] = (old, new)
+    return applied
+
+
+def _describe_data(cfg) -> str:
+    from .config import OmegaConf
+
+    d = cfg.data
+    source = str(OmegaConf.select(d, "source") or "synthetic")
+    if source == "rntuple":
+        return f"rntuple:{OmegaConf.select(d, 'path')}"
+    return f"synthetic(n_jets={OmegaConf.select(d, 'n_jets')}, seed={OmegaConf.select(d, 'seed')})"
+
+
+def _report_eval_inputs(cfg_eval, dm, overrides: dict, cfg_cli=None) -> None:
+    """Say which jets and which decode this eval is about, before it spends any time."""
+    from .config import OmegaConf
+
+    for group, applied in overrides.items():
+        if applied:
+            print(f"[eval] {group} lifted over the checkpoint snapshot: "
+                  + ", ".join(f"{k}: {o!r} -> {n!r}" for k, (o, n) in applied.items()))
+    scope = "every jet (explicitly named eval sample)" if overrides.get("data") else "val split"
+    print(f"[eval] {len(dm.val_jets)} eval jets, {scope}, from {_describe_data(cfg_eval)} "
+          f"(fingerprint={dm.fingerprint})")
+    if cfg_cli is None or not any(overrides.values()):
+        return
+    cli_geom = OmegaConf.to_container(cfg_cli.geometry, resolve=True)
+    ckpt_geom = OmegaConf.to_container(cfg_eval.geometry, resolve=True)
+    if cli_geom != ckpt_geom:
+        # e.g. presets/decode/mbr_study.yaml's `mbr_lnkt_cut: ${geometry.ln_kt_range[0]}`
+        print(f"[eval] NOTE: CLI geometry {cli_geom} differs from the checkpoint's {ckpt_geom}. "
+              "The checkpoint's is used for the model; a ${geometry...} interpolation inside a "
+              "lifted data/decode override resolved against the CLI one.")
+
+
 def cmd_eval(argv) -> int:
+    """Closure / calibration / point estimate on held-out jets.
+
+    With a checkpoint the snapshot is the baseline for everything — architecture,
+    geometry, sample, decode — and exactly two groups may be lifted over it, because both
+    are inference-time choices rather than properties of the trained model:
+
+      * `data`   — WHICH jets to report on. An explicitly named sample is treated as a
+                   test set and evaluated in full, not re-split 90/10.
+      * `decode` — HOW the posterior becomes a point estimate (MAP floors, MBR, beam).
+
+    `geometry` and `encoder` are deliberately NOT liftable: they set tensor widths and the
+    model contract, so changing them describes a different model, not a re-run. `experiment`
+    is the eval suite's own configuration and always comes from the CLI/preset.
+
+    Each liftable group accepts the full composition surface — `group=name`, a `base=`
+    preset's `defaults:`/inline block, and dotted `group.field=value` — in `load_config`'s
+    precedence order, with the CLI last."""
     from .config import OmegaConf, decode_params, experiment_params
     from .eval.calibration import run_calibration
     from .eval.closure import print_point_estimate, run_closure
@@ -103,53 +181,73 @@ def cmd_eval(argv) -> int:
     from .inference.mbr import mbr_kwargs_from_decode
     from .models.base import build_model
     from .train.checkpoint import load_for_inference
+    from .train.trainer import seed_everything, select_device
 
     # first token may be a checkpoint path
     ckpt = None
     if argv and "=" not in argv[0]:
         ckpt, argv = argv[0], argv[1:]
-    cfg = load_config(argv)
-    device, geometry, dm = _setup(cfg)
-    _, val_ds = dm.datasets()
+    cfg = load_config(argv)          # schema-validates every token before anything is loaded
+    seed_everything(cfg.trainer.seed, cfg.trainer.deterministic)
+    device = select_device()
 
     if ckpt:
         info = load_for_inference(ckpt, map_location=device)
-        cfg2 = OmegaConf.create(info["config"])
-        geometry = Geometry.from_config(cfg2.geometry)
-        model = build_model(cfg2, geometry).to(device)
+        cfg_eval = OmegaConf.create(info["config"])
+        overrides = {g: _lift_onto_snapshot(cfg_eval, cfg, argv, g) for g in ("data", "decode")}
+        geometry = Geometry.from_config(cfg_eval.geometry)
+        model = build_model(cfg_eval, geometry).to(device)
         model.load_state_dict(info["model_state"])
-        dm2 = LundDataModule(cfg2, geometry).setup()
-        _, val_ds = dm2.datasets()
-        dm_jets = dm2.val_jets
+        # ONE load: the sample follows the (possibly lifted) snapshot, so there is no
+        # CLI-config datamodule to build and throw away.
+        dm = LundDataModule(cfg_eval, geometry).setup()
+        if overrides["data"]:
+            # An explicitly named eval sample is a TEST set, not a training corpus: report
+            # on every jet in it. Keeping the 90/10 split would silently evaluate a tenth of
+            # the file — and a *different* tenth as soon as its length changed.
+            dm.train_jets, dm.val_jets = [], dm.jets
         # non-fatal here: the model is already trained, so report rather than refuse
-        check_multiplicity_support(dm2.jets, cfg2, strict=False)
-        decode = decode_params(cfg2)  # follow the checkpoint's decode config (tolerant of old snapshots)
-        # ...but an explicit CLI `decode.*` override still wins over the snapshot (decode is
-        # inference-time tuning, e.g. an A/B on decode.length_floor_quantile, or selecting the
-        # MBR estimator with decode.point_estimator=mbr decode.mbr_backend=pot|energyflow).
-        # Tokens were already schema-validated by load_config(argv) above, so they are safe.
-        cli_decode = [t for t in argv if t.startswith("decode.") and "=" in t]
-        if cli_decode:
-            ov = OmegaConf.to_container(OmegaConf.from_dotlist(cli_decode).decode, resolve=True)
-            decode.update(ov)
+        check_multiplicity_support(dm.jets, cfg_eval, strict=False)
     else:
         from .train.trainer import build_components
+        cfg_eval, overrides = cfg, {"data": {}, "decode": {}}
+        geometry = Geometry.from_config(cfg.geometry)
+        dm = LundDataModule(cfg, geometry).setup()
         model, _, _ = build_components(cfg, geometry, device)
-        dm_jets = dm.val_jets
-        decode = decode_params(cfg)
         print("[eval] no checkpoint given; evaluating an untrained model (smoke).")
+
+    _report_eval_inputs(cfg_eval, dm, overrides, cfg_cli=cfg if ckpt else None)
+    _, val_ds = dm.datasets()
+    dm_jets = dm.val_jets
+    decode = decode_params(cfg_eval)  # tolerant of pre-decode-field checkpoint snapshots
 
     model.eval()
     if not getattr(model, "exact_likelihood", True):
         print(
-            f"[eval] WARNING: model family {cfg.model.name!r} sets exact_likelihood=False — "
+            f"[eval] WARNING: model family {cfg_eval.model.name!r} sets exact_likelihood=False — "
             "its `log_prob` is a training surrogate, not a normalized density. Reported "
             "NLLs and log-ratios are NOT comparable across families (use model=cfm for the "
             "exact-likelihood continuous-time family)."
         )
-    exp = experiment_params(cfg)  # tolerant of pre-WP2 config snapshots
-    metrics = {"model": str(cfg.model.name), "encoder": str(cfg.encoder.name),
-               "checkpoint": str(ckpt) if ckpt else None}
+    exp = experiment_params(cfg)  # eval-suite config, always from the CLI/preset
+    # The family reported is the one that was LOADED, not the one the CLI would have built:
+    # `eval <cinn ckpt>` with no `model=` token composes the repo default, and a metrics file
+    # naming the wrong family is worse than none.
+    metrics = {
+        "model": str(cfg_eval.model.name), "encoder": str(cfg_eval.encoder.name),
+        "checkpoint": str(ckpt) if ckpt else None,
+        "data": {
+            "source": str(OmegaConf.select(cfg_eval, "data.source")),
+            "path": str(OmegaConf.select(cfg_eval, "data.path")),
+            "fingerprint": dm.fingerprint,
+            "n_eval_jets": len(dm_jets),
+            "scope": "all" if overrides["data"] else "val_split",
+            "overrides": {k: n for k, (_o, n) in overrides["data"].items()},
+        },
+        "decode": dict(decode),
+        "decode_overrides": {k: n for k, (_o, n) in overrides["decode"].items()},
+        "experiment": dict(exp),
+    }
     metrics["closure"] = run_closure(
         model, val_ds, dm_jets, geometry, device,
         K=exp["n_closure_samples"], n_closure=exp["closure_jets"], decode=decode,
