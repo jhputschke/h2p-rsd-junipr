@@ -230,7 +230,17 @@ class ARJunipr(PosteriorModel):
         return ll
 
     # -- likelihood ----------------------------------------------------------
-    def per_jet_nll(self, batch) -> torch.Tensor:
+    def nll_terms(self, batch) -> dict[str, torch.Tensor]:
+        """The three additive log-likelihood terms, per jet, before they are summed.
+
+        `per_jet_nll` is `-(length_ll + split_ll + coord_ll)`; this returns the parts, so
+        a report can say WHICH term moved. That distinction is not cosmetic when the
+        geometry changes: the total with `continuous_coords=True` is a density on the
+        (ln 1/DeltaR, ln kt) plane and is commensurable across `n_bins`, but `split_ll`
+        alone is a probability over cells and shifts by `2*ln(n_bins_new/n_bins_old)` per
+        emission for free (docs/PLAN_prod_test_v0.md check 1). Also returns `n_emissions`,
+        since two of the three terms are per-emission and only comparable divided by it.
+        """
         xf, nx = batch["xf"], batch["nx"]
         yc, ny = batch["yc"], batch["ny"]
         yraw = batch["yraw"]
@@ -278,7 +288,12 @@ class ARJunipr(PosteriorModel):
                 )
                 coord_ll = (coord_per * split_mask).sum(1)
 
-        return -(length_ll + split_ll + coord_ll)
+        return {"length_ll": length_ll, "split_ll": split_ll, "coord_ll": coord_ll,
+                "n_emissions": ny.to(length_ll.dtype)}
+
+    def per_jet_nll(self, batch) -> torch.Tensor:
+        t = self.nll_terms(batch)
+        return -(t["length_ll"] + t["split_ll"] + t["coord_ll"])
 
     def log_prob(self, batch) -> torch.Tensor:
         return -self.per_jet_nll(batch)
