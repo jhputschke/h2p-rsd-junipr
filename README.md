@@ -104,14 +104,35 @@ each other.
 > ```
 >
 > Two *runtime* quirks are then handled automatically by the package, so no action is
-> needed: PyTorch and `wasserstein` each link an OpenMP runtime (macOS would abort with
-> `OMP: Error #15`), so `inference.mbr` sets `KMP_DUPLICATE_LIB_OK=TRUE` before first use;
-> and `wasserstein`'s batched `emds` uses `np.array(..., copy=False)`, which raises under
-> NumPy ≥ 2 — a break in its *Python* layer that rebuilding does not fix — so the
-> energyflow backend falls back to the (identical) per-pair `emd`. On x86-64 the compile
-> flags are unnecessary (`char` is signed, OpenMP is found) but the rebuild in (1) still
-> applies. The `[mbr]` default (`pot` backend) needs no compilation and none of this
-> applies.
+> needed. PyTorch and `wasserstein` each link an OpenMP runtime (macOS would abort with
+> `OMP: Error #15`), so `inference.mbr` sets `KMP_DUPLICATE_LIB_OK=TRUE` before first use.
+> And `wasserstein`'s batched `emds` uses `np.array(..., copy=False)` on a *strided column
+> slice*, which raises under NumPy ≥ 2 (`Unable to avoid copy`) — a break in its *Python*
+> layer that rebuilding does not fix. `_matrix_ef` retries that one call with NumPy-1 copy
+> semantics restored in `wasserstein.wasserstein`'s namespace alone
+> (`_wasserstein_numpy2_compat`), which is what keeps the backend multi-core.
+>
+> **This matters more than it looks.** `emds` is the *only* parallel path —
+> `wasserstein.PairwiseEMD` fans the pairs out over OpenMP threads. The per-pair `emd`
+> fallback is single-threaded, so losing `emds` costs a factor of the core count for
+> bit-identical numbers. Measured on the GB10 (20 cores, 200×200 clouds of 3–20 points):
+>
+> | path | µs/pair |
+> |---|---|
+> | `energyflow`, batched `emds` (all cores) | **2.3** |
+> | `energyflow`, per-pair `emd` fallback (1 core) | 34.9 |
+> | `pot` default backend (1 core) | 49.0 |
+>
+> If the fallback ever engages it now emits a `RuntimeWarning` rather than silently
+> costing ~15×. Note that energyflow's *other* batched entry point, `emds_pot`, is dead
+> against POT ≥ 0.9.5 for an unrelated reason — a bare `except:` at `energyflow/emd.py:59`
+> swallows the failed `from ot.lp import emd_c` (POT moved it to `ot.lp.emd_wrap`) and
+> leaves `_distance_wrap` unbound, surfacing as a `NameError` only when called. `mbr.py`
+> does not use that path.
+>
+> On x86-64 the compile flags are unnecessary (`char` is signed, OpenMP is found) but the
+> rebuild in (1) still applies. The `[mbr]` default (`pot` backend) needs no compilation
+> and none of this applies.
 
 ## Quickstart
 

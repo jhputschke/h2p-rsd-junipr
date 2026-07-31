@@ -12,6 +12,7 @@ The optional backends are guarded: `pot` needs POT, `energyflow` needs a working
 from __future__ import annotations
 
 import importlib.util
+import warnings
 
 import numpy as np
 import pytest
@@ -151,6 +152,35 @@ def test_energyflow_emds_matches_looped_emd():
     for i, ca in enumerate(cands):
         for j, cb in enumerate(supp):
             assert D[i, j] == pytest.approx(mbr.lund_emd(ca, cb, backend="energyflow"), rel=1e-6)
+
+
+@pytest.mark.skipif(not EF_OK, reason="energyflow solver unavailable")
+def test_energyflow_matrix_uses_the_batched_path():
+    """`emds` (OpenMP over all cores) is the only parallel path; the per-pair fallback
+    is single-threaded and ~15x slower for identical numbers. Guard that the NumPy-2
+    copy-semantics retry keeps us on it, so the cost cannot regress silently."""
+    cands = [_cloud(c, lnkt_cut=0.0) for c in ([12, 34], [5, 9, 27])]
+    supp = [_cloud(c, lnkt_cut=0.0) for c in ([12, 30], [5, 9])]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mbr.lund_emd_matrix(cands, supp, backend="energyflow")
+    fallback = [w for w in caught if issubclass(w.category, RuntimeWarning)
+                and "per-pair" in str(w.message)]
+    assert not fallback, f"fell back to the serial per-pair emd: {fallback[0].message}"
+
+
+@pytest.mark.skipif(not EF_OK, reason="energyflow solver unavailable")
+def test_wasserstein_numpy2_compat_restores_the_module_namespace():
+    """The shim patches `wasserstein.wasserstein`'s `np` global, not the real numpy,
+    and must put it back even when the wrapped call raises."""
+    ww = pytest.importorskip("wasserstein.wasserstein")
+    before = ww.np
+    with pytest.raises(ZeroDivisionError):
+        with mbr._wasserstein_numpy2_compat() as patched:
+            assert patched and ww.np is not before
+            assert ww.np.ndarray is np.ndarray          # forwards everything else
+            1 / 0
+    assert ww.np is before
 
 
 # --- the estimator: headline property -------------------------------------------

@@ -35,8 +35,10 @@ neither and parity stays dependency-free.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
+import warnings
 
 import numpy as np
 
@@ -190,6 +192,61 @@ def _import_ef():
         ) from e
 
 
+class _NumpyCopyShim:
+    """Proxy for the ``numpy`` module that restores NumPy-1 ``copy=False`` semantics.
+
+    NumPy 1 read ``copy=False`` as "copy only if you must"; NumPy 2 reads it as
+    "never copy, raise if you must" and spells the old meaning ``copy=None``.
+    Everything but ``array`` forwards untouched."""
+
+    def __init__(self, np_mod):
+        self._np = np_mod
+
+    def __getattr__(self, name):
+        return getattr(self._np, name)
+
+    def array(self, obj, *args, **kwargs):
+        if kwargs.get("copy", True) is False:
+            kwargs["copy"] = None
+        return self._np.array(obj, *args, **kwargs)
+
+
+@contextlib.contextmanager
+def _wasserstein_numpy2_compat():
+    """Swap `wasserstein.wasserstein`'s module-global ``np`` for the shim above.
+
+    `wasserstein` 1.1.0's `_store_events` does
+    ``np.array(event[:, 0], order='C', copy=False)``; a column slice is strided, so
+    ``order='C'`` requires a copy and NumPy >= 2 raises rather than copying. That kills
+    the *only* multi-core path (`emds` -> `PairwiseEMD`, OpenMP over all pairs) and
+    drops us to the per-pair `emd` on one core — measured ~16x on a 20-core host, for
+    bit-identical numbers. It is a break in wasserstein's *Python* layer, so rebuilding
+    the C++ extension does not fix it.
+
+    Patching that one module's namespace (not the global `numpy`) keeps the blast
+    radius to the batched call. Yields False when `wasserstein` is not importable."""
+    try:
+        import wasserstein.wasserstein as _ww
+    except ImportError:  # pragma: no cover - energyflow imports wasserstein itself
+        yield False
+        return
+    original = _ww.np
+    _ww.np = _NumpyCopyShim(original)
+    try:
+        yield True
+    finally:
+        _ww.np = original
+
+
+def _emds_block(ef, eventsC, eventsS, *, R, beta, norm, gdim, periodic_phi, shape):
+    """One batched, OpenMP-parallel ``emds`` call over the non-empty sub-block."""
+    return np.asarray(
+        ef.emd.emds(eventsC, eventsS, R=R, beta=beta, norm=norm,
+                    gdim=gdim, periodic_phi=periodic_phi),
+        dtype=float,
+    ).reshape(shape)
+
+
 def _emd_ef(pa, wa, pb, wb, *, R, beta, norm, periodic_phi) -> float:
     ef = _import_ef()
     if pa.shape[0] == 0 or pb.shape[0] == 0:
@@ -260,19 +317,29 @@ def _matrix_ef(clouds_C, clouds_S, *, R, beta, norm, periodic_phi) -> np.ndarray
     if nzC and nzS:
         eventsC = [cloud_to_event(*clouds_C[i]) for i in nzC]
         eventsS = [cloud_to_event(*clouds_S[j]) for j in nzS]
-        try:  # one batched, multiprocessed call for the whole non-empty block
-            sub = np.asarray(
-                ef.emd.emds(eventsC, eventsS, R=R, beta=beta, norm=norm,
-                            gdim=g, periodic_phi=periodic_phi),
-                dtype=float,
-            ).reshape(len(nzC), len(nzS))
+        kw = dict(R=R, beta=beta, norm=norm, gdim=g, periodic_phi=periodic_phi,
+                  shape=(len(nzC), len(nzS)))
+        try:  # one batched, OpenMP-parallel call for the whole non-empty block
+            sub = _emds_block(ef, eventsC, eventsS, **kw)
         except (ValueError, TypeError):
-            # wasserstein's batched `_store_events` uses `np.array(..., copy=False)`,
-            # which raises under numpy>=2 ("Unable to avoid copy"). Fall back to the
-            # per-pair `emd` (unaffected, identical result), so the backend still works.
-            sub = np.array([[float(ef.emd.emd(ea, eb, R=R, beta=beta, norm=norm,
-                                              gdim=g, periodic_phi=periodic_phi))
-                             for eb in eventsS] for ea in eventsC])
+            try:  # same call, with wasserstein's NumPy-1 copy semantics restored
+                with _wasserstein_numpy2_compat() as patched:
+                    if not patched:
+                        raise
+                    sub = _emds_block(ef, eventsC, eventsS, **kw)
+            except (ValueError, TypeError):
+                # Batched path unavailable for some other reason. The per-pair `emd`
+                # is unaffected and gives identical numbers, but runs on one core --
+                # loud, because it is the difference between seconds and minutes.
+                warnings.warn(
+                    "energyflow's batched `emds` is unavailable; falling back to the "
+                    "per-pair `emd`. Results are identical but single-threaded (~16x "
+                    "slower on a 20-core host). See the [energyflow] notes in README.md.",
+                    RuntimeWarning, stacklevel=2,
+                )
+                sub = np.array([[float(ef.emd.emd(ea, eb, R=R, beta=beta, norm=norm,
+                                                  gdim=g, periodic_phi=periodic_phi))
+                                 for eb in eventsS] for ea in eventsC])
         for a, i in enumerate(nzC):
             for b, j in enumerate(nzS):
                 D[i, j] = sub[a, b]
