@@ -1,16 +1,24 @@
 # Production test v1 — results
 
-**Status: in progress.** The grid specified by
-[`PLAN_prod_test_v1.md`](PLAN_prod_test_v1.md) §8 is running; this document holds the
-results as they land. The plan holds the design and the rationale, and every pass
+**Status: complete.** All 11 arms of the [`PLAN_prod_test_v1.md`](PLAN_prod_test_v1.md) §8
+grid trained and evaluated. The plan holds the design and the rationale, and every pass
 criterion in it was fixed before the grid started — read the plan for *why* each gate
 exists. Companion to [`PROD_TEST_v0_RESULTS.md`](PROD_TEST_v0_RESULTS.md).
 
-Regenerate the gate tables with:
+**Verdict in one line:** the arm passes acceptance and support, the `ln z` support error is
+gone, and the run's main product is an *attribution* — the residual over-confidence is the
+multiplicity **factorization**, not the coordinate heads, the encoder, or the support
+(§7).
+
+Regenerate every table below from the artifacts:
 
 ```bash
-python scripts/prod_test_v1_gates.py --run-root runs/prod_test_v1
+python scripts/prod_test_v1_gates.py --run-root runs/prod_test_v1 \
+    --out docs/PROD_TEST_v1_TABLES.md
 ```
+
+[`PROD_TEST_v1_TABLES.md`](PROD_TEST_v1_TABLES.md) is that generated output, committed
+beside this document so the prose here can be checked against machine-produced numbers.
 
 | | |
 |---|---|
@@ -299,13 +307,21 @@ verdict below is unanimous across the three.
 | series | out of window | soft drop | `z > ½` | `k_t` floor | on the bound |
 |---|---:|---:|---:|---:|---:|
 | truth (control) | 0.00000% | 0.00000% | 0.00000% | 0.00000% | — |
-| `v1_legacy_lnz_s0` | 0.00000% | **0.83263%** | **3.94300%** | 0.00000% | — |
+| `v1_legacy_lnz_s0` | 0.00000% | **0.81225%** | **3.98002%** | 0.00000% | 0.0002% |
 | `v1_base` (3 seeds) | 0.00000% | **0.00000%** | **0.00000%** | 0.00000% | 0.012–0.030% |
+| every other physical arm (7) | 0.00000% | **0.00000%** | **0.00000%** | 0.00000% | 0.001–0.054% |
 
-The `legacy` arm reproduces the v0 checkpoint's rates to five significant figures — it is
-the same configuration on the same data with the same seed, so it should, and the fact
-that it does is what licenses reading the difference as attributable to `lnz_support`
-alone. Every violation is gone under the bounded head, and 0.012–0.030% of draws sit
+All eleven rows come from **one** `scripts/refresh_support_audit.py --force` pass, so no
+two of them can differ by which code path produced them.
+
+The `legacy` arm reproduces the v0 checkpoint — it is the same configuration on the same
+data with the same seed, so it should, and the fact that it does is what licenses reading
+the difference as attributable to `lnz_support` alone. Precisely: the **deterministic**
+quantities are identical (best val NLL/jet 4.0703, `ln z` PIT KS 0.0734, both
+teacher-forced), and the **sampled** ones agree within Monte-Carlo noise (soft drop 0.812%
+vs the v0 pass's 0.833%; `z > ½` 3.980% vs 3.943% — each about one standard error at 2 000
+jets). The support rates are re-sampled by the refresh, so bit-agreement there would not
+be expected and is not claimed. Every violation is gone under the bounded head, and 0.012–0.030% of draws sit
 *exactly on* a bound: that is the truncation doing its job, and it is reported rather than
 being allowed to look like a violation (see `eval.support.EDGE_TOL`).
 
@@ -533,7 +549,8 @@ Four things this run establishes that v0 could not:
 
 1. **WP-A works, completely, on the thing it was built for.** Every support violation is
    gone — 0.83% below soft drop and 3.94% above `z = ½` become 0.0000% — and the
-   `v1_legacy_lnz` arm reproduces the v0 rates to five significant figures, so the
+   `v1_legacy_lnz` arm reproduces the v0 checkpoint — identically on the deterministic
+   quantities, within Monte-Carlo noise on the sampled ones — so the
    difference is attributable to `lnz_support` and nothing else.
 2. **The `ln z` failure was two failures.** The support half is closed; the shape half
    (1.05–2.07× its critical value, concentrated in the quadrant holding 94% of emissions)
