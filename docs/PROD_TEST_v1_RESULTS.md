@@ -197,7 +197,53 @@ convention unchanged — and it is the right one here, because the aux A/B (`v1_
 measures initialisation and ordering variance, **not** split variance, and no claim below
 extends to the latter.
 
-*Table pending — filled by `scripts/prod_test_v1_gates.py` when the grid completes.*
+| arm | varies | seeds | best val NLL/jet | band |
+|---|---|---:|---:|---:|
+| `v1_base` | — (v4 + lundnet + aux(9) + physical `ln z`) | 3 | **3.9169** | [3.9036, 3.9237] |
+| `v1_ctrl` | `aux_features = [ln_pt, abs_eta]` | 3 | **3.9215** | [3.9124, 3.9386] |
+| `v1_contstop` | implicit continue/stop (no `q(N\|x)` head) | 2 | **3.8283** | [3.7799, 3.8768] |
+| `v1_legacy_lnz` | `lnz_support = legacy` | 1 | 4.0703 ! | — |
+| `v1_gru` / `v1_deepsets` | `encoder` | 1 each | *training* | — |
+
+`!` — not comparable to the rows above it. A different `ln z` normalization shifts NLL/jet
+by a constant unrelated to fit quality; the 4.0703 is *identical* to the v0 checkpoint's,
+which is the point of the arm. The `v1_contstop` row **is** comparable: both
+factorizations are normalized densities over the same space and share the physical `ln z`
+head.
+
+### 3.1 Aux isolation — the secondary-plane columns buy nothing measurable
+
+The question plan §8 poses is *isolation*, not existence: v0 §5 already established that
+aux conditioning helps at all (aux vs no-aux). v1 asks what the **secondary-plane and
+groomed-mass** columns add over pure jet kinematics.
+
+| quantity | `v1_base` (9 columns) | `v1_ctrl` (`ln_pt`, `abs_eta`) | delta | clears the spread? |
+|---|---|---|---:|---|
+| best val NLL/jet | 3.9169 [3.9036, 3.9237] | 3.9215 [3.9124, 3.9386] | −0.0045 | no |
+| `ln z` PIT KS | 0.0423 [0.0270, 0.0529] | 0.0466 [0.0382, 0.0592] | −0.0043 | no |
+| `pit_ks_max` | 0.0441 [0.0324, 0.0529] | 0.0466 [0.0382, 0.0592] | −0.0025 | no |
+| TARP max dev | 0.0367 [0.0335, 0.0415] | 0.0360 [0.0340, 0.0395] | +0.0007 | no |
+| `coverage_68` | 0.5255 [0.5179, 0.5400] | 0.5366 [0.5280, 0.5507] | −0.0111 | no |
+| medoid/identity | 0.9312 [0.9240, 0.9373] | 0.9386 [0.9309, 0.9504] | −0.0073 | no |
+
+**Null on every deciding metric.** Every delta is a fraction of the seed spread it sits
+in — and two of them (`ln z` PIT KS, `pit_ks_max`) *changed sign* when the third `v1_ctrl`
+seed landed, which is as direct a demonstration as one gets that they measure the seed
+rather than the columns. This is v0 §5's warning realized in the other direction: that A/B
+failed because a −0.029 nat delta *was* the 0.029 spread, and it is why this plan required
+three seeds per arm.
+
+Two claims, and only the second is new: aux conditioning helps (v0), **and `ln_pt` +
+`abs_eta` appear to carry the whole of that gain** (v1). The seven secondary-plane and
+groomed-mass columns are not adding to it.
+
+Consequently plan §12's WP3 trigger — *"`v1_base` vs `v1_ctrl` shows the secondary columns
+carry the aux gain"* — **does not fire.** Full-tree LundNet with secondary-plane sequences
+stays deferred, and this is evidence for leaving it there rather than an absence of
+evidence. Two caveats bound that: the arms are matched at fixed capacity, so this says the
+columns add nothing *as fed to this encoder*, not that the secondary planes are
+uninformative; and the aux columns are groomed at `kt_floor_sec = 0.2` against the
+sequences' 1.0, which is the asymmetry that makes them non-degenerate at all.
 
 ## 4. Gates G1–G8
 
