@@ -1,4 +1,9 @@
-"""Generate the production-test variants of the v2 distribution-closure notebook.
+"""NAMING: the `v0`/`v1` tags here are NOTEBOOK versions of the SAME v0 assessment
+(`v1` is the sped-up rerun, docs/PLAN_prod_test_speedup.md). They have nothing to do
+with docs/PLAN_prod_test_v1.md, which is a grid of 11 trainings under runs/prod_test_v1/
+assessed by scripts/prod_test_v1_gates.py. The collision is historical.
+
+Generate the production-test variants of the v2 distribution-closure notebook.
 
 The production test needs `lund_distribution_closure_v2.ipynb` pointed at the held-out
 file with a handful of constants changed, three of which are not obvious and one of which

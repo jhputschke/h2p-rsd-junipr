@@ -116,7 +116,13 @@ the docs:
   implementation of the headline distances, with a staleness guard that refuses to
   quote a `dist_closure_metrics.json` describing a different run.
 
-- **prod_test_v1.ipynb** — the same assessment, **~109 min → ~6 min**. Same tiers, same
+- **prod_test_v1.ipynb** — ⚠️ **not** the production-test-*v1* notebook. The `v1` is the
+  version of *this notebook*; the production test v1 is
+  [`docs/PLAN_prod_test_v1.md`](../docs/PLAN_prod_test_v1.md), a grid of 11 trainings under
+  `runs/prod_test_v1/` assessed by `scripts/prod_test_v1_gates.py` and
+  [`docs/PROD_TEST_v1_RESULTS.md`](../docs/PROD_TEST_v1_RESULTS.md). The two `v1`s were
+  named independently and mean unrelated things. This one is
+  the same assessment as `prod_test_v0.ipynb`, **~109 min → ~6 min**. Same tiers, same
   estimators, same acceptance criterion; what changes is the decode plumbing of
   [`docs/PLAN_prod_test_speedup.md`](../docs/PLAN_prod_test_speedup.md): **one** shared
   sampling pass feeding §3/§4/§5/§8 instead of five independent ones, one batched
