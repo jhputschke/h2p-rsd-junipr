@@ -31,10 +31,14 @@ def _pot_ok() -> bool:
 
 
 def _energyflow_ok() -> bool:
-    """energyflow is importable AND its underlying EMD solver actually works here."""
-    try:
-        import energyflow as ef  # noqa: F401
+    """energyflow is importable AND its underlying EMD solver actually works here.
 
+    Goes through `mbr._import_ef` rather than importing energyflow raw: that is the
+    entry point production uses, and it is where the macOS duplicate-OpenMP guard
+    runs. Probing raw would commit wasserstein's OpenMP build before the guard could
+    opt out of it, which on a duplicate-libomp host segfaults the whole session."""
+    try:
+        ef = mbr._import_ef()
         ef.emd.emd(np.array([[1.0, 0.0, 0.0]]), np.array([[1.0, 0.0, 0.0]]), R=1.0, gdim=2)
         return True
     except Exception:
@@ -195,6 +199,27 @@ def test_energyflow_matrix_uses_the_batched_path():
     fallback = [w for w in caught if issubclass(w.category, RuntimeWarning)
                 and "per-pair" in str(w.message)]
     assert not fallback, f"fell back to the serial per-pair emd: {fallback[0].message}"
+
+
+@pytest.mark.skipif(not EF_OK, reason="energyflow solver unavailable")
+def test_batched_emds_never_runs_multithreaded_on_duplicate_openmp():
+    """The invariant that keeps a macOS session alive.
+
+    PyTorch's bundled libomp plus a `wasserstein` linked against a *different* libomp
+    is two OpenMP runtimes in one process; creating the `emds` thread team then
+    segfaults, killing the interpreter with no traceback. `mbr._import_ef` is supposed
+    to notice and either select wasserstein's no-OpenMP build or pin `emds` to one
+    thread. Assert the state, not the crash -- a segfault cannot be caught in-process,
+    so a test that merely called `emds` would take the suite down with it."""
+    mbr._import_ef()
+    if len(mbr._loaded_omp_runtimes()) <= 1:
+        pytest.skip("single OpenMP runtime: the parallel path is safe here")
+    from wasserstein import _wasserstein as wext
+
+    assert not wext.cvar.COMPILED_WITH_OPENMP or mbr._EMDS_N_JOBS == 1, (
+        "duplicate OpenMP runtimes with wasserstein's OpenMP build live and `emds` "
+        "unpinned -- the next batched call segfaults the interpreter"
+    )
 
 
 @pytest.mark.skipif(not EF_OK, reason="energyflow solver unavailable")
