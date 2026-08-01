@@ -74,6 +74,12 @@ class EncoderConfig:
     num_layers: int = 1                # the "encoder depth" knob
     bidirectional: bool = True
     dropout: float = 0.1               # wired in (the script defines but never applies it)
+    mask_padding: bool = True          # ignore collate's zero-padding, so a jet
+    #                                    encodes the same alone as in a batch. False
+    #                                    reproduces the original v2 script's defect
+    #                                    (encoders/gru.py); a snapshot predating this
+    #                                    field backfills to False in the encoder, so
+    #                                    it evaluates as it was trained.
     aux_features: list[str] = field(default_factory=list)  # see _AUX_DOC
 
 
@@ -85,6 +91,12 @@ class LundNetEncoderConfig:
     num_layers: int = 3
     k: int = 4                         # EdgeConv neighbourhood (chain graph -> sequential)
     dropout: float = 0.1
+    mask_padding: bool = True          # ignore collate's zero-padding, so a jet
+    #                                    encodes the same alone as in a batch. False
+    #                                    reproduces the original v2 script's defect
+    #                                    (encoders/gru.py); a snapshot predating this
+    #                                    field backfills to False in the encoder, so
+    #                                    it evaluates as it was trained.
     aux_features: list[str] = field(default_factory=list)  # see _AUX_DOC
 
 
@@ -95,6 +107,12 @@ class DeepSetsEncoderConfig:
     hidden_dim: int = 64
     num_layers: int = 2
     dropout: float = 0.1
+    mask_padding: bool = True          # ignore collate's zero-padding, so a jet
+    #                                    encodes the same alone as in a batch. False
+    #                                    reproduces the original v2 script's defect
+    #                                    (encoders/gru.py); a snapshot predating this
+    #                                    field backfills to False in the encoder, so
+    #                                    it evaluates as it was trained.
     aux_features: list[str] = field(default_factory=list)  # see _AUX_DOC
 
 

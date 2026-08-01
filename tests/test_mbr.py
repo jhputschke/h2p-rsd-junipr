@@ -12,6 +12,7 @@ The optional backends are guarded: `pot` needs POT, `energyflow` needs a working
 from __future__ import annotations
 
 import importlib.util
+import platform
 import warnings
 
 import numpy as np
@@ -211,6 +212,9 @@ def test_batched_emds_never_runs_multithreaded_on_duplicate_openmp():
     to notice and either select wasserstein's no-OpenMP build or pin `emds` to one
     thread. Assert the state, not the crash -- a segfault cannot be caught in-process,
     so a test that merely called `emds` would take the suite down with it."""
+    if platform.system() != "Darwin":
+        pytest.skip("duplicate-runtime abort is a Darwin phenomenon; libgomp coexists "
+                    "with torch's runtime on Linux and the guard no-ops there")
     mbr._import_ef()
     if len(mbr._loaded_omp_runtimes()) <= 1:
         pytest.skip("single OpenMP runtime: the parallel path is safe here")
@@ -220,6 +224,20 @@ def test_batched_emds_never_runs_multithreaded_on_duplicate_openmp():
         "duplicate OpenMP runtimes with wasserstein's OpenMP build live and `emds` "
         "unpinned -- the next batched call segfaults the interpreter"
     )
+
+
+def test_loaded_omp_runtimes_is_total_across_platforms():
+    """It probes dyld, whose `_dyld_image_count` does not exist off macOS — so the
+    ctypes lookup raised `undefined symbol` and every caller died ON THE PROBE instead
+    of learning there was nothing to probe. Needs no energyflow: the failure was in the
+    platform check, not the solver."""
+    got = mbr._loaded_omp_runtimes()
+    assert isinstance(got, set)
+    if platform.system() != "Darwin":
+        assert got == set(), (
+            "off Darwin this must be empty: what it counts is runtimes that make a "
+            "thread team fatal, and that is a macOS phenomenon"
+        )
 
 
 @pytest.mark.skipif(not EF_OK, reason="energyflow solver unavailable")
@@ -232,7 +250,7 @@ def test_wasserstein_numpy2_compat_restores_the_module_namespace():
         with mbr._wasserstein_numpy2_compat() as patched:
             assert patched and ww.np is not before
             assert ww.np.ndarray is np.ndarray          # forwards everything else
-            1 / 0
+            1 / 0  # noqa: B018 — deliberate raise; the point is the shim unwinds
     assert ww.np is before
 
 

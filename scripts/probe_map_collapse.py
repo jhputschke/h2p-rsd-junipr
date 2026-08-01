@@ -39,7 +39,10 @@ from h2p_rsd_junipr.data.dataset import collate
 from h2p_rsd_junipr.geometry import Geometry
 from h2p_rsd_junipr.train.logging import CSVJSONLLogger
 from h2p_rsd_junipr.train.trainer import (
-    Trainer, build_components, seed_everything, select_device,
+    Trainer,
+    build_components,
+    seed_everything,
+    select_device,
 )
 
 PROBE_FLAGS = {"--epochs", "--label-smoothing", "--min-emissions", "--n-eval", "--posterior-k"}

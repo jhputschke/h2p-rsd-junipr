@@ -37,6 +37,9 @@ class GRUEncoder(Encoder):
         self.seq_dim = n_dir * hid
         self.to_ctx = nn.Linear(n_dir * hid + 1, self.out_dim)  # +1: hadron multiplicity
         self.drop = nn.Dropout(float(cfg.dropout))
+        # Default FALSE for a pre-field snapshot — see encoders/lundnet.py.
+        self.mask_padding = bool(getattr(cfg, "mask_padding", False))
+        self.bidirectional = bidir
 
     def _states(self, xf: torch.Tensor, nx: torch.Tensor):
         """(states (B, Mx, n_dir*hid), mask (B, Mx) float) — shared by both paths, so
@@ -51,10 +54,30 @@ class GRUEncoder(Encoder):
         Mx = xf.shape[1]
         mask = (torch.arange(Mx, device=xf.device)[None, :] < nx[:, None]).float()
         if Mx == 0:
-            out = xf.new_zeros(xf.shape[0], 0, self.seq_dim)
-        else:
-            out, _ = self.encoder(self.x_feat(xf))  # (B, Mx, n_dir*hid)
-        return out, mask
+            return xf.new_zeros(xf.shape[0], 0, self.seq_dim), mask
+
+        emb = self.x_feat(xf)
+        if not self.mask_padding:
+            # The original v2 script runs the GRU over the padded tensor; `verify_parity`
+            # measures against it, so the defect is reproducible on request.
+            out, _ = self.encoder(emb)
+            return out, mask
+
+        # Packing matters here even though the mean-pool masks the outputs: this GRU is
+        # BIDIRECTIONAL, so the backward pass starts at the padded tail and sweeps through
+        # it into the real nodes. Every real position's backward half was therefore a
+        # function of how much padding the batch happened to carry — the same jet encoded
+        # differently depending on its batch-mates, and single-jet inference (where
+        # Mx == nx) sat in a regime training never saw.
+        lengths = nx.detach().to("cpu").clamp(min=1)
+        packed = nn.utils.rnn.pack_padded_sequence(
+            emb, lengths, batch_first=True, enforce_sorted=False
+        )
+        out, _ = self.encoder(packed)
+        out, _ = nn.utils.rnn.pad_packed_sequence(out, batch_first=True, total_length=Mx)
+        # `nx == 0` was clamped to 1 above so packing accepts it; the mask already zeroes
+        # that row, and this keeps it from leaking into `forward_seq`'s states.
+        return out * mask.unsqueeze(-1), mask
 
     def forward(self, xf: torch.Tensor, nx: torch.Tensor) -> torch.Tensor:
         out, mask = self._states(xf, nx)

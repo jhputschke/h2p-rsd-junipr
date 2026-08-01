@@ -182,9 +182,23 @@ _OMP_RUNTIME_NAMES = ("libomp.dylib", "libiomp5.dylib", "libgomp")
 
 
 def _loaded_omp_runtimes() -> set:
-    """Realpaths of every OpenMP runtime currently mapped into this process (macOS).
+    """Realpaths of every OpenMP runtime currently mapped into this process.
 
-    Walks dyld's image list; `realpath` so that a symlinked duplicate counts once."""
+    Walks dyld's image list; `realpath` so that a symlinked duplicate counts once.
+
+    **Darwin only, and empty everywhere else — deliberately, not as a stub.** What this
+    counts is runtimes that would make a thread team *fatal*, and that is a macOS
+    phenomenon: two LLVM OpenMP runtimes abort, whereas on Linux GCC's libgomp coexists
+    with the one PyTorch bundles, which is why `_guard_wasserstein_openmp` also returns
+    early there. Enumerating `/proc/self/maps` on Linux would return a number that reads
+    like a hazard and is not one.
+
+    It must not RAISE off Darwin either: `_dyld_image_count` is a dyld symbol, so the
+    ctypes lookup fails with `undefined symbol` on Linux, and any caller probing the
+    state — including the test that asserts the pinning invariant — died on the probe
+    rather than skipping."""
+    if platform.system() != "Darwin":
+        return set()
     dyld = ctypes.CDLL(None)
     dyld._dyld_image_count.restype = ctypes.c_uint32
     dyld._dyld_get_image_name.restype = ctypes.c_char_p
