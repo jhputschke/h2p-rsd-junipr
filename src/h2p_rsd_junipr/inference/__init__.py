@@ -1,4 +1,4 @@
-from .length import learned_min_emissions, quantile_floor
+from .length import fit_continue_temperature, learned_min_emissions, quantile_floor
 from .mbr import (
     cloud_to_event,
     lund_cloud,
@@ -17,6 +17,7 @@ __all__ = [
     "ancestral_sample_cells",
     "quantile_floor",
     "learned_min_emissions",
+    "fit_continue_temperature",
     "lund_cloud",
     "cloud_to_event",
     "lund_emd",

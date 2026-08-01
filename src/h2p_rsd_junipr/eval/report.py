@@ -50,6 +50,13 @@ def inert_decode_keys(model, decode: dict) -> list[dict]:
     # run_closure / run_calibration / run_tarp is at T=1, capped at the signature default.
     add("cont_temperature", "PosteriorModel.sample_batch takes no cont_temperature; "
                             "every posterior draw here is at T=1")
+    # `continue_temperature` is NOT in that list: it rides on the model (set by
+    # build_model, re-applied by cmd_eval) and so reaches every draw — but only for a
+    # family that has a continue/stop head to temper at all.
+    if not hasattr(model, "cont_head"):
+        add("continue_temperature",
+            "this family has an explicit q(N|x) head and takes no per-step continue "
+            "decision; length_temperature/length_tilt is its length knob")
     add("max_emissions", "sample_batch uses its own signature default (25); the decode "
                          "value reaches map_estimate but not the draws")
     # closure/calibration take their draw count from experiment.n_closure_samples (K).
@@ -129,6 +136,46 @@ def plot_calibration(metrics: dict, out_dir: Path) -> list[Path]:
         plt.close(fig)
         written.append(p)
 
+    # WP-D.3: the region x coordinate PIT cross, as a heat map of KS distances. This is
+    # the instrument gate G5 reads — it says WHICH coordinate fails in WHICH quadrant —
+    # and a four-by-four table of numbers is not something a reader scans for a pattern.
+    cross = metrics.get("pit_coords_by_region")
+    if cross:
+        coords = list(cross)
+        regions = sorted({r for v in cross.values() for r in v})
+        ks = np.array([[cross[c].get(r, {}).get("ks", np.nan) for r in regions]
+                       for c in coords], dtype=float)
+        ns = np.array([[cross[c].get(r, {}).get("n", 0) for r in regions]
+                       for c in coords], dtype=float)
+        scored = np.array([[cross[c].get(r, {}).get("scored", False) for r in regions]
+                           for c in coords], dtype=bool)
+        fig, ax = plt.subplots(figsize=(1.5 * len(regions) + 2.2, 0.85 * len(coords) + 2.0))
+        im = ax.imshow(np.where(scored, ks, np.nan), cmap="magma_r", aspect="auto",
+                       vmin=0.0)
+        for i in range(len(coords)):
+            for j in range(len(regions)):
+                if not np.isfinite(ks[i, j]):
+                    continue
+                # An unscored cell is shown but greyed: it is a measurement nobody should
+                # act on, and hiding it would read as "that quadrant is fine".
+                txt = f"{ks[i, j]:.3f}\nn={int(ns[i, j])}"
+                ax.text(j, i, txt + ("" if scored[i, j] else "\n(not scored)"),
+                        ha="center", va="center", fontsize=7,
+                        color="#333333" if not scored[i, j] else
+                        ("white" if ks[i, j] > 0.6 * np.nanmax(ks[scored]) else "black"))
+        ax.set_xticks(range(len(regions)))
+        ax.set_xticklabels(regions, rotation=20, fontsize=8)
+        ax.set_yticks(range(len(coords)))
+        ax.set_yticklabels(coords, fontsize=9)
+        ax.set_title("PIT KS by coordinate x Lund quadrant\n(0 is calibrated; "
+                     "95% critical value is 1.36/sqrt(n))", fontsize=9)
+        fig.colorbar(im, ax=ax, label="KS distance to Uniform(0,1)")
+        fig.tight_layout()
+        p = out_dir / "calibration_pit_by_region.png"
+        fig.savefig(p, dpi=140)
+        plt.close(fig)
+        written.append(p)
+
     t = metrics.get("tarp")
     if t:
         fig, ax = plt.subplots(figsize=(4.0, 3.6))
@@ -142,13 +189,20 @@ def plot_calibration(metrics: dict, out_dir: Path) -> list[Path]:
         ax.set_ylabel("expected coverage ECP($\\alpha$)")
         # The floor belongs in the title: a sup-norm CDF deviation is a KS statistic, and
         # without its ~1.36/sqrt(n) null value any nonzero max dev reads as a defect.
-        floor = t.get("tarp_null_floor95")
-        sub = (f"\n95% null floor {floor:.3f} at n = {t['n_jets']}"
+        # Prefer the band recomputed at THIS run's (n, alpha grid) over the asymptotic
+        # 1.36/sqrt(n): the plot is where "inside the band" gets read off, so it must be
+        # the band the gate uses (docs/PLAN_prod_test_v1.md WP-D.2).
+        band = t.get("null_band")
+        floor = band["p95"] if band else t.get("tarp_null_floor95")
+        src = (f"MC null, {band['n_reps']} reps" if band else "1.36/sqrt(n)")
+        sub = (f"\n95% null band {floor:.3f} at n = {t['n_jets']} ({src})"
+               + ("" if not band else
+                  f" — {'quotable' if band['floor_ok'] else 'NOT quotable: floor >= 0.05'}")
                if floor is not None else "")
         ax.set_title(f"TARP  max dev = {t['tarp_max_dev']:.3f}{sub}", fontsize=9)
         if floor is not None:
             ax.fill_between(alpha, alpha - floor, alpha + floor, color="#999999",
-                            alpha=0.12, lw=0, label="95% null band")
+                            alpha=0.12, lw=0, label=f"95% null band ({src})")
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.legend(fontsize=8, loc="upper left")

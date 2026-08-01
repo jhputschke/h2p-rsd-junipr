@@ -229,6 +229,8 @@ def cmd_eval(argv) -> int:
     # `decode.length_temperature=` wins, like every other decode override.
     model.length_temperature = float(decode["length_temperature"])
     model.length_tilt = float(decode["length_tilt"])
+    model.continue_temperature = float(decode["continue_temperature"])
+    model.kappa_min_mode = float(decode["kappa_min_mode"])
 
     model.eval()
     if not getattr(model, "exact_likelihood", True):
@@ -276,7 +278,21 @@ def cmd_eval(argv) -> int:
         pit_coords=exp["pit_coords"], stratify_regions=exp["stratify_regions"],
         tarp=exp["tarp"], tarp_refs=exp["tarp_refs"], tarp_reference=exp["tarp_reference"],
         mbr_kwargs=mbr_kwargs_from_decode(decode),
+        tarp_null_reps=exp["tarp_null_reps"], tarp_stratify=exp["tarp_stratify"],
     )
+    if exp["support_audit"]:
+        from .eval.support import run_support_audit
+
+        metrics["support_audit"] = run_support_audit(
+            model, val_ds, dm_jets, geometry, device,
+            n_jets=exp["closure_jets"], K=exp["n_closure_samples"],
+        )
+    if exp["exposure_diagnostic"]:
+        from .eval.exposure import run_exposure
+
+        metrics["exposure"] = run_exposure(
+            model, val_ds, device, n_jets=exp["closure_jets"], K=exp["n_closure_samples"],
+        )
     print_point_estimate(model, val_ds, dm_jets, geometry, device, decode=decode)
 
     if ckpt:  # artifacts land beside the checkpoint, next to the training curves

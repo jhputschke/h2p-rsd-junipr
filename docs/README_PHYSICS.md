@@ -295,6 +295,42 @@ The **data contract** (one entry per jet, written by `write_lund_rntuple`): `eve
 floor},\text{generator})$, and the two **node-unaligned** jagged sequences `x_*` and
 `y_*`. There is by design **no per-node $x\leftrightarrow y$ correspondence**.
 
+### 5.1 Two coordinates that are not on $\mathbb{R}$, and what that costs
+
+Of the four coordinates, only $\ln k_t$ lives on the real line in any useful sense. The
+other three carry structure the density has to respect, and two of them were getting it
+wrong until production test v1.
+
+**$\ln z$ is bounded on both sides, and the truth sits flush against both walls.** Soft
+Drop retains a declustering only when $z > z_{\rm cut}(\Delta R/R)^\beta$, and
+$z = \min(p_{T1},p_{T2})/(p_{T1}{+}p_{T2}) \le \tfrac12$ by construction, so
+
+$$
+\ln z \in \big(\ln z_{\rm cut} - \beta \ln \tfrac1{\Delta R},\ \ln \tfrac12\big].
+$$
+
+At the fielded $z_{\rm cut}=0.1$, $\beta=0$ that is an interval of width $\ln 5 \approx
+1.61$ whose **endpoints are both attained** in the data. A Gaussian there is the same
+category of error as a Gaussian on $\psi$: it puts mass where the generator can produce
+none. `model.lnz_support = "physical"` replaces it with the truncated normal already used
+for the within-cell offsets, which makes the grooming boundary a property of the *density*
+rather than something a downstream cut has to repair.
+
+**$\psi$ is periodic *and*, for these jets, nearly uniform — so its mode is not a
+prediction.** The von Mises concentration $\kappa$ measured on real jets has a median of
+**0.022**, i.e. a peak-to-trough ratio of $e^{2\kappa} = 1.04$. The azimuth of the softer
+prong about the harder is, to that accuracy, isotropic — which is what one should expect:
+nothing in the primary declustering picks a preferred direction in the plane transverse to
+the parent. Reporting $\arg\max$ of such a density is reporting the direction of a
+near-zero resultant vector (Mardia & Jupp, *Directional Statistics*, Wiley 2000), a
+quantity the fit does not determine. Doing so anyway produced a pooled $\psi$ resultant
+$|R| = 0.69$ against a truth of $0.045$ — a 17.5× discrepancy manufactured entirely by the
+decode rule, with the head itself right (its *sampled* posterior gives $|R| = 0.031$).
+
+The rule that follows: a point estimate reports the $\psi$ mode only where
+$\kappa \ge$ `decode.kappa_min_mode`, and a **draw** (flagged `psi_identified = False`)
+elsewhere. Any $\psi$ panel must be read beside the $\kappa$ distribution that produced it.
+
 ---
 
 ## 6. Matched $(x,y)$ pairs from the generator
@@ -449,7 +485,21 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt experiment=pythia_vs_herwig
   within-cell continuous head are locked together in the model builder so they cannot
   drift apart.
 - The MAP can be unrepresentative in high dimensions — always read it alongside the
-  posterior summary.
+  posterior summary. It is a **diagnostic here, not a headline**: the mode of a
+  high-entropy sequence posterior is an estimator for a loss nobody is measuring
+  (Stahlberg & Byrne, arXiv:1908.10090; Eikema & Aziz, arXiv:2005.10283). The decode
+  headline is the MBR tree; the population headline is the decode-free posterior series.
+- **The MBR medoid carries its own sampled coordinates, and that is the point.** The
+  medoid is a genuine draw from the posterior, so it is the one point estimate whose
+  kinematics are guaranteed to be *something the model actually believes could happen*.
+  Re-attaching head modes to it — which the code did until production test v1 — throws
+  exactly that away and reintroduces the $\psi$ pathology above through the back door.
+- **A statistic is only as good as its null**, and three of the ones used here do not have
+  the null they look like they have: SBC on a *discrete* multiplicity has no $\chi^2(9)$
+  reference (its mid-rank cannot be uniform), TARP's $1.36/\sqrt{n}$ floor is asymptotic
+  and useless at a few hundred jets, and a multiplicity mean conditioned on the truth
+  being non-empty is biased low by regression to the mean. Each is now quoted against a
+  null recomputed at the run's own size; see `docs/CONFIGURATION.md` §8.
 
 ---
 

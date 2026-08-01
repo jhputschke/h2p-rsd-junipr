@@ -1,0 +1,52 @@
+# presets/prod_test_v1.yaml — the production-test v1 base arm (`v1_base`).
+#
+#   h2p-rsd-junipr train base=presets/prod_test_v1.yaml
+#   h2p-rsd-junipr train base=presets/prod_test_v1.yaml trainer=fast_dev data.n_jets=256  # smoke
+#
+# Identical to presets/prod_test_v0.yaml except for the ONE variable v1 changes:
+# `model.lnz_support: physical`. Everything else — geometry, data file, encoder, aux
+# columns, epochs, batch size — is held fixed so the v0 -> v1 comparison is about the
+# head and nothing else. See docs/PLAN_prod_test_v1.md; the arms of the §8 grid are
+# generated from this file by scripts/run_prod_test_v1.sh.
+#
+# NOTE ON NLL: `lnz_support: physical` changes the coordinate normalization, so NLL/jet
+# from this arm is NOT comparable to any v0 number. The `v1_legacy_lnz` arm is the
+# bridge. See docs/CONFIGURATION.md §4.
+
+defaults:
+  model: ar_junipr_v4        # v3 + decoder cross-attention (the A4 "SOTA AR" arm)
+  encoder: lundnet           # returns_sequence=True; the documented v4 pairing
+  data: rntuple
+  optim: default
+  trainer: default
+  decode: default
+  experiment: closure
+
+geometry:
+  n_bins: 30                 # 900 cells; cell 0.6 -> 0.2, half_u/half_v 0.3 -> 0.1
+
+data:
+  path: data/jet_aux_asym.root
+
+encoder:
+  num_layers: 5
+  aux_features: [ln_mg_pt, ln_ptg_pt, ln_pt, abs_eta,
+                 nsec, has_sec, ln_kt_sec, ln_kt_sec_sum, sec_depth]
+
+model:
+  dec_dim: 64
+  dec_layers: 2
+  xattn_heads: 4             # must divide dec_dim
+  sigma_floor: 0.005         # half_u/half_v shrank 3x with n_bins; the default 0.01
+                             # did not, and would start to bind.
+  # --- the WP-A intervention, and the only thing that differs from v0 ---------
+  lnz_support: physical      # truncated normal on (ln z_cut - beta*ln(1/DeltaR), ln 1/2]
+  lnz_zcut: 0.1              # verified against the file's own grooming record by
+  lnz_beta: 0.0              # data.stats.check_lnz_support before training starts
+
+trainer:
+  max_epochs: 60             # early stopping is NOT wired, and resume cannot extend a
+                             # finished run — so 60 is a commitment.
+  batch_size: 256
+
+run_root: runs/prod_test_v1

@@ -1409,16 +1409,26 @@ def build_report(a, s, R, figs, tables, cmdline):
             "solved.")
 
     # --- support --------------------------------------------------------------
+    _lnz_support = str(getattr(m["model"], "lnz_support", "legacy"))
     P("## 3. Support and validity — what the model can and cannot produce")
-    P("Three numbers decide how much of any distance below is even the model's fault. "
+    P("These numbers decide how much of any distance below is even the model's fault, "
+      "and they are **scored** against a hard zero (gate G2 of "
+      "`docs/PLAN_prod_test_v1.md`): a non-zero rate is a bug, not a finding. "
       "`Geometry.to_cell` **clips** rather than drops, so truth outside the geometry's "
       "ranges was piled into edge cells during training and the model can never emit "
       "there at all — whatever fraction of truth lies outside is an irreducible floor on "
       "every distance, which is why section 6 scores on the fiducial window. The groomer "
-      "enforces $z > z_\\mathrm{cut}(\\Delta R/R_0)^\\beta$, so truth and plain RSD "
-      "violate it exactly zero times; the coordinate head models $\\ln z$ with an "
-      "*unbounded* normal and has no idea the boundary exists, so a non-zero number in "
-      "that column is a real physics failure, not a plotting artefact.")
+      "enforces $z > z_\\mathrm{cut}(\\Delta R/R_0)^\\beta$ and $z \\le 1/2$ holds by "
+      "construction, so truth and plain RSD violate both exactly zero times.")
+    P("This checkpoint was trained with `model.lnz_support = " + f"`{_lnz_support}`" + "`. "
+      + ("The $\\ln z$ head is an *unbounded* normal and has no idea either boundary "
+         "exists, so a non-zero number in those columns is a real physics failure, not a "
+         "plotting artefact."
+         if _lnz_support != "physical" else
+         "The $\\ln z$ head is a truncated normal on "
+         "$(\\ln z_\\mathrm{cut} - \\beta\\,\\ln(1/\\Delta R),\\ \\ln \\tfrac12]$, so "
+         "those columns are zero **by construction** and a non-zero number is a bug in "
+         "the bound, not a miscalibration."))
     P(tables["support"])
     P(f"Fiducial window: $\\ln(1/\\Delta R) \\in [{U_LO}, {U_HI}]$, "
       f"$\\ln k_t \\in [{V_LO}, {V_HI}]$"
@@ -1803,27 +1813,48 @@ def main(argv=None):
     V_LO, V_HI = geom.ln_kt_range
 
     def support_row(v, w):
+        # WP-D.1 of docs/PLAN_prod_test_v1.md: these are SCORED, with a hard-zero
+        # target. Every boundary below is a property of the generator the training data
+        # came from, so the truth series must read exactly 0 — it is the control, and a
+        # nonzero value there means the bounds are wrong, not the model.
         if not len(v):
-            return dict(out_of_window=np.nan, sd_violation=np.nan,
-                        ktfloor_violation=np.nan)
+            return dict(out_of_window=np.nan, sd_violation=np.nan, z_above_half=np.nan,
+                        ktfloor_violation=np.nan, max_rate=np.nan, passes=False)
         tot = w.sum()
         oow = ((v[:, 0] < U_LO) | (v[:, 0] > U_HI) | (v[:, 1] < V_LO) | (v[:, 1] > V_HI))
         kt = v[:, 1] < V_LO
         if d["sd_known"]:
             sd = v[:, 2] <= (math.log(d["z_cut"]) - d["beta"] * v[:, 0])
             sd_f = float(w[sd].sum() / tot)
+            # z = min(pT1,pT2)/(pT1+pT2) <= 1/2 by construction — the OTHER half of the
+            # ln z leak, which v0 never measured.
+            hi = v[:, 2] > math.log(0.5)
+            hi_f = float(w[hi].sum() / tot)
         else:
-            sd_f = float("nan")
-        return dict(out_of_window=float(w[oow].sum() / tot), sd_violation=sd_f,
-                    ktfloor_violation=float(w[kt].sum() / tot))
+            sd_f = hi_f = float("nan")
+        row = dict(out_of_window=float(w[oow].sum() / tot), sd_violation=sd_f,
+                   z_above_half=hi_f, ktfloor_violation=float(w[kt].sum() / tot))
+        finite = [x for x in row.values() if x == x]
+        row["max_rate"] = float(max(finite)) if finite else float("nan")
+        row["passes"] = bool(finite and max(finite) == 0.0)   # hard zero, not a tolerance
+        return row
 
     SUPPORT = {x: support_row(POOL[x]["v"], POOL[x]["w"]) for x in SERIES}
+    SUPPORT["_target"] = {"rate": 0.0, "gate": "G2",
+                          "note": "a nonzero rate is a bug, not a finding"}
+    SUPPORT["_pass"] = {x: bool(SUPPORT[x]["passes"]) for x in SERIES}
     R["SUPPORT"] = SUPPORT
     tables["support"] = md_table(
-        ["series", "out of window", "soft-drop violation", "$k_t$-floor violation"],
+        ["series", "out of window", "soft-drop violation", "$z > 1/2$",
+         "$k_t$-floor violation", "verdict (target 0)"],
         [[f"`{x}`", pct(SUPPORT[x]["out_of_window"], 3),
-          pct(SUPPORT[x]["sd_violation"], 3), pct(SUPPORT[x]["ktfloor_violation"], 3)]
+          pct(SUPPORT[x]["sd_violation"], 3), pct(SUPPORT[x]["z_above_half"], 3),
+          pct(SUPPORT[x]["ktfloor_violation"], 3),
+          "**PASS**" if SUPPORT[x]["passes"] else "**FAIL**"]
          for x in SERIES])
+    _bad = [x for x in SERIES if not SUPPORT[x]["passes"]]
+    print(f"\nsupport audit (target: hard zero) : "
+          + ("all series PASS" if not _bad else f"FAIL for {', '.join(_bad)}"))
 
     # --- figures --------------------------------------------------------------
     out_dir = Path(a.out) if a.out else (m["ckpt"].resolve().parent / "lund_closure_report")
@@ -2011,6 +2042,11 @@ def main(argv=None):
             "checkpoint": str(m["ckpt"]),
             "aux_features": list(m["aux"]),
             "continuous_coords": bool(cont),
+            # The support audit below is only readable beside this: the same zero means
+            # "the head cannot leave the interval" under `physical` and "it happened not
+            # to" under `legacy` (docs/PLAN_prod_test_v1.md WP-A/WP-D.1).
+            "lnz_support": str(getattr(m["model"], "lnz_support", "legacy")),
+            "kappa_min_mode": float(getattr(m["model"], "kappa_min_mode", 0.0)),
             "selection": {"require_truth_splitting": bool(a.require_truth_splitting),
                           "population": ("len(x)>0 and len(y)>0 (v1, truth-selected)"
                                          if a.require_truth_splitting

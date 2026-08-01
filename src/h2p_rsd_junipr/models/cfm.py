@@ -396,7 +396,8 @@ class CFM(PosteriorModel):
         return self._to_phys(s1.detach(), cells)
 
     @torch.inference_mode()
-    def sample_coordinates(self, xf, nx, cells):
+    def sample_coordinates(self, xf, nx, cells, *, generator=None):
+        # `generator` is accepted for the contract and not threaded: the ODE integration draws from the global stream.
         """The contract shape of `sample_coords` for one jet. Costs one forward ODE
         integration per call (`n_ode_steps` steps, 2 or 4 field evals each), so a
         consumer that wants both the MBR winner's coordinates and a posterior draw's

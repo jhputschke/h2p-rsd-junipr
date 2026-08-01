@@ -1,10 +1,29 @@
 # PLAN — Production test v1: one targeted intervention per localized failure, with pre-registered gates
 
-**Status:** proposed (not yet implemented). Companion to
-[`PLAN_prod_test_v0.md`](PLAN_prod_test_v0.md) and
+**Status:** implemented; see [`PROD_TEST_v1_RESULTS.md`](PROD_TEST_v1_RESULTS.md).
+Companion to [`PLAN_prod_test_v0.md`](PLAN_prod_test_v0.md) and
 [`PROD_TEST_v0_RESULTS.md`](PROD_TEST_v0_RESULTS.md); as there, **this plan holds the
 design and the rationale, the results document will hold only numbers.** Every pass
 criterion below is fixed before the grid runs.
+
+> **Two corrections found during implementation.** Neither changes a gate; both change a
+> name or an arm, and are recorded here rather than silently absorbed.
+>
+> 1. **`decode.cont_temperature` was already taken.** §5.2 proposes it as "a single
+>    scalar on the continue logit"; the field of that name has existed since WP2 as the
+>    softmax temperature on the **cell** logits. Implementing the plan's meaning under
+>    the plan's name would have silently redefined a live knob, so the continue-logit
+>    temperature ships as **`decode.continue_temperature`** and `cont_temperature` keeps
+>    its meaning. Everything else about §5.2 is unchanged.
+> 2. **`v1_base` and `v1_nhead` were the same model.** §8 lists `v1_base` as
+>    `ar_junipr_v4` and `v1_nhead` as the "explicit `q(N|x)` factorization" — but
+>    `configs/model/ar_junipr_v4.yaml` already sets `use_multiplicity_head: true`, so the
+>    two arms differ in nothing. Gate G8's stated rationale (SBC-N must not decide,
+>    *because* v3's `n_head` is calibrated on it by construction) only has content when
+>    one arm has the head and the other does not, so the arm that was missing is the
+>    **implicit continue/stop** one. It is fielded as **`v1_contstop`** and G8 is
+>    evaluated as `v1_base` (explicit) vs `v1_contstop` (implicit), on the metrics G8
+>    names. This is also the only arm on which `continue_temperature` is not a no-op.
 
 **Framing.** v0 established that the *density* beats the baseline (posterior-series W1
 gmean 0.414 vs plain RSD) and localized every failure: one coordinate head with the wrong

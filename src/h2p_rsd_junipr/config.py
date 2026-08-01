@@ -222,7 +222,23 @@ class DecodeConfig:
     topk_cells: int = 6
     max_emissions: int = 25
     n_posterior_samples: int = 500
-    cont_temperature: float = 1.0      # exposure-bias remedy, sampling-time only
+    cont_temperature: float = 1.0      # softmax temperature on the CELL logits at sampling
+    #                                    time. Historical name: it tempers which cell is
+    #                                    emitted, not whether one is. See
+    #                                    `continue_temperature` below for the length knob.
+    continue_temperature: float = 1.0  # temperature on the CONTINUE/STOP logit at sampling
+    #                                    time (docs/PLAN_prod_test_v1.md WP-B.2):
+    #                                    p_cont = sigmoid(logit / T). T > 1 pulls p_cont
+    #                                    toward 1/2, which lengthens trees wherever the head
+    #                                    is confident to stop. 1.0 is off and bit-identical.
+    #                                    Sampling ONLY: `per_jet_nll`, `log_prob` and the
+    #                                    beam-search MAP never see it, so the trained
+    #                                    likelihood is untouched. A NO-OP for families with
+    #                                    an explicit q(N|x) head (v3/v4), which take no
+    #                                    per-step continue decision — `length_temperature`
+    #                                    is that family's length knob. Fit on held-out jets
+    #                                    with inference.length.fit_continue_temperature and
+    #                                    FREEZE, recording `fitted_under`.
     min_emissions: int = 1             # MAP floor: the point estimate never collapses
     #                                    to the unphysical empty tree (>=1 splitting)
     length_penalty: float = 0.0        # GNMT-style score/len**alpha at final beam rank;
@@ -266,6 +282,15 @@ class DecodeConfig:
     mbr_phi_col: int = -1              # psi column index; -1 => last coordinate
     mbr_resample_to_qn: bool = False   # reweight the MBR support to the calibrated q(N|x) marginal
     #                                    (decode-layer exposure-bias fix; off keeps the plain mean risk)
+    # --- psi identifiability (docs/PLAN_prod_test_v1.md WP-C.2) ---------------------
+    kappa_min_mode: float = 0.5        # below this von Mises concentration the psi MODE is
+    #                                    not identified — at kappa -> 0 the density is flat
+    #                                    and its mode is the direction of a near-zero
+    #                                    resultant — so a DRAW is reported instead and the
+    #                                    node is flagged psi_identified=False. 0.5 is
+    #                                    peak/trough e^(2 kappa) ~ e. 0.0 disables the gate
+    #                                    and restores the unconditional mode (the pinned
+    #                                    reference path for the parity harness).
 
 
 @dataclass
@@ -284,6 +309,19 @@ class ExperimentConfig:
     closure_continuous: bool = False  # leading-emission distances OFF the cell grid, via
     #                                   sample_coordinates (the cell metric is quantisation-
     #                                   limited); costs closure_jets * n_closure_samples passes
+    # --- production test v1 (docs/PLAN_prod_test_v1.md). Default off, so the reported
+    #     metric dict is unchanged until opted in.
+    exposure_diagnostic: bool = False  # WP-B.1: the N marginal on both populations, SBC-on-N
+    #                                    against its own simulated null, and the
+    #                                    teacher-forced vs on-policy continue probability
+    #                                    by depth (eval/exposure.py)
+    support_audit: bool = False        # WP-D.1: window / soft-drop / kt-floor violation rates
+    #                                    of the sampled posterior, as SCORED metrics with a
+    #                                    hard-zero target (gate G2)
+    tarp_null_reps: int = 0            # WP-D.2: Monte-Carlo reps for the TARP null band at
+    #                                    the run's own (n_jets, alpha grid). 0 keeps the
+    #                                    analytic 1.36/sqrt(n) floor alone.
+    tarp_stratify: bool = False        # WP-D.2: TARP additionally per Lund quadrant
 
 
 @dataclass
@@ -486,6 +524,7 @@ _DECODE_DEFAULTS: dict = {
     "max_emissions": 25,
     "n_posterior_samples": 500,
     "cont_temperature": 1.0,
+    "continue_temperature": 1.0,
     "min_emissions": 1,
     "length_penalty": 0.0,
     "length_floor_quantile": 0.0,
@@ -504,6 +543,7 @@ _DECODE_DEFAULTS: dict = {
     "mbr_periodic_phi": False,
     "mbr_phi_col": -1,
     "mbr_resample_to_qn": False,
+    "kappa_min_mode": 0.5,
 }
 
 
@@ -520,6 +560,10 @@ _EXPERIMENT_DEFAULTS: dict = {
     "tarp_refs": 100,
     "tarp_reference": "pooled",
     "closure_continuous": False,
+    "exposure_diagnostic": False,
+    "support_audit": False,
+    "tarp_null_reps": 0,
+    "tarp_stratify": False,
 }
 
 

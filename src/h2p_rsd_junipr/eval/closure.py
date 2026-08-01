@@ -170,6 +170,19 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     empty_true, empty_pred = [], []          # the FULL population, incl. truth-empty jets
     cont_ok = bool(continuous)
     true_ns = []  # true N per kept jet, aligned with the bias lists (for the per-N table)
+    # ...and the same two over the FULL population, including the truth-empty jets the
+    # leading-emission selection drops. Gate G4's <N> clause is about this pair: selecting
+    # jets by `N_true >= 1` and comparing them to the posterior mean is regression to the
+    # mean, so its deficit is negative by construction (docs/PLAN_prod_test_v1.md WP-B.1).
+    post_mean_all, true_n_all = [], []
+    # --- psi resultant (gate G6). |R| = |<e^{i psi}>| pooled over nodes: 0 for a uniform
+    #     azimuth, 1 for a pinned one. v0's decode reported 0.69 against a truth of 0.045,
+    #     because it attached the MODE of a von Mises whose median kappa is 0.022 — a
+    #     direction that is not identified. Truth, point estimate and posterior draws are
+    #     accumulated as complex sums so the pooled resultant is exact, not a mean of means.
+    psi_sum = {"truth": 0j, "point": 0j, "posterior": 0j}
+    psi_n = {"truth": 0, "point": 0, "posterior": 0}
+    psi_unident, psi_nodes_scored = 0, 0
     covered = []
     n_closure = min(n_closure, len(val_ds))
     if draws_by_jet is not None and len(draws_by_jet) < n_closure:
@@ -199,6 +212,18 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         hat = model.map_or_mbr(xf, nx, draws=draws, **dec)
         empty_true.append(ny_true == 0)
         empty_pred.append(hat.multiplicity == 0)
+        post_mean_all.append(float(mults.mean()) if mults.size else 0.0)
+        true_n_all.append(ny_true)
+
+        if getattr(model, "has_continuous_coords", False):
+            tpsi = item["yraw"][:, 3].numpy() if ny_true else np.zeros(0)
+            psi_sum["truth"] += complex(np.exp(1j * tpsi).sum())
+            psi_n["truth"] += int(tpsi.size)
+            hpsi = np.array([n.psi for n in hat.nodes], dtype=float)
+            psi_sum["point"] += complex(np.exp(1j * hpsi).sum())
+            psi_n["point"] += int(hpsi.size)
+            psi_unident += hat.n_psi_unidentified
+            psi_nodes_scored += hat.multiplicity
 
         if ly is None or not lead:
             continue
@@ -219,7 +244,11 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
                 if c is None:      # family has no coordinate density -> stop asking
                     cont_ok = False
                     break
-                p = _leading_coords(c.detach().cpu().double().numpy().reshape(-1, 4))
+                arr = c.detach().cpu().double().numpy().reshape(-1, 4)
+                # the posterior's own psi resultant, from the same draws (G6's reference)
+                psi_sum["posterior"] += complex(np.exp(1j * arr[:, 3]).sum())
+                psi_n["posterior"] += int(arr.shape[0])
+                p = _leading_coords(arr)
                 if p is not None:
                     pts.append(p)
             y_lead = _leading_coords(item["yraw"].numpy())
@@ -250,12 +279,28 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         covered.append(1.0 if ly in hpd_set else 0.0)
 
     d_id, d_mode = np.array(d_id), np.array(d_mode)
+    tn_all = np.array(true_n_all, dtype=float)
+    pm_all = np.array(post_mean_all, dtype=float)
+    tn_kept = np.array(true_ns, dtype=float)
     metrics = {
         "mean_mult_true": float(np.mean([len(val_ds[i]["yc"]) for i in range(n_closure)])),
         "mean_mult_hadron": float(np.mean([len(val_jets[i]["x"][0]) for i in range(n_closure)])),
-        "mean_mult_posterior": float(
-            np.mean([b + len(val_ds[i]["yc"]) for i, b in enumerate(n_mean_bias)])
+        # Over the FULL population and correctly paired. It used to be
+        # `mean(b + len(val_ds[i]["yc"]) for i, b in enumerate(n_mean_bias))`, where `i`
+        # indexes the KEPT jets and `val_ds[i]` the unfiltered dataset — so each kept jet's
+        # bias was added to a different jet's truth. That mispairing, plus the truth-nonempty
+        # selection, is where v0's "posterior 1.15 vs truth 1.40" came from.
+        "mean_mult_posterior": float(pm_all.mean()) if pm_all.size else float("nan"),
+        "mean_mult_ratio": (float(pm_all.mean() / tn_all.mean())
+                            if pm_all.size and tn_all.mean() else float("nan")),
+        # The same pair restricted to jets with a truth leading emission — the population
+        # every `dlund_*` row below lives on. Reported so the two are never confused again,
+        # and flagged: conditioning on the truth makes this comparison biased low.
+        "mean_mult_true_kept": float(tn_kept.mean()) if tn_kept.size else float("nan"),
+        "mean_mult_posterior_kept": (
+            float((np.array(n_mean_bias) + tn_kept).mean()) if tn_kept.size else float("nan")
         ),
+        "mean_mult_kept_is_truth_selected": True,
         # The empty tree. `mult_bias_*` is provably blind to this failure — a MAP that
         # answers 1 wherever the truth is 0 lands at mean multiplicity 1.41 against a
         # true 1.42 while recovering 0% of them — so it is reported explicitly.
@@ -277,6 +322,12 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         "mult_bias_posterior_median": float(np.mean(n_median_bias)),
         "coverage_68": float(np.mean(covered)),
     }
+    # Which row is the DECODE headline (docs/PLAN_prod_test_v1.md WP-C.3). The MAP is a
+    # diagnostic: it is the argmax of a high-entropy sequence posterior, an estimator for
+    # a loss nobody is measuring here (Stahlberg & Byrne, arXiv:1908.10090; Eikema & Aziz,
+    # arXiv:2005.10283). The population headline is the decode-free posterior series.
+    metrics["decode_headline"] = "dlund_mbr" if want_mbr else "dlund_posterior_medoid"
+    metrics["map_is_diagnostic"] = True
     if want_mbr:
         metrics["dlund_mbr"] = float(np.nanmean(d_mbr)) if d_mbr else float("nan")
         metrics["mult_bias_mbr"] = float(np.mean(n_mbr_bias)) if n_mbr_bias else float("nan")
@@ -310,12 +361,52 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         mult_bias_by_N[label] = entry
     metrics["mult_bias_by_N"] = mult_bias_by_N
 
+    # --- psi identifiability + resultant (gate G6) -----------------------------------
+    def _R(key):
+        return abs(psi_sum[key]) / psi_n[key] if psi_n[key] else float("nan")
+
+    metrics["psi"] = {
+        "resultant_truth": _R("truth"),
+        "resultant_point_estimate": _R("point"),
+        # NaN unless `experiment.closure_continuous=true`: the posterior's psi only
+        # exists once coordinates are drawn, and drawing them for this alone would be a
+        # second sampling pass. Asked-and-unavailable, not never-asked.
+        "resultant_posterior": _R("posterior"),
+        "n_nodes_truth": int(psi_n["truth"]),
+        "n_nodes_point_estimate": int(psi_n["point"]),
+        "n_nodes_posterior": int(psi_n["posterior"]),
+        "ratio_point_over_truth": (_R("point") / _R("truth")) if _R("truth") else float("nan"),
+        "frac_psi_unidentified": (psi_unident / psi_nodes_scored
+                                  if psi_nodes_scored else float("nan")),
+        "kappa_min_mode": float(getattr(model, "kappa_min_mode", 0.0)),
+        "point_coords_source": str(getattr(hat, "coords_source", "unknown")) if n_closure else "",
+    }
+    if verbose and psi_n["truth"]:
+        p = metrics["psi"]
+        print(f"  psi resultant |R| = |<e^(i psi)>|  :  truth = {p['resultant_truth']:.3f}"
+              f"   point estimate = {p['resultant_point_estimate']:.3f}"
+              f"  ({p['ratio_point_over_truth']:.2f}x)"
+              + (f"   posterior = {p['resultant_posterior']:.3f}"
+                 if p["n_nodes_posterior"] else "   posterior = n/a"
+                 " (needs experiment.closure_continuous=true)"))
+        print(f"      psi mode not identified (kappa < {p['kappa_min_mode']:g}) for"
+              f" {p['frac_psi_unidentified']:.1%} of point-estimate nodes;"
+              f" coordinates carried as {p['point_coords_source']!r}")
+
     if verbose:
         print("\nclosure + calibration on held-out jets:")
         print(
-            f"  mean multiplicity            :  true y = {metrics['mean_mult_true']:.2f}"
-            f"   hadron x = {metrics['mean_mult_hadron']:.2f}"
-            f"   posterior = {metrics['mean_mult_posterior']:.2f}"
+            f"  mean multiplicity, ALL {metrics['n_jets_scored']} jets"
+            f"   :  true y = {metrics['mean_mult_true']:.3f}"
+            f"   hadron x = {metrics['mean_mult_hadron']:.3f}"
+            f"   posterior = {metrics['mean_mult_posterior']:.3f}"
+            f"   ratio = {metrics['mean_mult_ratio']:.3f}   (gate G4 reads this row)"
+        )
+        print(
+            f"  the same on the {metrics['n_kept_leading']} truth-NONEMPTY jets"
+            f" :  true y = {metrics['mean_mult_true_kept']:.3f}"
+            f"   posterior = {metrics['mean_mult_posterior_kept']:.3f}"
+            f"   (SELECTED ON TRUTH — biased low by construction, not a second measurement)"
         )
         print(
             f"  leading-emission Lund distance to true y :  identity(x) = {metrics['dlund_identity']:.3f}"
@@ -417,7 +508,11 @@ def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=50
         leading_emission_cell([n.cell for n in y_hat.nodes], geometry), lead_truth, geometry
     )
 
-    print("\nper-jet point estimate q_phi(y | x) for one validation jet:")
+    print("\nper-jet point estimate q_phi(y | x) for one validation jet"
+          + ("  (MAP shown as a DIAGNOSTIC; MBR is the decode headline)" if want_mbr
+             else "  (MAP is a DIAGNOSTIC: the argmax of a high-entropy sequence"
+                  " posterior — set decode.point_estimator=mbr for the headline)")
+          + ":")
     print(
         f"  multiplicity:  truth y = {item['ny']}   model MAP = {y_hat.multiplicity}   "
         f"plain RSD (hadron x) = {len(x_raw)}   "

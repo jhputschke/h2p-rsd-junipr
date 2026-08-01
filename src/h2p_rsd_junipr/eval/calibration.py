@@ -228,8 +228,44 @@ def _tarp_reference_pool(model, val_ds, geometry, device, n_jets, kind, n_refs, 
     return pool
 
 
+def tarp_null_band(n_jets: int, n_alpha: int = 21, n_reps: int = 2000, seed: int = 0
+                   ) -> dict:
+    """The null distribution of `max_alpha |ECP(alpha) - alpha|`, by Monte Carlo at the
+    run's OWN `(n_jets, alpha grid)` (docs/PLAN_prod_test_v1.md WP-D.2).
+
+    Under a calibrated posterior each credibility level `f_i` is Uniform(0,1), so the
+    null needs no model: draw `n_jets` uniforms, build the same ECP on the same alpha
+    grid, take the sup deviation, repeat. This differs from the analytic `1.36/sqrt(n)`
+    in two ways that matter at the sizes actually used — the deviation is evaluated on a
+    FINITE alpha grid (which lowers it) and `1.36/sqrt(n)` is asymptotic (which is loose
+    at a few hundred) — and, unlike a formula, it is quoted at the size of the run that
+    produced the number.
+
+    The gate reads `p95`; `floor_ok` is the plan's precondition that the band be tight
+    enough for the statistic to mean anything at all (v0's 0.079 floor at n = 300 could
+    not have detected a 0.05 deviation, so quoting "max dev 0.037, passes" was quoting
+    the sample size)."""
+    rng = np.random.default_rng(seed)
+    alpha = np.linspace(0.0, 1.0, int(n_alpha))
+    f = rng.random((int(n_reps), int(n_jets)))
+    # ECP(alpha) = mean_i [f_i < alpha], vectorised over reps and the alpha grid
+    ecp = (f[:, None, :] < alpha[None, :, None]).mean(axis=2)
+    dev = np.abs(ecp - alpha[None, :]).max(axis=1)
+    p95 = float(np.percentile(dev, 95))
+    return {
+        "n_jets": int(n_jets), "n_alpha": int(n_alpha), "n_reps": int(n_reps),
+        "p95": p95, "p99": float(np.percentile(dev, 99)), "mean": float(dev.mean()),
+        "analytic_floor95": float(1.36 / np.sqrt(max(n_jets, 1))),
+        # A band whose own 95% point is above 0.05 cannot resolve a 5% miscalibration,
+        # so a "pass" against it is a statement about n, not about the posterior.
+        "floor_ok": bool(p95 < 0.05),
+        "floor_target": 0.05,
+    }
+
+
 def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
              reference="pooled", n_alpha=21, mbr_kwargs=None, seed=0,
+             null_reps=0, stratify=False, min_region_n=30,
              verbose=True) -> dict:
     """TARP expected coverage (Lemos et al., arXiv:2302.03026) on TREE-valued posteriors.
 
@@ -269,6 +305,7 @@ def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
         return {"tarp_max_dev": float("nan"), "n_jets": 0, "reference": str(reference)}
 
     f_levels = []
+    regions: list[str | None] = []
     for i in range(n_jets):
         item = val_ds[i]
         xf = item["xf"].unsqueeze(0).to(device)
@@ -283,6 +320,7 @@ def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
         f_levels.append(
             float(np.mean(d_draws < d_true) + 0.5 * np.mean(d_draws == d_true))
         )
+        regions.append(cell_region(leading_emission_cell(truth, geometry), geometry))
 
     f = np.asarray(f_levels, dtype=float)
     alpha = np.linspace(0.0, 1.0, int(n_alpha))
@@ -311,6 +349,44 @@ def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
         "reference": str(reference),
         "backend": str(emd_kw.get("backend", "pot")),
     }
+    # --- WP-D.2: the null band recomputed at THIS run's (n, alpha grid) -------------
+    if int(null_reps) > 0:
+        band = tarp_null_band(n_jets, n_alpha=int(n_alpha), n_reps=int(null_reps),
+                              seed=int(seed))
+        metrics["null_band"] = band
+        metrics["tarp_exceeds_null_mc"] = bool(max_dev > band["p95"])
+        # Gate G7 has two clauses, and this is the second: the band's own floor must be
+        # below 0.05 before "inside the band" is a statement about the posterior.
+        metrics["tarp_quotable"] = bool(band["floor_ok"])
+        metrics["tarp_passes_g7"] = bool(band["floor_ok"] and max_dev <= band["p95"])
+    # --- WP-D.2: the same statistic per Lund quadrant -------------------------------
+    if stratify:
+        reg = np.array([r if r is not None else "none" for r in regions])
+        by_region = {}
+        for label in REGION_LABELS:
+            sel = reg == label
+            n_r = int(sel.sum())
+            if not n_r:
+                continue
+            e_r = np.array([float(np.mean(f[sel] < a)) for a in alpha])
+            dev_r = float(np.max(np.abs(e_r - alpha)))
+            entry = {"n_jets": n_r, "tarp_max_dev": dev_r,
+                     "tarp_signed_bias": float(np.mean(e_r - alpha)),
+                     "ecp_at": {f"{a:.2f}": float(np.interp(a, alpha, e_r))
+                                for a in (0.5, 0.68, 0.9, 0.95)},
+                     # A quadrant's null is its OWN n, which is a fraction of the total —
+                     # so a per-region band is always looser, and saying which regions are
+                     # scoreable at all is the point of reporting it.
+                     "scored": bool(n_r >= int(min_region_n))}
+            if int(null_reps) > 0:
+                b_r = tarp_null_band(n_r, n_alpha=int(n_alpha), n_reps=int(null_reps),
+                                     seed=int(seed) + 1)
+                entry["null_p95"] = b_r["p95"]
+                entry["floor_ok"] = b_r["floor_ok"]
+                entry["exceeds_null"] = bool(dev_r > b_r["p95"])
+            by_region[label] = entry
+        metrics["by_region"] = by_region
+        metrics["region_min_n"] = int(min_region_n)
     if verbose:
         dev68 = ecp_at["0.68"] - 0.68
         verdict = ("over-confident (too narrow)" if dev68 < -0.03
@@ -325,6 +401,29 @@ def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
               f"   mean signed deviation = {signed:+.3f}")
         print("    " + "   ".join(f"ECP({a}) = {v:.3f}" for a, v in ecp_at.items())
               + f"   => {verdict}")
+        band = metrics.get("null_band")
+        if band:
+            print(f"  null band recomputed at THIS run's (n = {band['n_jets']},"
+                  f" {band['n_alpha']} alpha, {band['n_reps']} reps):"
+                  f" 95% = {band['p95']:.3f}, 99% = {band['p99']:.3f}"
+                  f"   (analytic 1.36/sqrt(n) = {band['analytic_floor95']:.3f})")
+            print(f"    max dev {max_dev:.3f} is"
+                  f" {'ABOVE' if metrics['tarp_exceeds_null_mc'] else 'inside'} it;"
+                  f" band floor {'<' if band['floor_ok'] else '>='} {band['floor_target']}"
+                  f" => the statistic is"
+                  f" {'quotable' if band['floor_ok'] else 'NOT quotable at this n'}"
+                  f"   => gate G7 {'PASS' if metrics['tarp_passes_g7'] else 'FAIL'}")
+        reg = metrics.get("by_region")
+        if reg:
+            print("  TARP by Lund quadrant:")
+            print(f"    {'region':>12} {'jets':>6} {'max dev':>9} {'null 95%':>9}"
+                  f" {'signed':>8}")
+            for label, e in reg.items():
+                flag = "" if e["scored"] else f"   < n={metrics['region_min_n']}, NOT SCORED"
+                p95 = e.get("null_p95")
+                print(f"    {label:>12} {e['n_jets']:>6} {e['tarp_max_dev']:>9.3f}"
+                      f" {(f'{p95:.3f}' if p95 is not None else 'n/a'):>9}"
+                      f" {e['tarp_signed_bias']:>+8.3f}{flag}")
     return metrics
 
 
@@ -334,7 +433,8 @@ def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
 def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_bins=10,
                     verbose=True, pit_coords=False, stratify_regions=False, tarp=False,
                     tarp_refs=100, tarp_reference="pooled", mbr_kwargs=None, seed=0,
-                    min_region_n=30, draws_by_jet=None):
+                    min_region_n=30, draws_by_jet=None, tarp_null_reps=0,
+                    tarp_stratify=False):
     """SBC / PIT / coverage on held-out jets, plus the opt-in WP2 additions.
 
     With `pit_coords=stratify_regions=tarp=False` (the defaults) the returned dict is
@@ -496,12 +596,52 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
         else:
             metrics["pit_coords"] = pits
             metrics["pit_coords_ks_max"] = pits["ks_max"]
+            # --- WP-D.3: the region x coordinate cross, as a scannable summary ------
+            # The cross already exists inside `pit_coords` when both switches are on, one
+            # nested dict per coordinate. Flattened here because that is the instrument
+            # gate G5 reads — "which coordinate, in which quadrant" — and a reader should
+            # not have to walk four nested dicts to find the worst cell of the table.
+            worst = {"coord": None, "region": None, "ks": float("nan"), "n": 0}
+            cross = {}
+            for name in pits["names"]:
+                by_r = pits["coords"][name].get("by_region")
+                if not by_r:
+                    continue
+                cross[name] = {r: {"ks": e["ks"], "n": e["n"], "mean": e["mean"],
+                                   "scored": bool(e["n"] >= int(min_region_n))}
+                               for r, e in by_r.items()}
+                for r, e in by_r.items():
+                    if e["n"] >= int(min_region_n) and not (e["ks"] <= worst["ks"]):
+                        worst = {"coord": name, "region": r, "ks": e["ks"], "n": e["n"]}
+            if cross:
+                metrics["pit_coords_by_region"] = cross
+                metrics["pit_coords_by_region_worst"] = worst
+                if verbose:
+                    print("\n  region x coordinate PIT (KS; the WP-D.3 attribution "
+                          f"instrument, regions with n < {min_region_n} not scored):")
+                    regs = sorted({r for v in cross.values() for r in v})
+                    print(f"    {'coord':>6} " + " ".join(f"{r:>13}" for r in regs))
+                    for name, v in cross.items():
+                        cells = []
+                        for r in regs:
+                            e = v.get(r)
+                            cells.append("n/a".rjust(13) if e is None else
+                                         (f"{e['ks']:.3f} ({e['n']})"
+                                          + ("" if e["scored"] else "*")).rjust(13))
+                        print(f"    {name:>6} " + " ".join(cells))
+                    if worst["coord"]:
+                        crit = 1.36 / max(np.sqrt(max(worst["n"], 1)), 1e-9)
+                        print(f"    worst scored cell: {worst['coord']} x {worst['region']}"
+                              f"  KS = {worst['ks']:.3f} on n = {worst['n']}"
+                              f"  (95% critical value at that n = {crit:.3f})")
 
-    # --- WP2.3: TARP -----------------------------------------------------------
+    # --- WP2.3 / WP-D.2: TARP, with its null band recomputed at this run's size ----
     if tarp:
         t = run_tarp(model, val_ds, geometry, device, K=K, n_jets=n_jets,
                      n_refs=tarp_refs, reference=tarp_reference,
-                     mbr_kwargs=mbr_kwargs, seed=seed, verbose=verbose)
+                     mbr_kwargs=mbr_kwargs, seed=seed, verbose=verbose,
+                     null_reps=int(tarp_null_reps), stratify=bool(tarp_stratify),
+                     min_region_n=int(min_region_n))
         metrics["tarp"] = t
         metrics["tarp_max_dev"] = t["tarp_max_dev"]
     return metrics

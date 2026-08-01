@@ -137,6 +137,58 @@ def fit_length_recalibration(pmfs, n_true, *, with_tilt: bool = True,
     return float(t), float(b)
 
 
+def fit_continue_temperature(sample_mean_n, target_mean_n: float, *,
+                             lo: float = 0.2, hi: float = 5.0, tol: float = 1e-3,
+                             max_iter: int = 40) -> tuple[float, dict]:
+    """`T` for `decode.continue_temperature` matching a target mean multiplicity.
+
+    `sample_mean_n(T) -> float` is the caller's measurement of `<N>` under the sampler
+    at temperature `T` (one closure over whatever jets are being fitted on); the target
+    is the held-out `<N>` those jets actually have. Solved by bisection on
+    `sample_mean_n(T) - target`, which is the right method here for two reasons: the map
+    is monotone (`T > 1` pulls every `p_cont` toward 1/2, and where the head is confident
+    to stop that lengthens trees), and each evaluation is a full sampling pass, so a
+    method that halves the bracket every call beats a gradient-free line search.
+
+    Returns `(T, info)` where `info` carries the bracket, the achieved mean, and — the
+    part that matters downstream — `fitted_under`, the description of the scale the fit
+    was performed on. That field exists because of the v0 §7 `tau` failure: a scalar
+    fitted on one scale and applied on another leaves the ranking intact and the number
+    in the wrong place. Fit on TRAINING-VAL jets and freeze; the closure notebook asserts
+    the pair it applies matches what it was fitted under.
+
+    A monotone problem with no root in `[lo, hi]` returns the closer endpoint and says so
+    in `info["bracketed"]` rather than extrapolating off the bracket."""
+    target = float(target_mean_n)
+    f_lo = float(sample_mean_n(lo)) - target
+    f_hi = float(sample_mean_n(hi)) - target
+    info = {"lo": float(lo), "hi": float(hi), "target_mean_n": target,
+            "mean_n_at_lo": f_lo + target, "mean_n_at_hi": f_hi + target,
+            "bracketed": bool(f_lo * f_hi <= 0.0)}
+    if not info["bracketed"]:
+        T = lo if abs(f_lo) < abs(f_hi) else hi
+        info.update(T=float(T), achieved_mean_n=(f_lo if T == lo else f_hi) + target,
+                    n_iter=0)
+        return float(T), info
+    a, b, fa = float(lo), float(hi), f_lo
+    it = 0
+    while it < int(max_iter) and (b - a) > tol:
+        mid = 0.5 * (a + b)
+        fm = float(sample_mean_n(mid)) - target
+        if abs(fm) < tol:
+            a = b = mid
+            fa = fm
+            break
+        if fa * fm <= 0.0:
+            b = mid
+        else:
+            a, fa = mid, fm
+        it += 1
+    T = 0.5 * (a + b)
+    info.update(T=float(T), achieved_mean_n=float(sample_mean_n(T)), n_iter=int(it))
+    return float(T), info
+
+
 def empty_gate(pmf, tau: float) -> bool:
     """True when the model's own `P(N=0|x)` clears `tau` — decide the EMPTY tree.
 

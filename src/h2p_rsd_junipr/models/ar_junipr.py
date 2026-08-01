@@ -422,8 +422,16 @@ class ARJunipr(PosteriorModel):
         return p_cont, logp_split, h
 
     def _step_batched(self, tok: torch.Tensor, e: torch.Tensor, h, kv=None):
+        """The SAMPLING step. `decode.continue_temperature` is applied here and only
+        here, which is what makes it a decode-layer object: `_step` (beam search),
+        `nll_terms` and `describe_sequence` read `cont_head` directly, so the trained
+        likelihood and the MAP are untouched by it. The default 1.0 skips the branch
+        entirely rather than dividing by one, so the off path is bit-identical."""
         hv, h = self._step_core(tok, e, h, kv)
-        p_cont = torch.sigmoid(self.cont_head(hv)).squeeze(-1)
+        cont_logit = self.cont_head(hv)
+        if self.continue_temperature != 1.0:
+            cont_logit = cont_logit / self.continue_temperature
+        p_cont = torch.sigmoid(cont_logit).squeeze(-1)
         split_logits = self.split_head(hv)
         return p_cont, split_logits, h
 
@@ -636,11 +644,28 @@ class ARJunipr(PosteriorModel):
         return tuple(p.squeeze(0) for p in self._coord_params_padded(xf, nx, yc))
 
     @torch.inference_mode()
-    def describe_sequence(self, xf, nx, cells) -> LundPointEstimate:
-        """Attach continuous coordinates (head modes for v2; cell centres for v1)
-        and the per-node + total log-density to a primary cell sequence. The total
-        equals -per_jet_nll for (x, y_hat) when y_hat's continuous targets are
-        these modes — the full joint log-density of the returned config."""
+    def describe_sequence(self, xf, nx, cells, coords=None, *, generator=None
+                          ) -> LundPointEstimate:
+        """Attach continuous coordinates and the per-node + total log-density to a
+        primary cell sequence. The total is the full joint log-density **of the returned
+        configuration** — that identity is the contract, and it is what forces the
+        log-density to be re-evaluated whenever a coordinate is not the head's mode.
+
+        Three coordinate sources (docs/PLAN_prod_test_v1.md WP-C):
+
+        * `coords` given — an `(L, 4)` table the caller already drew. This is the MBR
+          medoid path: the medoid IS a posterior sample, so its own coordinates are
+          carried verbatim and `psi_identified` is `None` (mode identifiability is not
+          a question about a draw).
+        * head modes (`coords=None`, the staged MAP), **except** where the von Mises
+          `kappa` falls below `decode.kappa_min_mode`. There the mode is the direction
+          of a near-zero resultant — arbitrary — so a DRAW is substituted and the node
+          is flagged `psi_identified=False`. v0 is the case in point: median
+          kappa = 0.022 (peak/trough 1.04) yet MAP/MBR reported a psi resultant
+          |R| = 0.69 against a truth of 0.045, a 17.5x pooled row that inflated both
+          decode gmeans.
+        * cell centres, for v1 (`continuous_coords=False`), which has no coordinate head.
+        """
         self.eval()
         dev = xf.device
         L = len(cells)
@@ -665,24 +690,47 @@ class ARJunipr(PosteriorModel):
             chosen = split_lp.gather(-1, yc[0].unsqueeze(-1)).squeeze(-1)
             cx, cy = self.cell_cx[yc], self.cell_cy[yc]
 
+            kappa_col = [None] * L
+            psi_flag: list = [None] * L
             if self.continuous_coords:
                 cell_emb = self.y_embed(yc)
                 params = self._coord_params(torch.cat([eh_t, cell_emb], dim=-1))
-                du_mean, dv_mean, _, _, lnz_mean, _, mu, _ = params
-                u_mode, v_mode = cx + du_mean, cy + dv_mean
-                # The mode of a TRUNCATED normal is its untruncated mean clamped into the
-                # support, so `physical` mode moves the reported ln z inside the grooming
-                # boundary by construction rather than by a downstream repair.
-                bounds = self.lnz_bounds(cx)
-                lnz_mode = (lnz_mean if bounds is None
-                            else torch.clamp(lnz_mean, min=bounds[0], max=bounds[1]))
-                coord_per = self._coord_logprob(params, u_mode, v_mode, lnz_mode, mu, cx, cy).squeeze(0)
-                lnz_mean = lnz_mode
+                du_mean, dv_mean, _, _, lnz_mean, _, mu, kappa = params
+                kappa_col = [float(kappa[0, t]) for t in range(L)]
+                if coords is not None:
+                    c4 = torch.as_tensor(coords, dtype=cx.dtype, device=dev).reshape(1, L, 4)
+                    u_mode, v_mode = c4[..., 0], c4[..., 1]
+                    lnz_mean, mu = c4[..., 2], c4[..., 3]
+                    src = "sample"                       # psi_flag stays None throughout
+                else:
+                    u_mode, v_mode = cx + du_mean, cy + dv_mean
+                    # The mode of a TRUNCATED normal is its untruncated mean clamped into
+                    # the support, so `physical` mode moves the reported ln z inside the
+                    # grooming boundary by construction, not by a downstream repair.
+                    bounds = self.lnz_bounds(cx)
+                    lnz_mean = (lnz_mean if bounds is None
+                                else torch.clamp(lnz_mean, min=bounds[0], max=bounds[1]))
+                    src = "mode"
+                    # --- WP-C.2: the psi mode is reported only where it is identified ---
+                    weak = kappa < self.kappa_min_mode
+                    if bool(weak.any()):
+                        g = self.decode_generator(dev) if generator is None else generator
+                        drawn = vonmises_sample(mu, kappa, generator=g)
+                        mu = torch.where(weak, drawn, mu)
+                        psi_flag = [(not bool(weak[0, t])) for t in range(L)]
+                    else:
+                        psi_flag = [True] * L
+                # Re-evaluated at whatever is actually reported, so `logprob` remains the
+                # joint density of the returned configuration in all three branches.
+                coord_per = self._coord_logprob(
+                    params, u_mode, v_mode, lnz_mean, mu, cx, cy
+                ).squeeze(0)
             else:
                 u_mode, v_mode = cx, cy
                 lnz_mean = torch.zeros_like(cx)
                 mu = torch.zeros_like(cx)
                 coord_per = torch.zeros(L, device=dev)
+                src = "cell_center"
 
             for t, c in enumerate(cells):
                 c = int(c)
@@ -696,16 +744,37 @@ class ARJunipr(PosteriorModel):
                         ln_invDelta=u, ln_kt=v, ln_z=lz, psi=ps,
                         kt=math.exp(v), delta_R=math.exp(-u), z=math.exp(lz),
                         logp_split=ls, logp_coord=lk, logp_cont=lc,
+                        kappa=kappa_col[t], psi_identified=psi_flag[t],
                     )
                 )
+        else:
+            src = "sample" if coords is not None else ("mode" if self.continuous_coords
+                                                       else "cell_center")
         total += length_logp
-        return LundPointEstimate(nodes=nodes, logprob=total, multiplicity=L)
+        return LundPointEstimate(nodes=nodes, logprob=total, multiplicity=L,
+                                 coords_source=src)
 
-    def describe_cells(self, xf, nx, cells) -> LundPointEstimate:
-        """MBR winner -> LundPointEstimate. AR attaches the head-mode continuous
-        coordinates and the exact joint log-density (its staged decode), richer than
-        the base cell-centre fallback."""
-        return self.describe_sequence(xf, nx, cells)
+    def describe_cells(self, xf, nx, cells, coords=None, *, generator=None
+                       ) -> LundPointEstimate:
+        """One posterior DRAW (the MBR medoid) -> LundPointEstimate, carrying its own
+        sampled coordinates.
+
+        This used to re-attach the head modes, which forfeited the one property that
+        makes the medoid worth having: it is a genuine posterior sample, and a sample
+        with its modes pasted back on is neither a sample nor the MAP. v0 measured the
+        cost — a psi resultant |R| = 0.69 against a truth of 0.045, from a head whose
+        median kappa is 0.022 — and `PLAN_prod_test_v1.md` WP-C.1 is the repair.
+
+        `coords` given (the caller already drew them alongside the cells) is used
+        verbatim; otherwise one draw is taken here. `map_estimate` is unaffected: it
+        goes through `describe_sequence` with `coords=None`, which is still the staged
+        mode decode."""
+        cells = [int(c) for c in cells]
+        if coords is None and cells and self.continuous_coords:
+            # the decode stream, not the global one — see `PosteriorModel.decode_generator`
+            g = self.decode_generator(xf.device) if generator is None else generator
+            coords = self.sample_coordinates(xf, nx, cells, generator=g)
+        return self.describe_sequence(xf, nx, cells, coords, generator=generator)
 
     @torch.inference_mode()
     def length_pmf(self, xf, nx, mults=None, n_samples: int = 500):
