@@ -499,6 +499,36 @@ def build(run_root: Path) -> str:
               "and unlike the `ln z` head change, NLL **is** comparable here: both "
               "factorizations are normalized densities over the same space.")
 
+    # --- encoder probe: one seed each, so the base arm's band is the only yardstick ----
+    enc_fams = [f for f in ("v1_gru", "v1_deepsets") if any(_arm_family(a) == f for a in arms)]
+    if enc_fams:
+        P("## Encoder probe — `lundnet` vs `gru` vs `deepsets`\n")
+        P("**One seed each.** The plan budgets a single training per encoder, so these rows "
+          "carry no band of their own and the only honest yardstick is the `v1_base` band "
+          "at the same configuration. A difference inside that band is not a difference "
+          "between encoders — v0 §10 left this probe open precisely because the earlier "
+          "attempt could not clear it.")
+        P("")
+        base_bands = {label: _family_vals("v1_base", getter)
+                      for label, getter, _d in QUANTITIES}
+        P("| quantity | `v1_base` (lundnet, 3 seeds) | "
+          + " | ".join(f"`{f}` (1 seed)" for f in enc_fams) + " | any outside the band? |")
+        P("|---|---|" + "---|" * (len(enc_fams) + 1))
+        for label, getter, _d in QUANTITIES:
+            b = base_bands.get(label) or []
+            if not b:
+                continue
+            cells, outside = [], []
+            for f in enc_fams:
+                v = _family_vals(f, getter)
+                cells.append(_fmt(v[0], ".4f") if v else "n/a")
+                if v and not (min(b) <= v[0] <= max(b)):
+                    outside.append(f)
+            P(f"| {label} | {sum(b)/len(b):.4f} [{min(b):.4f}, {max(b):.4f}] | "
+              + " | ".join(cells) + " | "
+              + (", ".join(f"`{f}`" for f in outside) if outside else "no") + " |")
+        P("")
+
     # seed band on the arms that have one
     fams: dict[str, list] = {}
     for arm, e in arms.items():
