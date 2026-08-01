@@ -425,6 +425,57 @@ def build(run_root: Path) -> str:
         P(f"- support audit on the legacy arm: {gl2['detail']}")
         P("")
 
+    # --- aux isolation: v1_base vs v1_ctrl, band against band ----------------------
+    # The question is what the secondary-plane + groomed-mass columns buy over pure jet
+    # kinematics. A difference of means is only a finding when it clears the seed spread —
+    # v0 §5's aux A/B failed precisely because its -0.029 nat delta WAS the 0.029 spread.
+    def _family_vals(fam, getter):
+        out = []
+        for arm, e in arms.items():
+            if _arm_family(arm) != fam:
+                continue
+            v = getter(arm, e)
+            if v is not None and math.isfinite(v):
+                out.append(v)
+        return sorted(out)
+
+    def _best_val_nll(arm, e):
+        f = e["dir"] / "metrics.csv"
+        if not f.is_file():
+            return None
+        rows = [r for r in f.read_text().splitlines()[1:] if r]
+        return min(float(r.split(",")[3]) for r in rows) if rows else None
+
+    QUANTITIES = [
+        ("best val NLL/jet", _best_val_nll, "lower"),
+        ("`ln z` PIT KS", lambda a, e: _get(e["metrics"], "calibration.pit_coords.coords.ln_z.ks"), "lower"),
+        ("`pit_ks_max`", lambda a, e: _get(e["metrics"], "calibration.pit_coords_ks_max"), "lower"),
+        ("TARP max dev", lambda a, e: _get(e["metrics"], "calibration.tarp.tarp_max_dev"), "lower"),
+        ("`coverage_68`", lambda a, e: _get(e["metrics"], "calibration.coverage_68"), "0.68"),
+        ("medoid/identity", lambda a, e: ((_get(e["metrics"], "closure.dlund_posterior_medoid") or float('nan'))
+                                          / (_get(e["metrics"], "closure.dlund_identity") or float('nan'))), "lower"),
+    ]
+    if any(_arm_family(a) == "v1_ctrl" for a in arms):
+        P("## Aux isolation — `v1_base` (9 columns) vs `v1_ctrl` (`ln_pt`, `abs_eta`)\n")
+        P("| quantity | `v1_base` mean [band] | `v1_ctrl` mean [band] | delta | clears the spread? |")
+        P("|---|---|---|---:|---|")
+        for label, getter, _dir in QUANTITIES:
+            b = _family_vals("v1_base", getter)
+            c = _family_vals("v1_ctrl", getter)
+            if not b or not c:
+                continue
+            mb, mc = sum(b) / len(b), sum(c) / len(c)
+            spread = max(max(b) - min(b), max(c) - min(c))
+            clears = abs(mb - mc) > spread
+            P(f"| {label} | {mb:.4f} [{min(b):.4f}, {max(b):.4f}] (n={len(b)}) "
+              f"| {mc:.4f} [{min(c):.4f}, {max(c):.4f}] (n={len(c)}) | {mb - mc:+.4f} "
+              f"| {'**yes**' if clears else 'no — inside the seed spread'} |")
+        P("")
+        P("A delta that does not clear the seed spread is not a measurement of the aux "
+          "columns; it is a measurement of the seed. Plan §12's WP3 trigger — *the "
+          "secondary columns carry the aux gain* — requires a delta that clears it.")
+        P("")
+
     # seed band on the arms that have one
     fams: dict[str, list] = {}
     for arm, e in arms.items():
