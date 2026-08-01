@@ -437,6 +437,31 @@ from the `prod_test_v0_metrics.json` that `notebooks/prod_test_v0.ipynb` writes,
 cannot disagree with the fit that produced them. Adapt `SUBS` in the generator for a
 different study.
 
+### The same closure without a kernel: PDF figures + a Markdown report
+
+When the output has to survive a kernel restart — a report to circulate, a run on a
+headless box, a batch job — `scripts/lund_closure_report.py` is the same analysis with
+the output inverted: every panel becomes a PDF under `<out>/figures/`, and the prose,
+the tables and the run-evaluated conclusions become `<out>/report.md`, which references
+each figure by number. It defaults to the same production-test settings, read from the
+same artifact and guarded by the same tau-scale check.
+
+```bash
+PYTHONPATH=src python scripts/lund_closure_report.py --probe 20     # cost, then exit
+PYTHONPATH=src python scripts/lund_closure_report.py --jets 2000    # -> <ckpt dir>/lund_closure_report/
+PYTHONPATH=src python scripts/lund_closure_report.py --no-prod-metrics \
+    --ckpt runs/<id>/best.ckpt --root cpp/test_data/jets.root --png
+```
+
+`--png` writes a PNG beside each PDF and embeds it, for viewers that cannot inline a
+PDF. It is a *second* implementation of the headline ratios, which is exactly what the
+generator above exists to avoid, so the drift check is made cheap instead: it writes
+`dist_closure_metrics.json` in the notebook's schema, and `jq -S .headline` on the two
+should agree for the same checkpoint, file, `K` and MBR backend. Agree *to within
+sampling noise*, not bit-for-bit — the notebook's §4a cost probe consumes the torch RNG
+before its main pass, so the draw streams differ. Where they disagree by more than that,
+the notebook is the definition.
+
 ### Configuring decode from a preset instead of a CLI chain
 
 `decode` is liftable the same way, through the full composition surface — `decode=<name>`,
