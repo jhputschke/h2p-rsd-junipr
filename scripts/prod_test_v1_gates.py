@@ -455,26 +455,49 @@ def build(run_root: Path) -> str:
         ("medoid/identity", lambda a, e: ((_get(e["metrics"], "closure.dlund_posterior_medoid") or float('nan'))
                                           / (_get(e["metrics"], "closure.dlund_identity") or float('nan'))), "lower"),
     ]
-    if any(_arm_family(a) == "v1_ctrl" for a in arms):
-        P("## Aux isolation — `v1_base` (9 columns) vs `v1_ctrl` (`ln_pt`, `abs_eta`)\n")
-        P("| quantity | `v1_base` mean [band] | `v1_ctrl` mean [band] | delta | clears the spread? |")
+    def family_ab(fam_a, fam_b, title, note):
+        """`fam_a` vs `fam_b`, band against band, on every deciding metric."""
+        if not any(_arm_family(a) == fam_b for a in arms):
+            return
+        P(f"## {title}\n")
+        P(f"| quantity | `{fam_a}` mean [band] | `{fam_b}` mean [band] | delta "
+          f"| clears the spread? |")
         P("|---|---|---|---:|---|")
         for label, getter, _dir in QUANTITIES:
-            b = _family_vals("v1_base", getter)
-            c = _family_vals("v1_ctrl", getter)
+            b = _family_vals(fam_a, getter)
+            c = _family_vals(fam_b, getter)
             if not b or not c:
                 continue
             mb, mc = sum(b) / len(b), sum(c) / len(c)
-            spread = max(max(b) - min(b), max(c) - min(c))
-            clears = abs(mb - mc) > spread
+            # The spread of a ONE-seed family is 0, which would make every delta look
+            # decisive. Fall back to the other family's spread, and say n so a reader can
+            # see which side is unbanded.
+            spreads = [max(v) - min(v) for v in (b, c) if len(v) > 1]
+            spread = max(spreads) if spreads else float("nan")
+            clears = bool(spreads) and abs(mb - mc) > spread
+            verdict = ("**yes**" if clears else
+                       "no — inside the seed spread" if spreads else
+                       "**no band** — neither family has >1 seed")
             P(f"| {label} | {mb:.4f} [{min(b):.4f}, {max(b):.4f}] (n={len(b)}) "
               f"| {mc:.4f} [{min(c):.4f}, {max(c):.4f}] (n={len(c)}) | {mb - mc:+.4f} "
-              f"| {'**yes**' if clears else 'no — inside the seed spread'} |")
+              f"| {verdict} |")
         P("")
-        P("A delta that does not clear the seed spread is not a measurement of the aux "
-          "columns; it is a measurement of the seed. Plan §12's WP3 trigger — *the "
-          "secondary columns carry the aux gain* — requires a delta that clears it.")
+        P(note)
         P("")
+
+    family_ab("v1_base", "v1_ctrl",
+              "Aux isolation — `v1_base` (9 columns) vs `v1_ctrl` (`ln_pt`, `abs_eta`)",
+              "A delta that does not clear the seed spread is not a measurement of the aux "
+              "columns; it is a measurement of the seed. Plan §12's WP3 trigger — *the "
+              "secondary columns carry the aux gain* — requires a delta that clears it.")
+    family_ab("v1_base", "v1_contstop",
+              "G8 family A/B — explicit `q(N|x)` vs implicit continue/stop",
+              "**SBC-on-N is reported below and does not decide**, per gate G8: the explicit "
+              "head is trained by direct NLL on `N`, so it is calibrated on that statistic "
+              "nearly by construction and an A/B judged on it is biased toward it. The "
+              "deciding metrics are the coordinate PITs, TARP, coverage and held-out NLL — "
+              "and unlike the `ln z` head change, NLL **is** comparable here: both "
+              "factorizations are normalized densities over the same space.")
 
     # seed band on the arms that have one
     fams: dict[str, list] = {}
