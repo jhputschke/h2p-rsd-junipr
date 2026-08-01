@@ -648,13 +648,25 @@ Three properties that follow from the factorization rather than from a knob:
 > cost, which with sharp kernels is the normal regime at high `k_t`. It is the same staged
 > decode `ar_junipr_v3` uses, with an exact marginal in place of a learned head.
 
-> **`edit_v2` is gated on a stage-1 result, not on taste.** Build it only after the residual
-> widths from `edit_v1` have been fit to `σ = σ₀ + Λ_eff·exp(−ln k_t)` and `Λ_eff` has landed
-> at `O(1 GeV)` with a stable fit. The v2 prediction network runs over the emitted **cell**
-> prefix and feeds the *emission* heads only; the op head stays prefix-free in both stages,
-> which is exactly the condition for `length_pmf` to remain exact ("teacher forcing enters
-> the prefix only — never the length"). Memory scales as `batch·(n_x+1)·n_y·n_cells`, so drop
-> `trainer.batch_size` on a long-tailed sample.
+> **`edit_v2` is gated on a stage-1 result, not on taste — and the gate has been checked
+> once.** The premise it rests on is that the smearing really is a `Λ_eff/k_t` kernel; if
+> the residual widths are flat in `k_t` there is nothing for a richer emission model to
+> sharpen. On `cpp/test_data/jets.root` the fit lands at `Λ_eff = 1.29 GeV`, `R² = 1.000`
+> (see [`PLAN_EditTransducer.md`](PLAN_EditTransducer.md)), so `edit_v2` ships. That result
+> is **sample-dependent**: re-run the check on your own selection before quoting anything
+> from v2, by binning `model.alignment_posterior(batch)`'s residuals in `ln k_t` and fitting
+> `σ = σ₀ + Λ_eff·exp(−ln k_t)`. Do it with `model.physics_width=false`, or you are reading
+> back the form you imposed.
+>
+> The v2 prediction network runs over the emitted **cell** prefix and feeds the *emission*
+> heads only; the op head stays prefix-free in both stages, which is exactly the condition
+> for `length_pmf` to remain exact ("teacher forcing enters the prefix only — never the
+> length"). Memory scales as `batch·(n_x+1)·n_y·n_cells`, so drop `trainer.batch_size` on a
+> long-tailed sample.
+>
+> **Nothing has adjudicated v1 vs v2 yet.** Held-out NLL is the arbiter and it has not been
+> run at equal budget — v2 carries ~40% more parameters, so a lower NLL on its own says
+> little.
 
 > **`supports_coordinate_pit = False` in both stages.** The exact prefix-conditional CDF is
 > available from the same recursion as a responsibility-weighted mixture of
