@@ -130,9 +130,11 @@ the docs:
   that produced them: `CKPT_PATH`, `ROOT_PATH`, the **frozen** `EMPTY_THRESHOLD` (v2's
   `None` rate-matches tau on the sample it reports on — circular), and
   `LENGTH_TEMPERATURE` / `LENGTH_TILT`. That last pair reaches `sample`, not just
-  `length_pmf`: on this checkpoint it moves the posterior empty rate from 0.047 to 0.156
-  against a truth of 0.168, so an artifact that does not record it cannot have its empty
-  rate attributed. Run [`prod_test_v0.ipynb`](prod_test_v0.ipynb) first; without its
+  `length_pmf`, so an artifact that does not record it cannot have its empty rate
+  attributed. How much it moves depends on the checkpoint: on the pre-encoder-fix arms it
+  took the posterior empty rate from 0.047 to 0.156 against a truth of 0.168, while on the
+  fixed arms the head is already calibrated and the fitted pair is the identity to within
+  1% — which is exactly why the value has to be recorded rather than assumed either way. Run [`prod_test_v0.ipynb`](prod_test_v0.ipynb) first; without its
   artifact this one raises rather than silently falling back to `cpp/test_data/jets.root`
   — the file the checkpoint trained on.
 
