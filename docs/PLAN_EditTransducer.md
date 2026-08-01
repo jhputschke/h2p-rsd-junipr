@@ -1,6 +1,40 @@
 # PLAN — Edit transducer: hadron→parton as a learned smearing + birth/death process
 
-**Status: proposed.** A **fourth model family** (`edit_v1` / `edit_v2`) beside §5.1 AR
+**Status: implemented (both stages), opt-in, NOT a default.**
+[models/edit_dp.py](../src/h2p_rsd_junipr/models/edit_dp.py) +
+[models/edit.py](../src/h2p_rsd_junipr/models/edit.py), configs
+`model=edit_v1|edit_v2`, tests `tests/test_edit_dp.py` / `tests/test_edit_model.py`.
+`verify_parity.py` is unchanged.
+
+Three deviations from the design below, each argued at its site: the op head is
+prefix-free in **both** stages (that is the condition for the exact `length_pmf`, and
+`edit_v2`'s prediction network runs over the emitted *cell* prefix into the emission heads
+only); the free head's within-cell offsets are cell-independent (a per-`(i, j, cell)` head
+would be `n_cells` times the lattice); and `map_estimate` takes its LENGTH from the exact
+`q(N|x)` rather than from the joint argmax, because a joint argmax over a
+variable-dimension density runs to `max_emissions` whenever the modal emission density
+beats the op cost — the shape decode is additionally restricted to at most one anchored
+emission per hadron column, without which the argmax is degenerate.
+
+**Verification 4 — the decisive check — passes.** On `cpp/test_data/jets.root`
+(54k PYTHIA jets, `edit_v1`+`gru`, 6 epochs, val NLL 5.45/jet), the
+responsibility-weighted residual widths binned in `ln k_t` fall monotonically and fit
+`σ = σ_0 + Λ_eff·exp(−ln k_t)` at **R² = 1.000 with Λ_eff = 1.29 GeV** for `ln k_t`
+(0.45 GeV for `ln 1/ΔR`, 0.44 GeV for `ln z`). That number is quoted from the
+**`physics_width=false` ablation**, whose widths are a free MLP output never told the
+functional form — so it is an independent readout, not a restatement of the
+parametrization. `Λ_eff` at `O(1 GeV)` with a stable fit is what the family's inductive
+bias predicts, so the anchoring assumption holds on this data. Verification 5 (the
+motivating A/B) at the same 6 epochs: `dlund_posterior_mode` **0.651** vs
+`dlund_identity` **0.687** — the gap this family exists to close is closed, and
+`dlund_posterior_medoid` reaches 0.622. `p_empty_pred` = 0.173 against a truth of 0.160
+**with `decode.empty_threshold` off**, i.e. the empty parton tree comes out right without
+the decode-layer gate, exactly as the exact `q(N=0|x)` predicts. Caveats: these are
+6-epoch runs on the small test file, not production fits, and `frac_anchored` sits at
+0.20 — mixture identifiability (risk 2) is live and wants a longer fit and a look at
+`p_anch` initialization before any of this is quoted as a result.
+
+A **fourth model family** (`edit_v1` / `edit_v2`) beside §5.1 AR
 JUNIPR, §5.2 cINN, §5.3 diffusion/CFM. It changes the *factorization* of
 `q(y|x)` — not the target, not the objective, not the geometry — by making the
 hadron-level tree the **anchor** of the parton-level tree rather than only a

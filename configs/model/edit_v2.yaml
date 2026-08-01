@@ -1,0 +1,30 @@
+# §5.4 edit transducer, stage 2 — the transducer (docs/PLAN_EditTransducer.md).
+#
+# edit_v1 with a prediction network over the emitted CELL prefix feeding the emission
+# heads, which is what buys recoil correlation among the y nodes — the one thing the
+# pair-HMM structurally cannot represent. RNN-T's trick keeps it cheap: the prefix state
+# c_j depends only on j, so it is O(n_y) GRU steps computed once and then joined with s_i
+# across the lattice.
+#
+# The OP (stay/emit) head stays prefix-free, in both stages. That is the condition under
+# which the coordinates marginalize out of the lattice, i.e. the condition for length_pmf
+# to remain EXACT — teacher forcing enters the prefix only, never the length. Conditioning
+# on the emitted cells rather than their continuous coordinates is the matching choice on
+# the emission side: it keeps sample_coordinates' constrained forward-backward exact too.
+#
+# Do NOT reach for this before the stage-1 diagnostic says the anchoring assumption holds
+# (fit sigma = sigma_0 + Lambda_eff . exp(-ln kt) to the responsibility-weighted residual
+# widths; flat in k_t means the premise is wrong). Memory scales as
+# batch . (n_x+1) . n_y . n_cells for the free-cell head, so drop trainer.batch_size if a
+# long-tailed sample makes that bite.
+#
+# Requires an encoder with returns_sequence=true (gru, lundnet, deepsets all qualify).
+ctx_dim: 64
+op_head_layers: 2
+shift_head_layers: 2
+free_head_layers: 2
+sigma_floor: 0.01
+kappa_max: 50.0
+max_emissions: 25             # support of the exact structural q(N|x)
+physics_width: true           # sigma_0 + Lambda_eff/k_t; false == the free-MLP ablation
+prefix_conditioning: true     # the v2 switch

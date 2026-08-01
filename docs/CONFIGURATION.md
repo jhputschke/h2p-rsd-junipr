@@ -132,7 +132,8 @@ dataclass default → the winning <group>/<name>.yaml (base dir before configs/)
 > **Three different `max_emissions`.** They are independent caps — don't confuse them:
 > `data.max_emissions` (synthetic *truth* length cap), `model.max_emissions` (multiplicity-head
 > width for cINN / diffusion / `cfm` / `ar_junipr_v3+`, and the one the §4 **support guard**
-> checks the data against), and `decode.max_emissions` (beam/sample length cap). Each is
+> checks the data against — for `edit_v1/v2` it is only the exact-`q(N|x)` readout width and
+> the guard does not apply), and `decode.max_emissions` (beam/sample length cap). Each is
 > documented in its own section.
 
 ---
@@ -415,8 +416,9 @@ h2p-rsd-junipr train model=ar_junipr_v3 encoder=gru \
 ## 4. `model` — the posterior family
 
 The polymorphic group:
-`model=ar_junipr_v2|ar_junipr_v1|ar_junipr_v3|ar_junipr_v4|cinn|diffusion|cfm` binds a
-specific schema. All families expose the same `log_prob`/`sample`/`map_estimate` contract.
+`model=ar_junipr_v2|ar_junipr_v1|ar_junipr_v3|ar_junipr_v4|cinn|diffusion|cfm|edit_v1|edit_v2`
+binds a specific schema. All families expose the same
+`log_prob`/`sample`/`map_estimate` contract.
 `ctx_dim` is the context width the encoder must produce (the encoder is built with this as
 its output dim). Sources: [`models/`](../src/h2p_rsd_junipr/models/).
 
@@ -430,6 +432,7 @@ attribute `exact_likelihood` says which:
 | `ar_junipr_v1/v2/v3/v4` | `True` | exact: categorical terms + closed-form coordinate densities |
 | `cinn` | `True` | exact: change of variables through the RealNVP |
 | `cfm` | `True` | exact: probability-flow ODE with an exact 4-VJP divergence |
+| `edit_v1/v2` | `True` | exact: the RNN-T lattice normalizes by construction; the alignment is marginalized, not approximated |
 | `diffusion` | **`False`** | a denoising-score-matching **surrogate** with an unknown offset |
 
 **Only compare NLLs, and only form likelihood ratios, across the `True` rows.** `train`,
@@ -580,6 +583,83 @@ Two things worth knowing before using it:
 > branch cut at ±π: the density is exactly normalized on `(-π, π)` but the seam is not
 > closed structurally (the model can learn to match across it, but nothing enforces it).
 > Fixing that needs Riemannian flow matching, deliberately out of scope.
+
+### `edit_v1` / `edit_v2` — the edit transducer (latent alignment)
+
+The one family that does not generate `y` from scratch
+([`PLAN_EditTransducer.md`](PLAN_EditTransducer.md)). The hadron tree is the **anchor** of
+the parton tree: each parton node is a smeared copy of a hadron node (**kept**), a fresh
+draw (**insertion**), or a hadron node with no image at all (**deletion**). Which is which
+is a **latent** variable, marginalized by an `O(n_x·n_y)` forward recursion — node-level
+parton↔hadron correspondence is not observable, so it is never a supervised target.
+
+    i <  nx : {ADVANCE, EMIT}      i == nx : {STOP, EMIT}   (trailing insertions)
+    EMIT    : y_{j+1} ~ p_anch·f_shift(·|x_i) + (1 − p_anch)·f_free(·)
+
+This is the RNN-T lattice (Graves, arXiv:1211.3711), so `Σ_y q(y|x) = 1` holds by
+construction and `exact_likelihood = True` is structural rather than asserted. Requires an
+encoder with `returns_sequence = true` (`gru`, `lundnet`, `deepsets` all qualify) — the
+anchors are the **per-node** states, not the pooled `e(x)`.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `ctx_dim` | `64` | context width; also the width the per-node states are projected to |
+| `op_head_layers` | `2` | depth of the STAY/EMIT head |
+| `shift_head_layers` | `2` | depth of the anchored-emission head (displacements + `p_anch`) |
+| `free_head_layers` | `2` | depth of the free-emission (insertion) heads |
+| `sigma_floor` | `1e-2` | floor on every width |
+| `kappa_max` | `50.0` | von Mises concentration ceiling |
+| `max_emissions` | `25` | readout width of the exact `q(N\|x)` and the sampler's cap — **not** a likelihood support (see below) |
+| `physics_width` | `true` | `σ = σ₀ + Λ_eff·exp(−ln k_t)`; `false` = free-MLP ablation |
+| `prefix_conditioning` | `false` | `false` = `edit_v1`, `true` = `edit_v2` |
+
+Three properties that follow from the factorization rather than from a knob:
+
+- **Length is anchored at `|x|`.** `n_y = n_x − #del + #ins`, so the open-ended
+  continue/stop mechanism — the documented seat of the marginal multiplicity bias and of
+  MAP collapse — is removed *structurally*. Marginalizing the coordinates out of the same
+  recursion gives `q(N|x)` **exactly, with no extra parameters**, and that is what
+  `length_pmf` returns. `empty_gate` therefore reads an exact `q(N=0|x)`: the empty parton
+  tree is the delete-all path, represented natively. `length_floor_quantile` and
+  `learned_min_emissions` compose unchanged.
+- **The width is a physics form, not an MLP output.** `σ = σ₀ + Λ_eff/k_t` is the
+  shape-function scaling of local parton–hadron duality, so `Λ_eff` comes out in GeV and
+  the learned kernel is directly confrontable with the expectation (arXiv:1906.11843)
+  instead of opaque. `model.physics_width_params()` reads it back. This is the family's
+  falsifiable claim: **if the residual widths are flat in `k_t`, the anchoring assumption
+  is wrong.**
+- **The alignment posterior is a free diagnostic.** `eval` reports `frac_anchored`,
+  `insert_rate` and `delete_rate` off the forward–backward responsibilities — an emergent
+  alignment, obtained without ever supervising one. `model.alignment_posterior(batch)`
+  returns the per-`(i, j)` responsibilities for binning residual widths.
+
+> **`model.max_emissions` is inert in the likelihood here**, unlike `cinn`/`cfm`/`ar_junipr_v3+`.
+> The length model is the open-ended STOP/EMIT lattice, so a truth longer than
+> `max_emissions` is merely improbable, not mis-normalized — which is why the §4 support
+> guard does not apply to this family (`data/stats.py:model_support`). What the cap does
+> bound is the `length_pmf` array (renormalized over `n ≤ max_emissions`) and the sampler.
+
+> **`decode.point_estimator=mbr` is the recommended estimator for this family.**
+> `map_estimate` is a labelled **surrogate** twice over: the shape is the best single
+> alignment (the exact MAP is an argmax of a marginal-over-alignments, and is intractable),
+> and the length is `argmax_n q(N=n|x)` from the exact marginal rather than the joint
+> argmax. The latter is not a shortcut — a joint argmax over a variable-dimension *density*
+> runs straight to `max_emissions` whenever the modal emission density beats the per-step op
+> cost, which with sharp kernels is the normal regime at high `k_t`. It is the same staged
+> decode `ar_junipr_v3` uses, with an exact marginal in place of a learned head.
+
+> **`edit_v2` is gated on a stage-1 result, not on taste.** Build it only after the residual
+> widths from `edit_v1` have been fit to `σ = σ₀ + Λ_eff·exp(−ln k_t)` and `Λ_eff` has landed
+> at `O(1 GeV)` with a stable fit. The v2 prediction network runs over the emitted **cell**
+> prefix and feeds the *emission* heads only; the op head stays prefix-free in both stages,
+> which is exactly the condition for `length_pmf` to remain exact ("teacher forcing enters
+> the prefix only — never the length"). Memory scales as `batch·(n_x+1)·n_y·n_cells`, so drop
+> `trainer.batch_size` on a long-tailed sample.
+
+> **`supports_coordinate_pit = False` in both stages.** The exact prefix-conditional CDF is
+> available from the same recursion as a responsibility-weighted mixture of
+> `trunc_normal_cdf` / `gauss_cdf` / `vonmises_cdf`; it lands once the DP is trusted, not
+> before. The WP2 coordinate-PIT panel therefore reports nothing for this family today.
 
 ---
 

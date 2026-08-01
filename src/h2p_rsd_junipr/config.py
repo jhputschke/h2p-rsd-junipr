@@ -180,6 +180,33 @@ class CFMConfig:
 
 
 @dataclass
+class EditTransducerConfig:
+    """Edit transducer (docs/PLAN_EditTransducer.md): the hadron tree ANCHORS the parton
+    tree instead of only conditioning it, with the alignment latent and marginalized by
+    dynamic programming. Requires an encoder with `returns_sequence=True`."""
+
+    name: str = "edit"
+    ctx_dim: int = 64
+    op_head_layers: int = 2
+    shift_head_layers: int = 2
+    free_head_layers: int = 2
+    sigma_floor: float = 1e-2
+    kappa_max: float = 50.0
+    max_emissions: int = 25   # support of the EXACT structural q(N|x); unlike the
+    #                           categorical-head families this does NOT bound the
+    #                           likelihood's support (see data/stats.model_support)
+    physics_width: bool = True   # sigma = sigma_0 + Lambda_eff * exp(-ln kt), the
+    #                              shape-function form, with (sigma_0, Lambda_eff)
+    #                              learnable. False == the free-MLP width ablation.
+    prefix_conditioning: bool = False  # False == edit_v1 (pair-HMM: zero exposure bias,
+    #                                    conditionally independent shifts). True == edit_v2
+    #                                    (a prediction network over the emitted CELL prefix
+    #                                    feeds the emission heads, restoring recoil
+    #                                    correlation). The OP head stays prefix-free either
+    #                                    way — that is what keeps length_pmf exact.
+
+
+@dataclass
 class OptimConfig:
     lr: float = 2e-3
     weight_decay: float = 3e-4
@@ -295,6 +322,8 @@ MODEL_SCHEMA = {
     "cinn": CINNConfig,
     "diffusion": DiffusionConfig,
     "cfm": CFMConfig,                 # exact probability-flow-ODE likelihood
+    "edit_v1": EditTransducerConfig,  # pair-HMM: latent alignment, no prefix conditioning
+    "edit_v2": EditTransducerConfig,  # + a prediction network over the emitted prefix
 }
 ENCODER_SCHEMA = {
     "gru": EncoderConfig,

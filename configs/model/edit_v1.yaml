@@ -1,0 +1,25 @@
+# §5.4 edit transducer, stage 1 — the pair-HMM (docs/PLAN_EditTransducer.md).
+#
+# The hadron tree is the ANCHOR of the parton tree, not just a conditioning vector: each
+# parton node is either a smeared copy of a hadron node (kept), a fresh draw (insertion),
+# or a hadron node with no image at all (deletion). The alignment is LATENT and summed by
+# an O(n_x . n_y) forward recursion, because node-level parton<->hadron correspondence is
+# not observable and must never be a supervised target.
+#
+# Stage 1 conditions the ops and the emissions on (i, s_i, e) only — no prefix anywhere,
+# hence zero exposure bias, at the cost of conditionally independent shifts (no recoil
+# correlation among the y nodes). Let held-out NLL decide whether stage 2 (edit_v2) is
+# worth it, and only after the residual widths have been checked against
+# sigma = sigma_0 + Lambda_eff/k_t.
+#
+# Requires an encoder with returns_sequence=true (gru, lundnet, deepsets all qualify) —
+# the anchors are the encoder's PER-NODE states, not the pooled e(x).
+ctx_dim: 64
+op_head_layers: 2
+shift_head_layers: 2
+free_head_layers: 2
+sigma_floor: 0.01
+kappa_max: 50.0
+max_emissions: 25             # support of the exact structural q(N|x)
+physics_width: true           # sigma_0 + Lambda_eff/k_t; false == the free-MLP ablation
+prefix_conditioning: false    # the v1 switch

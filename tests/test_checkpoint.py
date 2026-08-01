@@ -44,6 +44,35 @@ def test_save_resume_roundtrip(tmp_path, batch):
         assert torch.allclose(model.log_prob(b), model2.log_prob(b), atol=1e-6)
 
 
+def test_edit_transducer_round_trips(tmp_path, batch):
+    """The fourth family through the same save/restore path. Worth its own case: its
+    parameters include the physics-width scalars `(sigma_0, Lambda_eff)`, which are the
+    fitted quantity the whole family is meant to report — a checkpoint that dropped them
+    would still load and still train."""
+    b, geom = batch
+    cfg = load_config(["model=edit_v1", "encoder=gru"])
+    device = torch.device("cpu")
+    model, opt, sched = build_components(cfg, geom, device)
+    for _ in range(2):
+        opt.zero_grad()
+        (-model.log_prob(b)).mean().backward()
+        opt.step()
+
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    path = tmp_path / "edit.pt"
+    save_checkpoint(path, model=model, optimizer=opt, scheduler=sched, scaler=scaler,
+                    epoch=2, step=2, best_val=9.0, cfg=cfg)
+
+    model2, opt2, sched2 = build_components(cfg, geom, device)
+    restore_into(model2, opt2, sched2, scaler, load_checkpoint(path, map_location=device))
+    model.eval()
+    model2.eval()
+    with torch.inference_mode():
+        assert torch.allclose(model.log_prob(b), model2.log_prob(b), atol=1e-6)
+    assert model2.physics_width_params() == model.physics_width_params()
+    assert load_for_inference(path)["model_name"] == "edit_v1"
+
+
 def test_load_for_inference_ignores_optimizer(tmp_path, batch):
     b, geom = batch
     cfg = load_config(["model=ar_junipr_v2"])

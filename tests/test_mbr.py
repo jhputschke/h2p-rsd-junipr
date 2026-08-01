@@ -59,6 +59,7 @@ MODELS = [
     ["model=ar_junipr_v3", "encoder=gru"],
     ["model=cinn", "encoder=deepsets"],
     ["model=diffusion", "encoder=lundnet"],
+    ["model=edit_v1", "encoder=gru"],
 ]
 
 GEOM = Geometry()  # default (0,6)^2, n_bins=10
@@ -269,6 +270,24 @@ def test_mbr_never_empty_when_nonempty_draws_dominate(backend, batch):
     assert pe.multiplicity >= 1                        # never the empty tree, no min_emissions
     assert pe.multiplicity == len(pe.nodes)
     assert pe.risk is not None and np.isfinite(pe.risk)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_mbr_never_empty_for_the_edit_family_either(backend, batch):
+    """MBR is the DEFAULT point estimator for the edit family (its MAP is a Viterbi
+    surrogate), so the headline invariant has to hold through its `describe_cells` —
+    which, unlike the other families', draws coordinates through a constrained
+    forward-backward before it can score the winner at all."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=edit_v1", "encoder=gru"]), geom).eval()
+    draws = [[12, 34, 56], [12, 34], [5, 34, 56], [12, 30, 56]] * 3 + [[], []]
+    torch.manual_seed(0)
+    pe = mbr.mbr_select(model, xf, nx, draws=draws, geom=geom, backend=backend)
+    assert pe.multiplicity >= 1 and pe.multiplicity == len(pe.nodes)
+    assert np.isfinite(pe.logprob) and pe.risk is not None and np.isfinite(pe.risk)
+    # the winner is a genuine drawn tree, placed at genuine drawn coordinates
+    assert [n.cell for n in pe.nodes] in [list(d) for d in draws]
+    assert all(geom.to_cell(n.ln_invDelta, n.ln_kt) == n.cell for n in pe.nodes)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
