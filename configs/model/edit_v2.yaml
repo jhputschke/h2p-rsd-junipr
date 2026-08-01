@@ -1,4 +1,4 @@
-# §5.4 edit transducer, stage 2 — the transducer (docs/PLAN_EditTransducer.md).
+# §5.5 edit transducer, stage 2 — the transducer (docs/PLAN_EditTransducer.md).
 #
 # edit_v1 with a prediction network over the emitted CELL prefix feeding the emission
 # heads, which is what buys recoil correlation among the y nodes — the one thing the

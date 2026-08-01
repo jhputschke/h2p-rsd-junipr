@@ -91,6 +91,41 @@ the jet energy**, because they weight soft, wide-angle radiation — exactly the
 hadronization and the underlying event dominate. That sensitivity is the problem
 grooming was invented to solve.
 
+### 2.3 Local parton–hadron duality: the residual is a *kernel*
+
+Power counting says hadronization is small; **local parton–hadron duality** says more
+than that — it says it is *local*. The hadron configuration tracks the parton
+configuration up to a short-distance smearing, so hadron-level distributions follow
+parton-level ones bin by bin up to power-suppressed corrections (Azimov, Dokshitzer,
+Khoze & Troyan, *Z. Phys. C* **27** (1985) 65). Organised as a convolution, that
+smearing is the **shape function** (Korchemsky & Sterman, arXiv:hep-ph/9902341).
+
+Three properties make the smearing *structured* rather than generic noise, and they
+are what §8's edit transducer is built on:
+
+- the scale runs as $\Lambda_{\rm eff}/k_t$ — a shift of order $\Lambda_{\rm eff}$ GeV
+  in $k_t$ is a width $\Lambda_{\rm eff}/k_t$ in $\ln k_t$, so the width is a
+  *predictable function of a node's own coordinates*, tight on hard/early emissions and
+  loose near the floor;
+- for a groomed jet the NP correction scales with the catchment geometry, hence with
+  $R_g$ and $z_g$ (Hoang, Mateu, Pathak, Stewart et al., arXiv:1906.11843) —
+  heteroscedasticity with a physical argument behind it;
+- prong multiplicity proxies colour charge through Casimir scaling of the emission
+  density (Dreyer, Salam & Soyez, arXiv:1807.04758).
+
+Births and deaths are equally structured: hadron-level nodes below the perturbative
+floor have no parton image, and parton nodes whose hadron image migrated across the
+grooming boundary have no hadron anchor. In `cpp/test_data/jets.root` (PYTHIA 8.3,
+$z_{\rm cut}=0.1$, 1 GeV floor) **6.9% of jets have no hadron-level primary emission and
+16.0% no parton-level one** (`tests/test_empty_sequences.py`) — this is a large effect,
+not a tail.
+
+Every family in §8 *except* the edit transducer ignores all of this: it conditions on
+`x` only through an encoder, so the decoder must relearn from data that $y\approx x$
+wherever hadronization is weak. The edit transducer instead writes the smearing down as
+$\sigma=\sigma_0+\Lambda_{\rm eff}\,e^{-\ln k_t}$ with $\Lambda_{\rm eff}$ **learnable**,
+which turns a modelling assumption into a *measurement*: see §8 and §9.
+
 ---
 
 ## 3. Why the map is a posterior, not a function
@@ -149,6 +184,24 @@ Two consequences are built into the code:
   kinematics generated conditional on it (arXiv:2510.19906). Because it is a
   bool switch, `ar_junipr_v2` stays bit-for-bit identical when off. See
   [`PLAN_MultHead.md`](PLAN_MultHead.md).
+- **Length anchored at $|x|$ — the edit transducer.** The multiplicity head above makes
+  the length *calibrated*; `model=edit_v1` makes it **structural**. If every parton node
+  is a kept (smeared) hadron node, an insertion, or a deleted hadron node, then
+  $$
+  n_y = n_x - \#\text{del} + \#\text{ins},
+  $$
+  so the multiplicity is pinned to $|x|$ and the open-ended continue/stop mechanism —
+  the seat of the brevity bias every knob above exists to patch — is *removed*, not
+  recalibrated. Two things fall out for free. Marginalising the coordinates out of the
+  same dynamic program leaves a purely structural recursion whose terminal value is
+  $q_\phi(N\mid x)$ **exactly, with no extra parameters** — what `ar_junipr_v3` learns
+  with a head, here derived and explicitly conditioned on $|x|$. And the **empty parton
+  tree** (16.0% of jets, §2.3) is simply the delete-all path, so it is represented
+  natively rather than reached by a decode-layer threshold: on the PYTHIA test file the
+  predicted empty rate is 0.173 against a truth of 0.160 with `decode.empty_threshold`
+  **off**. MAP collapse to $n=0$ is structurally suppressed too — it now requires
+  ADVANCE at all $n_x$ columns *and* a STOP, where the autoregressive families need one
+  stop draw. See §8 and [`PLAN_EditTransducer.md`](PLAN_EditTransducer.md).
 - **MBR — a floor-free alternative decision rule.** The floors above *mask* the
   length bias of the joint mode; **minimum Bayes risk** removes it at the source by
   changing the decision rule, not the density (`decode.point_estimator="mbr"`,
@@ -330,6 +383,18 @@ al., arXiv:2410.06342; Assi et al., arXiv:2503.05667) — the training objective
 stand-in (`data/synthetic.py`) mimics this forward map (kt-dependent smearing + soft
 migration) so the pipeline is testable without a generator.
 
+**Unobservable is not the same as absent.** The correspondence exists in the physics
+(§2.3) — it is simply not *recorded*, and no amount of generator bookkeeping would make
+it a target one could regress against without committing to a matching convention that
+is itself unmeasurable. The edit transducer (§8) therefore treats the alignment as a
+**latent variable and marginalises it**: every way of reading `y` as a smeared, edited
+copy of `x` is summed over, exactly, by dynamic programming, and the likelihood is still
+the jet-level $\log q_\phi(y\mid x)$ above. Nothing is supervised per node, so the
+constraint in §5 is respected rather than circumvented. What comes back afterwards is a
+*posterior over alignments* — the forward–backward responsibilities $\gamma(i,j)$,
+reported by `eval` as `frac_anchored` / `insert_rate` / `delete_rate` — an emergent
+matching, obtained without ever having been given one.
+
 ---
 
 ## 7. The amortized objective
@@ -356,10 +421,11 @@ loss = (batch["w"] * nll).sum() / batch["w"].sum()
 
 ---
 
-## 8. Architectures (one contract, three families)
+## 8. Architectures (one contract, five families)
 
-All families expose `log_prob` / `sample` / `map_estimate` (`models/base.py`), in
-decreasing affinity to the Lund-tree representation:
+All families expose `log_prob` / `sample` / `map_estimate` (`models/base.py`). The
+first four differ in *how* they model $q_\phi(y\mid x)$; the fifth differs in how it
+**factorizes** it:
 
 - **§5.1 Conditional autoregressive RSD-JUNIPR** (`models/ar_junipr.py`, the
   recommended and verified model). An encoder $e(x)$ over the hadron tree (bi-GRU,
@@ -384,10 +450,57 @@ decreasing affinity to the Lund-tree representation:
   trivial sampling; variable multiplicity via a multiplicity head + structured latent
   (Bellagente et al., arXiv:2006.06685; Backes et al., arXiv:2212.08674).
 - **§5.3 Conditional diffusion / Schrödinger bridge** (`models/diffusion.py`) — the
-  most expressive option (arXiv:2404.18807).
+  most expressive option (arXiv:2404.18807). Its `log_prob` is a denoising-score-matching
+  **surrogate**, not a density (`exact_likelihood=False`), so its NLLs are comparable
+  only within the family.
+- **§5.4 Conditional flow matching** (`models/cfm.py`) — the same cINN factorization with
+  the coordinate density given by a regressed vector field (Lipman et al.,
+  arXiv:2210.02747; FMPE, arXiv:2305.17161), and an **exact** probability-flow-ODE
+  likelihood (arXiv:2011.13456) with the 4-dimensional divergence computed exactly. The
+  exact-likelihood member of the continuous-time family.
+- **§5.5 Edit transducer** (`models/edit.py`, `models/edit_dp.py`) — the only family that
+  does not generate `y` from scratch. Everything above conditions on `x` through the
+  encoder alone, so the decoder must *relearn* that $y\approx x$ wherever hadronization
+  is weak; here the hadron tree is the **anchor** of the parton tree, and the physics of
+  §2.3 goes into the factorization rather than being left for the network to discover:
+  $$
+  \text{state }(i,j):\quad
+  i<n_x:\ \{\text{ADVANCE},\text{EMIT}\}\qquad
+  i=n_x:\ \{\text{STOP},\text{EMIT}\}
+  $$
+  $$
+  \text{EMIT}:\quad y_{j+1}\sim p_{\rm anch}\,f_{\rm shift}(\cdot\mid x_i)\;+\;(1-p_{\rm anch})\,f_{\rm free}(\cdot).
+  $$
+  An ADVANCE with no anchored emit at that column is a **deletion**, an anchored emit a
+  **kept, smeared** node, a free emit an **insertion**. The alignment is latent and
+  summed by an $\mathcal O(n_x n_y)$ forward recursion (§6) — this is the RNN-T lattice
+  (Graves, arXiv:1211.3711; CTC, Graves et al., *ICML* 2006), so $\sum_y q_\phi(y\mid
+  x)=1$ holds *by construction* and the exact-likelihood claim is structural rather than
+  asserted. The edit-based decoding literature (Insertion Transformer, arXiv:1902.03249;
+  Levenshtein Transformer, arXiv:1905.11006) resorts to heuristic surrogates because its
+  lattices are enormous; with $n_x,n_y\lesssim25$ ours is exact, cheap and fully
+  differentiable — the lattice size is why this family is attractive *here* and not in
+  NLP.
 
-In this repo §5.1 is production-grade; §5.2/§5.3 are functional baseline drop-ins
-that share the contract and pass the smoke train (the §14 phased roadmap).
+  The physics enters twice. The smearing width is the **shape-function form**
+  $\sigma=\sigma_0+\Lambda_{\rm eff}e^{-\ln k_t}$ with $(\sigma_0,\Lambda_{\rm eff})$
+  learnable, so the learned kernel is directly confrontable with the expectation of §2.3
+  instead of being an opaque MLP output — and $\Lambda_{\rm eff}$ comes out **in GeV**
+  (`model.physics_width=false` swaps in the free-MLP ablation). And the length is
+  anchored at $|x|$ with an exact $q_\phi(N\mid x)$ (§3). Stage 2 (`edit_v2`) adds a
+  prediction network over the emitted prefix for recoil correlation among the `y` nodes;
+  the point estimator of choice is MBR, since the joint mode of a variable-dimension
+  density is not a useful summary here. See
+  [`PLAN_EditTransducer.md`](PLAN_EditTransducer.md).
+
+  Distribution-level analogues exist — MC-derived bin-by-bin hadron→parton corrections in
+  Lund-plane measurements (cf. ATLAS, arXiv:2004.03540) and staged generative unfolding
+  that produces multiplicity first (arXiv:2510.19906). This is the **per-jet,
+  probabilistic** generalization of the former, and it gets the latter's staging for free.
+
+In this repo §5.1 is production-grade; §5.2–§5.5 share the contract and pass the smoke
+train. §5.5 is the only one that changes the *factorization* rather than the density
+class, which is why it is the one with a falsifiable physics claim attached (§9).
 
 ---
 
@@ -415,6 +528,17 @@ The output is only trustworthy after these checks (`eval/`,
   vs. partons can select slightly different groomed trees; closure exposes this small
   residual on top of hadronization.
 - **Stay perturbative** — keep the $\ln k_t$ floor.
+- **Is the smearing actually a $\Lambda_{\rm eff}/k_t$ kernel?** (edit transducer only.)
+  Unlike everything above, this one can falsify a *physics* premise rather than a fit.
+  Bin the residuals $y_t-x_i$ weighted by the alignment posterior $\gamma(i,j)$ in $\ln
+  k_t$ (`model.alignment_posterior`) and fit $\sigma=\sigma_0+\Lambda_{\rm eff}e^{-\ln
+  k_t}$. **If the widths come out flat in $k_t$, local parton–hadron duality is not what
+  is organising this data** and the family's inductive bias is wrong. Run it with
+  `model.physics_width=false`, whose widths are a free MLP output never told the
+  functional form — otherwise you are reading back the parametrization you imposed. On
+  `cpp/test_data/jets.root` (6-epoch fit) the ablation gives $\Lambda_{\rm eff}=1.29$ GeV
+  at $R^2=1.000$ for $\ln k_t$: $\mathcal O(1$ GeV$)$, i.e. the shape-function scale, so
+  the premise holds on that sample. It is **sample-dependent** — re-run per selection.
 
 ---
 
@@ -428,8 +552,9 @@ Every physics choice is a versioned config field (`configs/`), never hard-coded:
 | Soft Drop $z_{\rm cut}$, $\beta$, $R_0$, $k_t$ floor | `GroomParams` (C++) / RNTuple provenance | 0.1, 0, 1, 1 GeV |
 | generator / tune (systematic) | `experiment.generator_b` | — |
 | encoder over $x$ (gru / lundnet / deepsets) | `encoder.*` | gru |
-| posterior family (§5.1/5.2/5.3) | `model=…` | ar_junipr_v2 |
+| posterior family (§5.1–§5.5) | `model=…` | ar_junipr_v2 |
 | point estimator (MAP vs MBR) + EMD metric | `decode.point_estimator`, `decode.mbr_*` | map, pot |
+| smearing kernel: shape-function form vs free MLP (§5.5) | `model.physics_width` | true |
 
 ```bash
 # train on PYTHIA, then quote the HERWIG spread as the systematic
@@ -450,6 +575,18 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt experiment=pythia_vs_herwig
   drift apart.
 - The MAP can be unrepresentative in high dimensions — always read it alongside the
   posterior summary.
+- **The edit transducer's alignments are monotone**, so two nearby nodes that swap order
+  between levels cost a delete+insert pair: representable, but statistically
+  inefficient. Angular ordering (§5) is what makes this a mild assumption rather than a
+  wrong one; audit it with the crossing-pair count in sampled alignments.
+- **Anchored vs free emissions are only weakly identifiable.** The two mixture
+  components can trade off — a smeared copy and a fresh draw at the same place explain
+  the data equally well — which is one reason the width is pinned to a physics form
+  rather than left free. Watch `frac_anchored` in the closure output; it is not yet
+  converged in the short fits quoted above.
+- Both stages report `supports_coordinate_pit = False`: the exact prefix-conditional
+  coordinate CDF is available from the same recursion but has not been landed, so the
+  per-coordinate PIT panel is silent for this family.
 
 ---
 
@@ -470,14 +607,25 @@ Larkoski et al., *JHEP* **05** (2014) 146, arXiv:1402.2657; mMDT, Dasgupta et al
 **Showers, coherence, hadronization.** Coherent branching, Catani, Marchesini &
 Webber, *Nucl. Phys. B* **349** (1991) 635 · Lund string, Andersson, Gustafson,
 Ingelman & Sjöstrand, *Phys. Rept.* **97** (1983) 31 · cluster model, Webber, *Nucl.
-Phys. B* **238** (1984) 492 · groomed-mass NP corrections, Frye et al., arXiv:1603.09338;
-Hoang et al., *JHEP* **12** (2019) 002, arXiv:1906.11843 · power corrections,
-Dokshitzer & Webber, arXiv:hep-ph/9504219.
+Phys. B* **238** (1984) 492 · **local parton–hadron duality**, Azimov, Dokshitzer, Khoze
+& Troyan, *Z. Phys. C* **27** (1985) 65; **shape function**, Korchemsky & Sterman, *Nucl.
+Phys. B* **555** (1999) 335, arXiv:hep-ph/9902341 · groomed-mass NP corrections, Frye et
+al., arXiv:1603.09338; Hoang et al., *JHEP* **12** (2019) 002, arXiv:1906.11843 · power
+corrections, Dokshitzer & Webber, arXiv:hep-ph/9504219.
 
 **Tree/Lund ML models.** JUNIPR, Andreassen et al., *EPJC* **79** (2019) 102,
 arXiv:1804.09720; binary JUNIPR, *PRL* **123** (2019) 182001, arXiv:1906.10137 ·
 LundNet, Dreyer & Qu, *JHEP* **03** (2021) 052, arXiv:2012.08526 · tractable-likelihood
 shower inference, arXiv:2105.10512, arXiv:2112.12795.
+
+**Latent-alignment / edit models (§5.5).** RNN transducer, Graves, arXiv:1211.3711 ·
+CTC, Graves, Fernández, Gomez & Schmidhuber, *ICML* (2006) · training through the
+lattice, Imputer, Chan et al., arXiv:2002.08926 · Insertion Transformer, Stern et al.,
+arXiv:1902.03249; Levenshtein Transformer, Gu et al., arXiv:1905.11006 · conditional
+flow matching, Lipman et al., *ICLR* (2023), arXiv:2210.02747; FMPE, Wildberger, Dax et
+al., *NeurIPS* (2023), arXiv:2305.17161; probability-flow ODE, Song et al., *ICLR*
+(2021), arXiv:2011.13456 · distribution-level hadron→parton corrections in the Lund
+plane, ATLAS, arXiv:2004.03540.
 
 **Amortized inference, posterior estimation, unfolding.** Cranmer, Brehmer & Louppe,
 *PNAS* **117** (2020) 30055, arXiv:1911.01429 · Papamakarios & Murray, *NeurIPS*

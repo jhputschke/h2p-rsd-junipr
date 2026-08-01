@@ -1,4 +1,4 @@
-# §5.4 edit transducer, stage 1 — the pair-HMM (docs/PLAN_EditTransducer.md).
+# §5.5 edit transducer, stage 1 — the pair-HMM (docs/PLAN_EditTransducer.md).
 #
 # The hadron tree is the ANCHOR of the parton tree, not just a conditioning vector: each
 # parton node is either a smeared copy of a hadron node (kept), a fresh draw (insertion),

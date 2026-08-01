@@ -1,4 +1,4 @@
-"""§5.4 edit transducer: hadron -> parton as a learned smearing + birth/death process
+"""§5.5 edit transducer: hadron -> parton as a learned smearing + birth/death process
 (docs/PLAN_EditTransducer.md).
 
 The registry's fourth family, and the only one that does not generate `y` from scratch.
