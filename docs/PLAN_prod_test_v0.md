@@ -444,6 +444,20 @@ deliberately not liftable.
 
 ## Results (2026-07-31)
 
+> **These numbers predate the encoder padding fix.** Running the closure notebook
+> surfaced that `gru` and `lundnet` both read the zero-padding `collate` adds, so `e(x)`
+> depended on the batch composition — and, worse, training (always batched) and
+> single-jet inference (`sample`, `map_estimate`, `length_pmf`, where `Mx == nx`) sat in
+> **different regimes**. On this very checkpoint the same 256 jets give mean `q(0|x)` =
+> 0.053 decoded one at a time and 0.155 in a batch. The fix is in
+> (`encoder.mask_padding`, default true; pre-field snapshots backfill to the legacy path
+> so they still evaluate as trained), but **these four arms were trained with the
+> defect**. Everything below is internally consistent and reproducible from the committed
+> artifacts; it is not a clean measurement of the fixed architecture. The calibration
+> failures in particular — coverage 0.46, SBC χ² 359, and the soft-corner collapse — are
+> exactly the shape a train/inference mismatch would produce, and re-running the grid is
+> what would separate the two. See `tests/test_encoder_padding.py`.
+
 Executed as written, with one deliberate widening: the aux ablation of check 2 was run as
 the **full two-by-two** (aux on/off × `trainer.seed` 0/1, four 60-epoch trainings) rather
 than dropped. At ~30 s/epoch on one GB10 the whole grid cost about two hours, so the
