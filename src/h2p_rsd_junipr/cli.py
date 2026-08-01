@@ -17,7 +17,7 @@ import torch
 
 from .config import config_hash, load_config, save_config
 from .data.datamodule import LundDataModule
-from .data.stats import check_multiplicity_support
+from .data.stats import check_lnz_support, check_multiplicity_support
 from .geometry import Geometry
 
 
@@ -77,6 +77,10 @@ def cmd_train(argv) -> int:
     # past it is silently clamped. Checked against the data actually loaded, before
     # any time is spent training on it.
     check_multiplicity_support(dm.jets, cfg)
+    # WP-A guard: the physical `ln z` head normalizes over the interval the FILE's
+    # grooming defines, and the config is the only place the model learns it — so the
+    # declared pair is verified against the data before any time is spent training on it.
+    check_lnz_support(dm.jets, cfg)
 
     if cfg.trainer.resume_from:
         trainer = Trainer.resume(
@@ -208,6 +212,7 @@ def cmd_eval(argv) -> int:
             dm.train_jets, dm.val_jets = [], dm.jets
         # non-fatal here: the model is already trained, so report rather than refuse
         check_multiplicity_support(dm.jets, cfg_eval, strict=False)
+        check_lnz_support(dm.jets, cfg_eval, strict=False)
     else:
         from .train.trainer import build_components
         cfg_eval, overrides = cfg, {"data": {}, "decode": {}}

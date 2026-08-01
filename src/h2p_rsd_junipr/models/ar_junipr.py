@@ -84,6 +84,26 @@ class ARJunipr(PosteriorModel):
         self.use_cross_attention = bool(getattr(m, "use_cross_attention", False))
         self.half_u = geometry.half_u
         self.half_v = geometry.half_v
+        # bounded-support ln z head (docs/PLAN_prod_test_v1.md WP-A); getattr-tolerant so
+        # pre-WP-A checkpoint configs rebuild as the unbounded Normal they were trained as.
+        self.lnz_support = str(getattr(m, "lnz_support", "legacy"))
+        if self.lnz_support not in ("legacy", "physical"):
+            raise ValueError(
+                f"model.lnz_support must be 'legacy' or 'physical', got {self.lnz_support!r}"
+            )
+        self.lnz_physical = self.lnz_support == "physical"
+        self.lnz_zcut = float(getattr(m, "lnz_zcut", 0.1))
+        self.lnz_beta = float(getattr(m, "lnz_beta", 0.0))
+        if self.lnz_physical and not (0.0 < self.lnz_zcut < 0.5):
+            raise ValueError(
+                f"model.lnz_support='physical' needs 0 < model.lnz_zcut < 0.5 (the soft-drop "
+                f"lower bound must sit below the kinematic z <= 1/2), got {self.lnz_zcut!r}"
+            )
+        # ln z_cut and ln(1/2) as plain floats; the bounds themselves are cell-conditional
+        # and built on the fly from `cell_cx` (see `lnz_bounds`), so NO buffer is added and
+        # the `legacy` state_dict stays byte-identical.
+        self._ln_zcut = math.log(self.lnz_zcut) if self.lnz_physical else float("-inf")
+        self._ln_half = math.log(0.5)
 
         emb = int(cfg.encoder.emb_dim)  # shared emb dim (encoder x_feat <-> decoder y_embed)
         self.emb_dim = emb
@@ -219,13 +239,53 @@ class ARJunipr(PosteriorModel):
         mu = torch.atan2(b, a)
         return du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig, mu, kappa
 
+    # -- WP-A: the physical ln z support -------------------------------------
+    def lnz_bounds(self, cx):
+        """`(lo, hi)` of the `ln z` support for nodes in the cells whose centres are
+        `cx`, or `None` in `legacy` mode.
+
+        Soft Drop keeps a splitting iff `z > z_cut (DeltaR/R)^beta` (Larkoski et al.,
+        arXiv:1402.2657; RSD: Dreyer et al., arXiv:1804.03657), i.e. — with this repo's
+        `u = ln(1/DeltaR)` convention and `R = 1` — `ln z > ln z_cut - beta*u`; and
+        `z = min(pT1,pT2)/(pT1+pT2) <= 1/2` by construction. So
+
+            ln z  in  ( ln z_cut - beta*u ,  ln(1/2) ].
+
+        The bound is made **cell-conditional**, not node-conditional: it is evaluated at
+        the `u` in the cell that makes it LOOSEST,
+
+            lo = min_{|u - cx| <= half_u} (ln z_cut - beta*u)
+               = ln z_cut - beta*cx - |beta|*half_u,
+
+        so every truth in the cell lies inside it. That is what keeps the coordinate
+        likelihood a product of independent-given-cell factors: a bound that read the
+        node's own drawn `u` would couple `ln z` to `du`, which this factorization
+        cannot express (the per-node joint flow of `PLAN_UPDATES.md` WP1 is where that
+        coupling belongs — plan §12's trigger).
+
+        At the fielded `beta = 0` the two coincide exactly and the bound is the constant
+        `(ln z_cut, ln 1/2]`; for `beta != 0` the residual slack is `|beta|*half_u`, and
+        the WP-D support audit measures what leaks through it rather than assuming."""
+        if not self.lnz_physical:
+            return None
+        lo = self._ln_zcut - self.lnz_beta * cx - abs(self.lnz_beta) * self.half_u
+        # `hi` is materialised as a tensor rather than left a float: torch.clamp takes
+        # two Tensors or two Numbers, never one of each, and every caller here clamps
+        # against the pair.
+        return lo, torch.full_like(lo, self._ln_half)
+
     def _coord_logprob(self, params, u, v, lnz, psi, cx, cy):
         du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig, mu, kappa = params
         du = (u - cx).clamp(-self.half_u, self.half_u)
         dv = (v - cy).clamp(-self.half_v, self.half_v)
         ll = trunc_normal_logpdf(du, du_mean, du_sig, -self.half_u, self.half_u)
         ll = ll + trunc_normal_logpdf(dv, dv_mean, dv_sig, -self.half_v, self.half_v)
-        ll = ll + gauss_logpdf(lnz, lnz_mean, lnz_sig)
+        bounds = self.lnz_bounds(cx)
+        if bounds is None:
+            ll = ll + gauss_logpdf(lnz, lnz_mean, lnz_sig)
+        else:
+            lo, hi = bounds
+            ll = ll + trunc_normal_logpdf(lnz.clamp(min=lo, max=hi), lnz_mean, lnz_sig, lo, hi)
         ll = ll + vonmises_logpdf(psi, mu, kappa)
         return ll
 
@@ -324,11 +384,19 @@ class ARJunipr(PosteriorModel):
         cx, cy = self.cell_cx[yc], self.cell_cy[yc]
         du = (yraw[..., 0] - cx).clamp(-self.half_u, self.half_u)
         dv = (yraw[..., 1] - cy).clamp(-self.half_v, self.half_v)
+        bounds = self.lnz_bounds(cx)
+        if bounds is None:
+            lnz_pit = gauss_cdf(yraw[..., 2], lnz_mean, lnz_sig)
+        else:  # the SAME truncated normal the likelihood normalizes by, as for du/dv
+            lo, hi = bounds
+            lnz_pit = trunc_normal_cdf(
+                torch.clamp(yraw[..., 2], min=lo, max=hi), lnz_mean, lnz_sig, lo, hi
+            )
         u = torch.stack(
             [
                 trunc_normal_cdf(du, du_mean, du_sig, -self.half_u, self.half_u),
                 trunc_normal_cdf(dv, dv_mean, dv_sig, -self.half_v, self.half_v),
-                gauss_cdf(yraw[..., 2], lnz_mean, lnz_sig),
+                lnz_pit,
                 vonmises_cdf(yraw[..., 3], mu, kappa),
             ],
             dim=-1,
@@ -466,8 +534,7 @@ class ARJunipr(PosteriorModel):
         yc = torch.tensor([int(c) for c in cells], dtype=torch.long, device=dev)
         du = trunc_normal_sample(du_m, du_s, -self.half_u, self.half_u, generator=generator)
         dv = trunc_normal_sample(dv_m, dv_s, -self.half_v, self.half_v, generator=generator)
-        lnz = lnz_m + lnz_s * torch.randn(lnz_m.shape, device=dev, dtype=lnz_m.dtype,
-                                          generator=generator)
+        lnz = self._sample_lnz(lnz_m, lnz_s, self.cell_cx[yc], generator=generator)
         psi = vonmises_sample(mu, kappa, generator=generator)
         return torch.stack(
             [self.cell_cx[yc] + du, self.cell_cy[yc] + dv, lnz, psi], dim=-1
@@ -510,13 +577,29 @@ class ARJunipr(PosteriorModel):
         du_m, dv_m, du_s, dv_s, lnz_m, lnz_s, mu, kappa = self._coord_params_padded(xf, nx, yc)
         du = trunc_normal_sample(du_m, du_s, -self.half_u, self.half_u, generator=generator)
         dv = trunc_normal_sample(dv_m, dv_s, -self.half_v, self.half_v, generator=generator)
-        lnz = lnz_m + lnz_s * torch.randn(lnz_m.shape, device=dev, dtype=lnz_m.dtype,
-                                          generator=generator)
+        lnz = self._sample_lnz(lnz_m, lnz_s, self.cell_cx[yc], generator=generator)
         psi = vonmises_sample(mu, kappa, generator=generator)
         coords = torch.stack(
             [self.cell_cx[yc] + du, self.cell_cy[yc] + dv, lnz, psi], dim=-1
         )
         return [coords[k, : lens[k]] if lens[k] else empty for k in range(K)]
+
+    def _sample_lnz(self, lnz_m, lnz_s, cx, *, generator=None):
+        """One `ln z` draw per element: the unbounded Normal in `legacy` mode, the
+        cell-conditional truncated normal in `physical` mode.
+
+        The two samplers are paired with the two densities in `_coord_logprob` here, in
+        one place, so a draw can never come from a distribution the likelihood does not
+        normalize — which is exactly the failure `physical` mode exists to remove (v0's
+        0.88% soft-drop violations came from sampling a Normal whose support the
+        grooming forbids)."""
+        bounds = self.lnz_bounds(cx)
+        if bounds is None:
+            return lnz_m + lnz_s * torch.randn(
+                lnz_m.shape, device=lnz_m.device, dtype=lnz_m.dtype, generator=generator
+            )
+        lo, hi = bounds
+        return trunc_normal_sample(lnz_m, lnz_s, lo, hi, generator=generator)
 
     def _coord_params_padded(self, xf, nx, yc: torch.Tensor):
         """The eight `_coord_params` tensors, each `(B, L)`, for a `(B, L)` block of
@@ -587,7 +670,14 @@ class ARJunipr(PosteriorModel):
                 params = self._coord_params(torch.cat([eh_t, cell_emb], dim=-1))
                 du_mean, dv_mean, _, _, lnz_mean, _, mu, _ = params
                 u_mode, v_mode = cx + du_mean, cy + dv_mean
-                coord_per = self._coord_logprob(params, u_mode, v_mode, lnz_mean, mu, cx, cy).squeeze(0)
+                # The mode of a TRUNCATED normal is its untruncated mean clamped into the
+                # support, so `physical` mode moves the reported ln z inside the grooming
+                # boundary by construction rather than by a downstream repair.
+                bounds = self.lnz_bounds(cx)
+                lnz_mode = (lnz_mean if bounds is None
+                            else torch.clamp(lnz_mean, min=bounds[0], max=bounds[1]))
+                coord_per = self._coord_logprob(params, u_mode, v_mode, lnz_mode, mu, cx, cy).squeeze(0)
+                lnz_mean = lnz_mode
             else:
                 u_mode, v_mode = cx, cy
                 lnz_mean = torch.zeros_like(cx)

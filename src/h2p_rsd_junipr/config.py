@@ -140,6 +140,20 @@ class ARJuniprConfig:
     #                                    the module list and state_dict byte-identical; requires
     #                                    an encoder with returns_sequence=True.
     xattn_heads: int = 4               # attention heads; must divide dec_dim
+    # --- ln z support (docs/PLAN_prod_test_v1.md WP-A) -------------------------
+    # `ln z` is the only coordinate head on an UNBOUNDED density (du/dv are truncated
+    # normals, psi is von Mises). Under the fielded grooming every retained splitting has
+    # z in (z_cut (DeltaR/R)^beta, 1/2], so ln z lives on a bounded interval and a Normal
+    # necessarily leaks off it: v0 measured PIT KS 0.066 (crit 0.016) and 0.88% sampled
+    # soft-drop violations. "physical" puts the same truncated normal there that du/dv
+    # already use. "legacy" is the default and is bit-identical to the pre-WP-A path
+    # (same state_dict, same log_prob), so old checkpoints load and parity holds.
+    lnz_support: str = "legacy"         # legacy | physical
+    lnz_zcut: float = 0.1               # soft-drop z_cut; only read when lnz_support=physical
+    lnz_beta: float = 0.0               # soft-drop beta;  only read when lnz_support=physical
+    #                                     Both are properties of the FILE, not free knobs:
+    #                                     `data.stats.check_lnz_support` verifies them against
+    #                                     the loaded jets' grooming record before training.
 
 
 @dataclass

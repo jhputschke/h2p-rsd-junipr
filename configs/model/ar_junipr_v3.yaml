@@ -12,3 +12,13 @@ kappa_max: 50.0
 cell_label_smoothing: 0.0
 use_multiplicity_head: true   # the v3 switch: build n_head, drop cont_head
 max_emissions: 25             # categorical support n = 0..max_emissions
+
+# --- ln z support (docs/PLAN_prod_test_v1.md WP-A) ---
+# `legacy` is the unbounded Normal every run before v1 trained; `physical` puts the
+# same truncated normal on ln z that du/dv already use, over
+# (ln z_cut - beta*ln(1/DeltaR), ln 1/2] — the interval Soft Drop leaves. The pair
+# below is a property of the DATA FILE and is verified against it before training
+# (data.stats.check_lnz_support), not a free knob.
+lnz_support: legacy   # legacy | physical
+lnz_zcut: 0.1
+lnz_beta: 0.0
