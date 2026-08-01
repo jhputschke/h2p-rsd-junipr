@@ -94,29 +94,6 @@ applied. `decode.continue_temperature` was implemented anyway — §3 of the pla
 pre-registers it and the `v1_contstop` arm is the one family it acts on — and is reported
 as the null check the plan says it becomes when the untempered sampler passes.
 
-### 1.1 The ⟨N⟩ deficit was a selection effect and a mispairing
-
-| population | jets | ⟨N⟩ truth | ⟨N⟩ posterior | ratio | signed bias |
-|---|---:|---:|---:|---:|---:|
-| **full (what G4 reads)** | 2 000 | 1.4170 | 1.3845 | **0.9771** | −0.0325 |
-| truth `N ≥ 1` (selected on truth) | 1 676 | 1.6909 | 1.4727 | 0.8709 | −0.2183 |
-
-The posterior mean is the exact `E_q[N|x]`, which is what `sample` draws from. Two things
-were wrong with v0's "1.15 vs 1.40":
-
-- **The metric paired the wrong jets.** `mean_mult_posterior` was
-  `mean(b + len(val_ds[i]["yc"]) for i, b in enumerate(n_mean_bias))`, where `i` indexes
-  the *kept* jets and `val_ds[i]` the *unfiltered* dataset — so each kept jet's bias was
-  added to a different jet's truth multiplicity.
-- **The population it used is biased low by construction.** Selecting jets by `N_true ≥ 1`
-  and comparing them to `E_q[N|x]` is regression to the mean: the deficit is negative even
-  for a perfectly calibrated posterior. That is the whole of the second row above.
-
-The full-population ratio **0.977 is inside G4's `[0.95, 1.05]`**, with no temperature
-applied. `decode.continue_temperature` was implemented anyway — §3 of the plan
-pre-registers it and the `v1_contstop` arm is the one family it acts on — and is reported
-as the null check the plan says it becomes when the untempered sampler passes.
-
 ### 1.2 SBC-on-N had no χ²(9) null
 
 | statistic | value |
@@ -189,11 +166,32 @@ coordinate there, which is exactly the kind of documented attribution gate G5 al
 
 ---
 
-## 2. Grid arms
+## 2. Is the test valid?
+
+The plan's §9 carries v0 §1's validity checks unchanged, and they carry because **v1 uses
+the same two files**: `data/jet_aux_asym.root` (seed 1) to train, `data/jet_aux_asym_test.root`
+(seed 2) to report on.
+
+- **Seeds did not collide.** `runs/prod_test_v0/disjoint.json`: 0 overlapping jets of
+  20 000 compared under the `full` fingerprint (sequences + jet four-vector), and 0 under
+  the sequence-only one. `passed: true`.
+- **The test file is asymmetric.** `kt_floor = 1.0`, `kt_floor_sec = 0.2` on both files, so
+  the secondary-plane aux columns are groomed looser than the sequences beside them — which
+  is the only reason the aux arms can see this file at all.
+- **Same physics.** `(z_cut, beta, kt_floor, kt_floor_sec, generator)` are identical
+  between the two files, so the assessment measures generalisation rather than covariate
+  shift.
+- **The `ln z` support declaration is verified against the data, not assumed.** Before any
+  arm trains, `data.stats.check_lnz_support` confirms the declared `(z_cut, beta) = (0.1, 0)`
+  matches the file's own grooming record *and* that all **700 330** truth emissions lie
+  inside `[ln 0.1, ln ½] = [−2.3026, −0.6931]`. Both endpoints are attained in the data,
+  which is what makes the bounded head the right one rather than merely a tighter one.
+
+## 3. Grid arms
 
 *Pending — filled by `scripts/prod_test_v1_gates.py` when the grid completes.*
 
-## 3. Gates G1–G8
+## 4. Gates G1–G8
 
 *Pending.*
 
@@ -208,7 +206,7 @@ coordinate there, which is exactly the kind of documented attribution gate G5 al
 | G7 | TARP | | |
 | G8 | family A/B | | |
 
-## 4. Retroactive pass on the v0 checkpoint
+## 5. Retroactive pass on the v0 checkpoint
 
 The training-free items — the WP-C estimator repairs and the whole WP-D assessment block —
 run on the committed v0 checkpoint
@@ -219,7 +217,7 @@ is an **addendum**, not a revision: every number in
 run's suite reported. Artifacts: `eval_metrics_calib.json` (2 000-jet calibration tier),
 `eval_metrics_decode.json` (300-jet decode tier), merged into `eval_metrics.json`.
 
-### 4.1 The ψ pathology was entirely in the decode rule
+### 5.1 The ψ pathology was entirely in the decode rule
 
 Each row against the uniform floor `√π / 2√n` for its own node count — because `|R|` is a
 norm and is positive under isotropy too:
@@ -237,7 +235,7 @@ azimuth at all, which is what the physics says there should not be. `frac_psi_un
 is 0.0% because the MBR estimate now carries sampled coordinates, where mode
 identifiability is not a question that applies.
 
-### 4.2 Acceptance and decode, on the same checkpoint
+### 5.2 Acceptance and decode, on the same checkpoint
 
 | quantity | value | criterion |
 |---|---:|---|
@@ -251,11 +249,11 @@ passes (§1.1), and **G2, G3 and G7 fail** — the support error (§1.4), the `l
 (§1.5), and the tree-level over-confidence (§1.3). Every one of the three failures is
 something v1's grid is designed to move, and G2/G3 are precisely what WP-A addresses.
 
-## 5. What is still broken
+## 6. What is still broken
 
 *Pending.*
 
-## 6. What is not measured
+## 7. What is not measured
 
 - **PYTHIA vs HERWIG.** Still no `herwig_driver`; the train/test deltas remain the noise
   floor stand-in, exactly as in v0 §10.
