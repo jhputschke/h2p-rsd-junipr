@@ -365,9 +365,33 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     def _R(key):
         return abs(psi_sum[key]) / psi_n[key] if psi_n[key] else float("nan")
 
+    def _R_null(key):
+        """`E[|R|]` for `n` i.i.d. UNIFORM angles = sqrt(pi)/(2 sqrt(n)).
+
+        A resultant without this is unreadable. `|R|` is a norm, so it is positive
+        under uniformity too, and its floor moves with `n` — the truth series and the
+        posterior series are pooled over wildly different node counts here, so the same
+        `|R|` means different things in each row. Reporting the ratio of two numbers
+        that are both at their own noise floors would be reporting noise."""
+        n = psi_n[key]
+        return math.sqrt(math.pi) / (2.0 * math.sqrt(n)) if n else float("nan")
+
+    def _rayleigh_p(key):
+        """Rayleigh test of uniformity: `p ~ exp(-n |R|^2)` (Mardia & Jupp §6.3.1).
+        Small p => a genuinely preferred azimuth; large p => consistent with isotropic."""
+        n = psi_n[key]
+        return math.exp(-n * _R(key) ** 2) if n else float("nan")
+
     metrics["psi"] = {
         "resultant_truth": _R("truth"),
         "resultant_point_estimate": _R("point"),
+        # the uniform floor for each row's own node count, and the Rayleigh p beside it
+        "resultant_null_truth": _R_null("truth"),
+        "resultant_null_point_estimate": _R_null("point"),
+        "resultant_null_posterior": _R_null("posterior"),
+        "rayleigh_p_truth": _rayleigh_p("truth"),
+        "rayleigh_p_point_estimate": _rayleigh_p("point"),
+        "rayleigh_p_posterior": _rayleigh_p("posterior"),
         # NaN unless `experiment.closure_continuous=true`: the posterior's psi only
         # exists once coordinates are drawn, and drawing them for this alone would be a
         # second sampling pass. Asked-and-unavailable, not never-asked.
@@ -383,12 +407,22 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     }
     if verbose and psi_n["truth"]:
         p = metrics["psi"]
-        print(f"  psi resultant |R| = |<e^(i psi)>|  :  truth = {p['resultant_truth']:.3f}"
-              f"   point estimate = {p['resultant_point_estimate']:.3f}"
-              f"  ({p['ratio_point_over_truth']:.2f}x)"
-              + (f"   posterior = {p['resultant_posterior']:.3f}"
-                 if p["n_nodes_posterior"] else "   posterior = n/a"
-                 " (needs experiment.closure_continuous=true)"))
+        print("  psi resultant |R| = |<e^(i psi)>|, each row against the UNIFORM floor"
+              " for its own node count:")
+        print(f"      {'series':>16} {'nodes':>7} {'|R|':>8} {'uniform E|R|':>13}"
+              f" {'Rayleigh p':>11}")
+        for label, key in (("truth", "truth"), ("point estimate", "point_estimate"),
+                           ("posterior", "posterior")):
+            n = p[f"n_nodes_{key}"]
+            if not n:
+                print(f"      {label:>16} {'n/a':>7}"
+                      "   (needs experiment.closure_continuous=true)")
+                continue
+            print(f"      {label:>16} {n:>7} {p['resultant_' + key]:>8.4f}"
+                  f" {p['resultant_null_' + key]:>13.4f} {p['rayleigh_p_' + key]:>11.3f}")
+        print(f"      point/truth = {p['ratio_point_over_truth']:.2f}x"
+              f"   (gate G6 wants within 2x — but read it beside the floors above:"
+              f" a ratio of two numbers at their own noise floors is noise)")
         print(f"      psi mode not identified (kappa < {p['kappa_min_mode']:g}) for"
               f" {p['frac_psi_unidentified']:.1%} of point-estimate nodes;"
               f" coordinates carried as {p['point_coords_source']!r}")

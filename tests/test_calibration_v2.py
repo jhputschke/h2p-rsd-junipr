@@ -610,3 +610,42 @@ def test_new_switches_are_all_off_by_default(small_jets):
     m = run_calibration(model, ds, geom, torch.device("cpu"), K=4, n_jets=8, verbose=False)
     for k in ("pit_coords_by_region", "pit_coords_by_region_worst", "tarp", "by_region"):
         assert k not in m
+
+
+def test_psi_resultant_carries_its_uniform_floor(small_jets):
+    """`|R|` is a norm: it is positive under uniformity too, and its floor moves as
+    `1/sqrt(n)`. Gate G6 compares two rows pooled over very different node counts, so
+    without each row's own floor the ratio is a ratio of noise."""
+    from h2p_rsd_junipr.eval.closure import run_closure
+
+    model, ds, jets, geom = _v1_model_ds(small_jets, n=24)
+    m = run_closure(model, ds, jets, geom, torch.device("cpu"), K=16, n_closure=24,
+                    verbose=False, continuous=True)
+    p = m["psi"]
+    for key in ("truth", "point_estimate", "posterior"):
+        n = p[f"n_nodes_{key}"]
+        if not n:
+            continue
+        assert p[f"resultant_null_{key}"] == pytest.approx(
+            math.sqrt(math.pi) / (2 * math.sqrt(n)), rel=1e-9
+        ), key
+        assert 0.0 <= p[f"rayleigh_p_{key}"] <= 1.0
+    # the null must fall as 1/sqrt(n): the posterior row pools far more nodes than truth
+    if p["n_nodes_posterior"] > p["n_nodes_truth"] > 0:
+        assert p["resultant_null_posterior"] < p["resultant_null_truth"]
+
+
+def test_rayleigh_p_flags_a_genuinely_anisotropic_sample():
+    """The statistic itself, on samples whose answer is known: uniform angles give a
+    large p, concentrated ones a vanishing p."""
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    for n in (200, 2000):
+        uni = rng.uniform(-math.pi, math.pi, n)
+        R = abs(np.exp(1j * uni).sum()) / n
+        assert math.exp(-n * R**2) > 0.01, "a uniform sample was flagged as anisotropic"
+        conc = rng.normal(0.4, 0.5, n)          # a real preferred direction
+        Rc = abs(np.exp(1j * conc).sum()) / n
+        assert math.exp(-n * Rc**2) < 1e-6
+        assert Rc > math.sqrt(math.pi) / (2 * math.sqrt(n))
