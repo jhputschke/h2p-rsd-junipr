@@ -201,18 +201,112 @@ extends to the latter.
 
 ## 4. Gates G1–G8
 
-*Pending.*
+Verdicts on `v1_base`, evaluated on **all three seeds** — a gate evaluated on one seed is
+a gate evaluated on one draw from the band, and G3's value spans 0.027–0.053 against a
+0.0255 criterion, close enough that "which seed" could have decided it. It does not: every
+verdict below is unanimous across the three.
 
-| # | gate | verdict | numbers |
+| # | gate | verdict | the number |
 |---|---|---|---|
-| G1 | acceptance | | |
-| G2 | support | | |
-| G3 | `ln z` PIT | | |
-| G4 | N marginal | | |
-| G5 | `narrow_soft` | | |
-| G6 | decode | | |
-| G7 | TARP | | |
-| G8 | family A/B | | |
+| G1 | acceptance | **PASS** | medoid/identity 0.924–0.937, geo-median/identity 0.925–0.932, agreeing in sign |
+| G2 | support | **PASS** | 0.0000% on all four boundaries, all three seeds |
+| G3 | `ln z` PIT | **FAIL** | KS 0.0529 / 0.0270 / 0.0471 vs crit 0.0255 |
+| G4 | N marginal | **FAIL** | ⟨N⟩ ratio **passes** (1.008 / 0.994 / 0.987); regional coverage fails |
+| G5 | `narrow_soft` | **ATTRIBUTED** | no coordinate there exceeds its own critical value |
+| G6 | decode | **PASS** | MBR/identity 0.936–0.965; the ψ clause is underpowered, see §4.6 |
+| G7 | TARP | **FAIL** | 0.0415 / 0.0350 / 0.0335 vs a recomputed null of 0.0275 |
+| G8 | family A/B | *pending* | `v1_contstop` still training |
+
+### 4.1 G2 — support: the one gate WP-A was built to move, and it moves completely
+
+| series | out of window | soft drop | `z > ½` | `k_t` floor | on the bound |
+|---|---:|---:|---:|---:|---:|
+| truth (control) | 0.00000% | 0.00000% | 0.00000% | 0.00000% | — |
+| `v1_legacy_lnz_s0` | 0.00000% | **0.83263%** | **3.94300%** | 0.00000% | — |
+| `v1_base` (3 seeds) | 0.00000% | **0.00000%** | **0.00000%** | 0.00000% | 0.012–0.030% |
+
+The `legacy` arm reproduces the v0 checkpoint's rates to five significant figures — it is
+the same configuration on the same data with the same seed, so it should, and the fact
+that it does is what licenses reading the difference as attributable to `lnz_support`
+alone. Every violation is gone under the bounded head, and 0.012–0.030% of draws sit
+*exactly on* a bound: that is the truncation doing its job, and it is reported rather than
+being allowed to look like a violation (see `eval.support.EDGE_TOL`).
+
+### 4.2 G3 — `ln z` PIT: halved, not closed
+
+| arm | KS | ×crit (0.0255) |
+|---|---:|---:|
+| v0 checkpoint / `v1_legacy_lnz_s0` | 0.0734 | 2.88× |
+| `v1_base_s0` | 0.0529 | 2.07× |
+| `v1_base_s1` | 0.0270 | 1.05× |
+| `v1_base_s2` | 0.0471 | 1.84× |
+
+**G3 fails.** Putting `ln z` on its correct support removes the *support* error entirely
+(§4.1) and roughly halves the *calibration* error, but the residual is still significant on
+every seed — the best of the three misses by 5%. So the two failures were never the same
+failure: the leak was the support, and what is left is a shape mismatch inside the
+interval, which a truncation cannot fix.
+
+This is the pre-registered trigger in plan §4.4: a monotone rational-quadratic spline on
+the same interval (Durkan et al., arXiv:1906.04032), **as a follow-up plan, not a mid-run
+change**. No such change was made.
+
+The region × coordinate cross localises it: `ln_z × wide_soft` at **2.16×** its critical
+value on 2 671 emissions, with every other scored cell below 1.02×. `wide_soft` holds 94%
+of the emissions, so this is a mismatch in the bulk rather than in a corner.
+
+### 4.3 G4 — N marginal: the ⟨N⟩ clause passes, the coverage clause fails
+
+`⟨N⟩_post/⟨N⟩_truth` = 1.0075 / 0.9939 / 0.9866, comfortably inside `[0.95, 1.05]`, with
+no temperature applied — confirming §1.1 on the retrained arms. The gate nonetheless fails
+on its regional clause: leading-cell 68% coverage is 0.518–0.540 against a target of 0.68,
+and no scoreable region is Wilson-consistent with it.
+
+SBC-on-N against its own null sits at the 95th percentile on seed 0 — exactly on the line,
+and with 200 null reps that percentile carries ±1.5%, so it is genuinely marginal rather
+than a clean pass or fail. It is reported as marginal; the rep count was not raised
+mid-run to resolve it.
+
+### 4.4 G5 — `narrow_soft`: attributed
+
+Coverage **0.344–0.479** across the three seeds (seed 0: 0.479 [0.38, 0.58] on 96 jets),
+against v0's 0.375 [0.28, 0.47]. The band straddles the v0 value, so this quadrant is
+**not** measurably improved — a single-seed read of 0.479 would have said it was. It stays
+well below the 0.68 target on every seed. The region × coordinate cross shows **no coordinate exceeding its own
+critical value in that quadrant** (worst 0.69×), so the deficit is not a coordinate
+miscalibration there. That is the documented mechanistic attribution the gate allows, and
+it points the follow-up at the tree-level width (§4.7), not at a coordinate head.
+
+### 4.5 G1 — acceptance: carried
+
+Medoid/identity 0.924–0.937 on the cell tier and geo-median/identity 0.925–0.932 off the
+grid, both below 1 and agreeing in sign on every seed. The arm beats the identity baseline, which
+is the criterion v0 established and the one thing that has to hold before any of the rest
+means anything.
+
+### 4.6 G6 — decode: passes, with the ψ clause underpowered
+
+Repaired MBR/identity **0.936–0.965, below 1 on every seed**. The ψ clause cannot be evaluated as written: `|R|` is
+a norm and is positive under isotropy too, so a ratio of two resultants is a measurement
+only when both are resolved above their own uniform floors. Point estimate 0.0401 against
+a floor of 0.0449 (Rayleigh p = 0.53) — *below* its floor, i.e. no anisotropy at all. The
+gate's substance — that the decode does not manufacture anisotropy the posterior does not
+have — is met; its stated 2× ratio is not measurable at this sample size.
+
+### 4.7 G7 — TARP: fails, and it is the finding
+
+| arm | max dev | recomputed null 95% | signed |
+|---|---:|---:|---:|
+| v0 checkpoint | 0.046 | 0.027 | −0.016 |
+| `v1_base_s0` | 0.0415 | 0.0275 | — |
+| `v1_base_s1` | 0.0350 | 0.0275 | — |
+| `v1_base_s2` | 0.0335 | 0.0275 | — |
+
+Every seed exceeds its band. WP-A moved it slightly (0.046 → 0.033–0.042) and did not close
+it — which is what §1 predicted: the residue is a **width** problem in the joint tree
+posterior, and fixing a support error was never going to reach it. Together with the
+coverage clause of G4 and the attribution in G5, three independent instruments now say the
+same thing about the same defect.
 
 ## 5. Retroactive pass on the v0 checkpoint
 
