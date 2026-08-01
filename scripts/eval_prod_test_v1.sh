@@ -84,6 +84,18 @@ if b_path.is_file():
                               "mbr_n_candidates": b["decode"].get("mbr_n_candidates")}
 (d / "eval_metrics.json").write_text(json.dumps(out, indent=2) + "\n")
 print(f"[eval] merged -> {d / 'eval_metrics.json'}")
+
+# Regenerate the figures FROM THE MERGED RECORD. Each pass writes `calibration_*.png`
+# beside the checkpoint, so pass B (300 jets) was overwriting pass A's (2000) and the
+# artifact ended up with figures and JSON describing different tiers -- the region panel
+# read `narrow_soft n=18, not scored` next to a JSON saying `n=111, scored`. Redrawing
+# from `out` makes the two consistent by construction rather than by discipline.
+import sys
+sys.path.insert(0, "src")
+from h2p_rsd_junipr.eval.report import plot_calibration
+figs = plot_calibration(out["calibration"], d)
+print(f"[eval] redrew {len(figs)} figure(s) from the merged record "
+      f"(calibration tier: {out['tiers']['calibration']['n_jets']} jets)")
 PY
 }
 

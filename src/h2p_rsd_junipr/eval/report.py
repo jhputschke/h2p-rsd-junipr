@@ -149,30 +149,39 @@ def plot_calibration(metrics: dict, out_dir: Path) -> list[Path]:
                        for c in coords], dtype=float)
         scored = np.array([[cross[c].get(r, {}).get("scored", False) for r in regions]
                            for c in coords], dtype=bool)
-        fig, ax = plt.subplots(figsize=(1.5 * len(regions) + 2.2, 0.85 * len(coords) + 2.0))
-        im = ax.imshow(np.where(scored, ks, np.nan), cmap="magma_r", aspect="auto",
-                       vmin=0.0)
-        # `ks[scored]` is empty when no region clears min_region_n — a real case on a
-        # small tier, and `nanmax` of nothing raises rather than degrading.
-        ks_hi = float(np.nanmax(ks[scored])) if scored.any() else float("inf")
+        # Colour by KS / its OWN 95% critical value, never by raw KS. The regions differ
+        # in count by ~50x, so on a raw scale the smallest region is always the darkest:
+        # on the base arm, psi x wide_hard (0.175, n=52) renders as the worst cell while
+        # sitting at 0.93x its critical value — a PASS — and ln_z x wide_soft (0.057,
+        # n=2671) renders mild at 2.2x, a real failure. A figure that draws the eye to the
+        # passing cell is worse than no figure.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            crit = 1.36 / np.sqrt(np.maximum(ns, 1.0))
+            ratio = ks / crit
+        fig, ax = plt.subplots(figsize=(1.6 * len(regions) + 2.6, 0.9 * len(coords) + 2.2))
+        # centred at 1.0 = the criterion, so blue passes and red fails on sight
+        im = ax.imshow(np.where(scored, ratio, np.nan), cmap="RdBu_r", aspect="auto",
+                       vmin=0.0, vmax=2.0)
         for i in range(len(coords)):
             for j in range(len(regions)):
                 if not np.isfinite(ks[i, j]):
                     continue
                 # An unscored cell is shown but greyed: it is a measurement nobody should
                 # act on, and hiding it would read as "that quadrant is fine".
-                txt = f"{ks[i, j]:.3f}\nn={int(ns[i, j])}"
+                txt = (f"{ratio[i, j]:.2f}x\nKS {ks[i, j]:.3f}\nn={int(ns[i, j])}")
                 ax.text(j, i, txt + ("" if scored[i, j] else "\n(not scored)"),
                         ha="center", va="center", fontsize=7,
                         color="#333333" if not scored[i, j] else
-                        ("white" if ks[i, j] > 0.6 * ks_hi else "black"))
+                        ("white" if abs(ratio[i, j] - 1.0) > 0.75 else "black"))
         ax.set_xticks(range(len(regions)))
         ax.set_xticklabels(regions, rotation=20, fontsize=8)
         ax.set_yticks(range(len(coords)))
         ax.set_yticklabels(coords, fontsize=9)
-        ax.set_title("PIT KS by coordinate x Lund quadrant\n(0 is calibrated; "
-                     "95% critical value is 1.36/sqrt(n))", fontsize=9)
-        fig.colorbar(im, ax=ax, label="KS distance to Uniform(0,1)")
+        ax.set_title("PIT KS / its own 95% critical value, by coordinate x Lund quadrant\n"
+                     "(>1 fails; the critical value is 1.36/sqrt(n), so it differs per cell)",
+                     fontsize=9)
+        cb = fig.colorbar(im, ax=ax, label="KS / (1.36/sqrt(n))   — 1.0 is the criterion")
+        cb.ax.axhline(1.0, color="black", lw=1.4)
         fig.tight_layout()
         p = out_dir / "calibration_pit_by_region.png"
         fig.savefig(p, dpi=140)
