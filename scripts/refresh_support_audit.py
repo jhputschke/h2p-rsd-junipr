@@ -27,7 +27,7 @@ from omegaconf import OmegaConf
 REPO = Path(__file__).resolve().parents[1]
 
 
-def refresh(stamp_dir: Path, *, dry_run=False) -> dict | None:
+def refresh(stamp_dir: Path, *, dry_run=False, force=False) -> dict | None:
     from h2p_rsd_junipr.data.datamodule import LundDataModule
     from h2p_rsd_junipr.eval.support import EDGE_TOL, run_support_audit
     from h2p_rsd_junipr.geometry import Geometry
@@ -39,7 +39,7 @@ def refresh(stamp_dir: Path, *, dry_run=False) -> dict | None:
     if not merged.is_file():
         return None
     m = json.loads(merged.read_text())
-    if float(m.get("audit_refreshed_at_edge_tol", -1)) == EDGE_TOL:
+    if not force and float(m.get("audit_refreshed_at_edge_tol", -1)) == EDGE_TOL:
         print(f"[refresh] {stamp_dir.parent.name}: already at EDGE_TOL={EDGE_TOL:g}")
         return m
     old = (m.get("support_audit") or {}).get("posterior") or {}
@@ -90,6 +90,11 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-root", default="runs/prod_test_v1")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="recompute even for arms already at this EDGE_TOL. Use for the "
+                         "FINAL pass: it makes every arm's audit come from one code path "
+                         "and one procedure, rather than some from the eval and some from "
+                         "a patch, which is what a gate table has to be able to claim.")
     a = ap.parse_args(argv)
     root = Path(a.run_root)
     if not root.is_absolute():
@@ -98,7 +103,7 @@ def main(argv=None) -> int:
     for arm in sorted(p for p in root.iterdir() if p.is_dir() and p.name != "logs"):
         for stamp in sorted(arm.iterdir()):
             if (stamp / "eval_metrics.json").is_file():
-                refresh(stamp, dry_run=a.dry_run)
+                refresh(stamp, dry_run=a.dry_run, force=a.force)
                 n += 1
     print(f"[refresh] {n} arm(s)")
     return 0

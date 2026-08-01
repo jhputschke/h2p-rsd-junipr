@@ -372,6 +372,41 @@ def build(run_root: Path) -> str:
     for name, r in results.items():
         P(f"| {name} | {_verdict(r['ok'])} | {r['detail']} |")
     P("")
+
+    # --- the same gates on EVERY seed of the base arm ------------------------------
+    # A gate evaluated on one seed is a gate evaluated on one draw from the seed band.
+    # Where the band straddles the criterion, "passes" and "fails" are both true of this
+    # architecture and neither is true of it alone, so the per-seed column is the finding.
+    base_seeds = {a: e["metrics"] for a, e in arms.items() if _arm_family(a) == "v1_base"}
+    if len(base_seeds) > 1:
+        per = {"G1": gate_g1, "G2": gate_g2, "G3": gate_g3, "G4": gate_g4,
+               "G5": gate_g5, "G6": gate_g6, "G7": gate_g7}
+        P("### The same gates on every seed\n")
+        P("| gate | " + " | ".join(f"`{a}`" for a in sorted(base_seeds)) + " | band |")
+        P("|---|" + "---|" * (len(base_seeds) + 1))
+        for gname, fn in per.items():
+            verdicts = {a: fn(base_seeds[a])["ok"] for a in sorted(base_seeds)}
+            vals = set(str(v) for v in verdicts.values())
+            band = ("unanimous" if len(vals) == 1
+                    else "**SEED-DEPENDENT — the band straddles the criterion**")
+            P(f"| {gname} | " + " | ".join(_verdict(verdicts[a]) for a in sorted(base_seeds))
+              + f" | {band} |")
+        P("")
+        # the numbers behind the seed-dependent ones, since a verdict flip needs its value
+        P("| quantity | " + " | ".join(f"`{a}`" for a in sorted(base_seeds))
+          + " | criterion |")
+        P("|---|" + "---|" * (len(base_seeds) + 1))
+        for label, path, crit in (
+            ("`ln z` PIT KS", "calibration.pit_coords.coords.ln_z.ks", "<= 1.36/sqrt(n)"),
+            ("TARP max dev", "calibration.tarp.tarp_max_dev", "<= its recomputed null"),
+            ("TARP null 95%", "calibration.tarp.null_band.p95", "—"),
+            ("`coverage_68`", "calibration.coverage_68", "Wilson-consistent with 0.68"),
+            ("`<N>` ratio", "closure.mean_mult_ratio", "[0.95, 1.05]"),
+        ):
+            P(f"| {label} | "
+              + " | ".join(_fmt(_get(base_seeds[a], path), ".4f") for a in sorted(base_seeds))
+              + f" | {crit} |")
+        P("")
     P("G8 has no verdict column by design: it is a comparison whose deciding metrics are "
       "listed, not a threshold. SBC-N is reported and does not decide "
       "(the explicit-`q(N|x)` arm is calibrated on it nearly by construction).")
