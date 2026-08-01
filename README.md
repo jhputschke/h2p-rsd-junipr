@@ -376,6 +376,9 @@ read — the reader guards on the RNTuple descriptor.
 `data/` · `encoders/` · `models/` · `inference/` · `eval/` · `train/` · `serving/`
 · `cli`. `configs/` — YAML group files composed by `config.py`. `presets/` — whole-run
 tops passed as `base=`, searched before `configs/` for group files (`prod_test_v0.yaml`
-is the production-test arm). `cpp/` — the generation stage. `tests/` — pytest mirror. See
+is the production-test arm). `cpp/` — the generation stage. `tests/` — pytest mirror.
+The end-to-end production test is designed in
+[`docs/PLAN_prod_test_v0.md`](docs/PLAN_prod_test_v0.md) and reported in
+[`docs/PROD_TEST_v0_RESULTS.md`](docs/PROD_TEST_v0_RESULTS.md). See
 [`docs/PRODUCTION-PLAN-v4.md`](docs/PRODUCTION-PLAN-v4.md) for the full design and
 the §14 phased roadmap.
