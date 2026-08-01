@@ -1,6 +1,13 @@
 # PLAN — Production test v1: one targeted intervention per localized failure, with pre-registered gates
 
-**Status:** implemented; see [`PROD_TEST_v1_RESULTS.md`](PROD_TEST_v1_RESULTS.md).
+**Status: implemented and run** — 11 arms, all evaluated; results in
+[`PROD_TEST_v1_RESULTS.md`](PROD_TEST_v1_RESULTS.md). Gates on `v1_base`, unanimous over
+three seeds: **G1 PASS, G2 PASS, G3 FAIL, G4 FAIL, G5 ATTRIBUTED, G6 PASS, G7 FAIL**; G8
+decided **against** the fielded explicit-`q(N|x)` family. Three §12 triggers were tested:
+the joint-coordinate-density and §4.4 spline triggers **fired** (G3 fails on the truncated
+head); the WP3 secondary-plane trigger **did not** (the aux isolation is null on every
+deciding metric). Nothing was changed mid-run in response to any of them.
+
 Companion to [`PLAN_prod_test_v0.md`](PLAN_prod_test_v0.md) and
 [`PROD_TEST_v0_RESULTS.md`](PROD_TEST_v0_RESULTS.md); as there, **this plan holds the
 design and the rationale, the results document will hold only numbers.** Every pass

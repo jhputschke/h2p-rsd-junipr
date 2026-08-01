@@ -245,6 +245,37 @@ columns add nothing *as fed to this encoder*, not that the secondary planes are
 uninformative; and the aux columns are groomed at `kt_floor_sec = 0.2` against the
 sequences' 1.0, which is the asymmetry that makes them non-degenerate at all.
 
+### 3.2 Encoder probe — `lundnet` is not the best of the three
+
+v0 §10 flagged this as open: `lundnet` is the pairing
+[`PLAN_ProductionAssessment.md`](PLAN_ProductionAssessment.md) §4 *names* for the A4 arm,
+not a measured winner. One seed each, so the only yardstick is the `v1_base` band at the
+same configuration.
+
+| quantity | `v1_base` (lundnet, 3 seeds) | `v1_gru` (1) | `v1_deepsets` (1) | outside the band |
+|---|---|---:|---:|---|
+| best val NLL/jet | 3.9169 [3.9036, 3.9237] | **3.8988** | **3.8855** | both |
+| `ln z` PIT KS | 0.0423 [0.0270, 0.0529] | 0.0537 | 0.0513 | `gru` (worse) |
+| TARP max dev | 0.0367 [0.0335, 0.0415] | **0.0275** | 0.0360 | `gru` (better) |
+| `coverage_68` | 0.5255 [0.5179, 0.5400] | **0.5519** | 0.5328 | `gru` (better) |
+| medoid/identity | 0.9312 [0.9240, 0.9373] | 0.9254 | 0.9253 | no |
+
+**Both alternatives beat `lundnet`'s three-seed NLL band**, and `gru` additionally lands
+its TARP at 0.0275 — *exactly* its recomputed null, the only explicit-`q(N|x)` arm in the
+grid that does not fail G7 outright — with the best leading-cell coverage of any arm here.
+It pays for it on the `ln z` PIT, where it is the worst.
+
+**This is a probe, not a result, and the distinction is the whole point of §3.1.** One seed
+cannot be compared to a band on equal terms: `lundnet`'s own band is 0.020 wide and `gru`
+sits 0.005 outside it. What the row licenses is "worth a proper multi-seed A/B", which is
+exactly what v0 §10 asked for and what this grid was not sized to deliver — the plan
+budgets one training per encoder. It does *not* license changing the fielded pairing.
+
+Two things make it more interesting than a tie, though. The encoder was never a suspect in
+§6's defect, and yet `gru` moves TARP and coverage — the two instruments that read that
+defect — in the same direction that `v1_contstop` moves them (§4.8). And it does so while
+being *worse* on the coordinate PIT, so it is not simply a better model.
+
 ## 4. Gates G1–G8
 
 Verdicts on `v1_base`, evaluated on **all three seeds** — a gate evaluated on one seed is
@@ -490,7 +521,46 @@ pre-registered plan exists to prevent:
 
 Nothing in this run was changed in response to any of them.
 
-## 7. What is not measured
+## 7. Verdict
+
+**The arm passes acceptance and support; the run's main product is an attribution.**
+
+Pre-registered gates on `v1_base`, unanimous across three seeds: **G1 PASS, G2 PASS,
+G3 FAIL, G4 FAIL, G5 ATTRIBUTED, G6 PASS, G7 FAIL**, and G8 decided against the fielded
+family.
+
+Four things this run establishes that v0 could not:
+
+1. **WP-A works, completely, on the thing it was built for.** Every support violation is
+   gone — 0.83% below soft drop and 3.94% above `z = ½` become 0.0000% — and the
+   `v1_legacy_lnz` arm reproduces the v0 rates to five significant figures, so the
+   difference is attributable to `lnz_support` and nothing else.
+2. **The `ln z` failure was two failures.** The support half is closed; the shape half
+   (1.05–2.07× its critical value, concentrated in the quadrant holding 94% of emissions)
+   is not, and a truncation cannot close it. Plan §4.4's spline escalation and §12's
+   joint-density trigger have both fired.
+3. **v0's central reading was inverted, and the real defect is now located.** The joint
+   tree posterior is too narrow — read by TARP, by leading-cell coverage, and by the
+   `narrow_soft` attribution — and it is **the multiplicity factorization**, not the
+   coordinate heads, the encoder, or the support: all six explicit-`q(N|x)` arms fail G7,
+   both continue/stop arms pass, and the signed bias goes from −0.020 to −0.0002. The
+   `q(N|x)` *marginal* is calibrated; the factorization it sits in is what narrows the joint.
+4. **Two open questions from v0 are answered, one negatively.** The aux *isolation* is null
+   on every deciding metric — `ln_pt` + `abs_eta` carry the whole of the aux gain — so
+   WP3's trigger does not fire. The encoder probe says `lundnet` is not the best of the
+   three and deserves the multi-seed A/B this grid was not sized to run.
+
+**What should change in the fielded configuration.** On the pre-registered deciding
+metrics, G8 favours the implicit continue/stop factorization: better held-out NLL by
+0.124 nat and a TARP that passes where every explicit-head arm fails, with coordinate
+PITs, coverage and the decode metric all tied. That is a recommendation this run supports;
+it is not a recommendation the run *validated end to end*, since `v1_contstop` was fielded
+as a two-seed comparison arm rather than as a candidate deliverable.
+
+**What has not changed.** The acceptance criterion — the posterior beats the identity
+baseline on both estimators and both tiers — holds on every arm in the grid.
+
+## 8. What is not measured
 
 - **PYTHIA vs HERWIG.** Still no `herwig_driver`; the train/test deltas remain the noise
   floor stand-in, exactly as in v0 §10. This remains the largest unquantified systematic.
