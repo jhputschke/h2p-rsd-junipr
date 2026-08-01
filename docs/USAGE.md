@@ -261,14 +261,18 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt
 ```
 
 This rebuilds the model from the checkpoint, regenerates the **same held-out
-val set** (from the snapshotted config), and runs the §8 validation suite:
+val set** (from the snapshotted config), and runs the §8 validation suite. The
+checkpoint is the default for everything — architecture, geometry, sample, decode — and
+[two groups can be lifted over it](#evaluating-on-a-different-sample-a-held-out-test-set):
 
 ```
 closure + calibration on held-out jets:
   mean multiplicity            :  true y = 5.30   hadron x = 5.15   posterior = 5.54
-  leading-emission Lund distance to true y :  identity(x) = 0.558   posterior-mode = 1.745
+  leading-emission Lund distance to true y :  identity(x) = 0.558   posterior-mode = 1.745   posterior-medoid = 1.602   (lower is better; medoid is the loss-matched estimator, mode is kept for continuity)
   multiplicity signed bias  <n - n_true>   :  identity(x) = -0.150   posterior-mean = +0.245   posterior-median = +0.180
   posterior 68% coverage of true leading cell = 0.42   (target ~0.68; <0.68 => over-confident)
+  empty parton tree (ALL 300 jets; the dlund_* rows above keep only the 251 with a truth leading emission):
+      truth = 0.163   predicted = 0.000   recall = 0.000   precision = nan   (decode.empty_threshold = 0; 0 == off, so predicted ~0 is the DECODE, not the fit)
   multiplicity signed bias stratified by true N (mean over jets in bin):
      true N   jets   post-mean  post-median
         1-3     29      +2.517       +2.379
@@ -288,6 +292,30 @@ per-jet point estimate q_phi(y | x) for one validation jet:
 (Numbers above are from a deliberately under-trained 3-epoch demo; a fully trained
 `ar_junipr_v2` reaches val NLL ≈ 20.7 and ~0.68 coverage — see
 `scripts/verify_synthetic_result.txt`.)
+
+> **Read `posterior-medoid`, not `posterior-mode`.** Both are on the leading-emission line.
+> The **mode** is the most frequent leading cell — the estimator that minimises expected 0-1
+> loss — while the score beside it is a *distance*, so the mode is optimal for a loss nobody
+> is measuring. The **medoid** ([`medoid_cell`](../src/h2p_rsd_junipr/eval/closure.py)) is the
+> argmin over the same draws of the quantity actually reported, so under the model's own
+> posterior it cannot do worse. On the walkthrough `ar_junipr_v3` (2000 val jets, K=200) the
+> mode reads **1.030×** identity and the medoid **0.944×** — "plain RSD wins the leading
+> emission" was the estimator, not the model. The mode is still printed so tables written
+> before this change stay readable.
+>
+> The cell-level row is also **quantisation-limited**: cells are ~0.6 wide and these distances
+> are ~0.6. `experiment.closure_continuous=true` repeats the comparison off the grid (below),
+> where the same checkpoint reads **0.905×**, 95% CI [0.882, 0.928].
+
+> **The empty-tree row reads `predicted = 0.000` by default, and that is the decode, not the
+> fit.** At parton level ~17% of jets have no primary splitting; no point estimator under the
+> default decode ever says so (the MAP is `argmax_n q(n|x)`, whose peak lands at 0 essentially
+> never; MBR's imbalance penalty makes an empty cloud near-maximal risk). The model does hold
+> the information — `q(0|x)` separates the classes at AUC 0.76. Turn the decision on with
+> `decode.empty_threshold`, fitting τ with `inference.length.empty_threshold_for_rate` on
+> held-out jets; see [CONFIGURATION §7](CONFIGURATION.md). Note this row is computed over
+> **every** jet, while the `dlund_*` row above keeps only those with a truth leading emission
+> — the two denominators are printed so they cannot be confused.
 
 > **MAP multiplicity floor.** The MAP is the *joint mode* `argmax_y q_φ(y|x)`; for a
 > discrete autoregressive posterior it is length-biased and, un-floored, collapses to
@@ -341,6 +369,119 @@ What the metrics mean:
 Tune cost vs. precision with `experiment.closure_jets` and
 `experiment.n_closure_samples`.
 
+### Evaluating on a different sample (a held-out test set)
+
+The datamodule only ever produces train/val, so by default `eval` reports on the very
+jets model selection used. Name a different sample and it becomes the eval set:
+
+```bash
+# the checkpoint stays the model; only WHICH jets it is reported on changes
+h2p-rsd-junipr eval runs/<id>/best.ckpt data.source=rntuple data.path=jets_test.root
+
+# one slice of the spectrum (half-open, pt_min <= jet_pt < pt_max)
+h2p-rsd-junipr eval runs/<id>/best.ckpt data.path=jets_test.root \
+    data.pt_var=jet_pt data.pt_min=100 data.pt_max=150
+```
+
+```
+[eval] data lifted over the checkpoint snapshot: path: 'jets.root' -> 'jets_test.root'
+[eval] 54007 eval jets, every jet (explicitly named eval sample), from rntuple:jets_test.root (fingerprint=899397aac7bb)
+```
+
+An explicitly named sample is treated as a **test set and evaluated whole**, not re-split
+90/10 — keeping the split would silently report on a tenth of the file, and on a
+*different* tenth as soon as its length changed. Plain `eval <ckpt>` is unchanged: the
+snapshot's own val split. Either way the jet count and the data fingerprint are printed
+and recorded in `eval_metrics.json`, so a metrics file always names the jets it describes.
+
+`geometry` and `encoder` are deliberately **not** liftable — they set tensor widths and
+the model contract, so changing them describes a different model rather than a re-run.
+A checkpoint trained with `encoder.aux_features` still requires the aux source columns in
+whatever file you point it at; the reader's NaN/`-1` sentinels make that fail loudly at
+dataset build time rather than silently conditioning on garbage.
+
+**First, prove the test file is actually held out.** `pythia_driver` does
+`Random:seed = seed % 900000000`, so two files generated from the same card differ only by
+a seed that can, in principle, collide — and if the streams overlap, "held-out" is false
+and every number above is a training number. Nothing in the eval path can detect that, so
+check it once, before you quote anything:
+
+```bash
+python scripts/check_disjoint.py jets_train.root jets_test.root --json-out disjoint.json
+```
+
+It asserts three things and exits non-zero on any of them: the two files' grooming
+provenance `(z_cut, beta, kt_floor, kt_floor_sec, generator)` is **equal** (different
+cards would make the assessment a covariate shift, not a generalisation test), their
+content fingerprints **differ**, and no jet appears in both. That last comparison runs in
+two flavours because the groomed sequences are short (~1.8 nodes on this physics): `full`
+hashes the sequences plus the jet four-vector and so covers every jet read, while `seq`
+hashes the sequences alone and only counts jets with `>= --min-emissions` — on a typical
+sample that is under a tenth of them, which is why `full` is the headline.
+
+**Population-level closure on that test set** is a notebook rather than a CLI flag, and
+pointing it at a different file takes more than the path. `lund_distribution_closure_v2`'s
+`EMPTY_THRESHOLD` defaults to rate-matching tau on the sample it reports on — circular —
+and its `LENGTH_TEMPERATURE` / `LENGTH_TILT` reach `sample`, so an uncalibrated head
+reports a different empty rate with nothing to say which one it was. Rather than document
+five edits, the variant is generated:
+
+```bash
+python scripts/make_prod_closure_nb.py           # -> notebooks/lund_distribution_closure_prod_test_v0.ipynb
+python scripts/make_prod_closure_nb.py --check   # CI: is the committed one stale?
+```
+
+Every cell except the title and section 0 is copied byte-for-byte from v2, so there is
+never a second definition of the headline ratios; the five settings are read at runtime
+from the `prod_test_v0_metrics.json` that `notebooks/prod_test_v0.ipynb` writes, so they
+cannot disagree with the fit that produced them. Adapt `SUBS` in the generator for a
+different study.
+
+### The same closure without a kernel: PDF figures + a Markdown report
+
+When the output has to survive a kernel restart — a report to circulate, a run on a
+headless box, a batch job — `scripts/lund_closure_report.py` is the same analysis with
+the output inverted: every panel becomes a PDF under `<out>/figures/`, and the prose,
+the tables and the run-evaluated conclusions become `<out>/report.md`, which references
+each figure by number. It defaults to the same production-test settings, read from the
+same artifact and guarded by the same tau-scale check.
+
+```bash
+PYTHONPATH=src python scripts/lund_closure_report.py --probe 20     # cost, then exit
+PYTHONPATH=src python scripts/lund_closure_report.py --jets 2000    # -> <ckpt dir>/lund_closure_report/
+PYTHONPATH=src python scripts/lund_closure_report.py --no-prod-metrics \
+    --ckpt runs/<id>/best.ckpt --root cpp/test_data/jets.root --png
+```
+
+`--png` writes a PNG beside each PDF and embeds it, for viewers that cannot inline a
+PDF. It is a *second* implementation of the headline ratios, which is exactly what the
+generator above exists to avoid, so the drift check is made cheap instead: it writes
+`dist_closure_metrics.json` in the notebook's schema, and `jq -S .headline` on the two
+should agree for the same checkpoint, file, `K` and MBR backend. Agree *to within
+sampling noise*, not bit-for-bit — the notebook's §4a cost probe consumes the torch RNG
+before its main pass, so the draw streams differ. Where they disagree by more than that,
+the notebook is the definition.
+
+### Configuring decode from a preset instead of a CLI chain
+
+`decode` is liftable the same way, through the full composition surface — `decode=<name>`,
+a `base=` preset's `defaults:`/inline block, or dotted tokens, in `load_config`'s
+precedence order with the CLI last:
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt base=presets/mbr_study.yaml   # the preset's decode
+h2p-rsd-junipr eval runs/<id>/best.ckpt base=presets/mbr_study.yaml \
+    decode.min_emissions=0                                            # ...CLI still wins
+```
+
+```
+[eval] decode lifted over the checkpoint snapshot: mbr_lnkt_cut: None -> 0.0, mbr_resample_to_qn: False -> True, point_estimator: 'map' -> 'mbr'
+```
+
+Only the fields the preset actually names move; everything else stays as the checkpoint
+left it. `experiment` is different again — it is the eval suite's own configuration and
+always comes from the CLI/preset, never from the checkpoint.
+
 ### The full calibration suite (per-coordinate PITs, region strata, TARP)
 
 The SBC/PIT block above uses the **multiplicity** as the test quantity. That is a real
@@ -363,15 +504,17 @@ per-coordinate PIT (physical space, 300 jets, 1624 emissions):
       psi    1624   0.0154   0.499
     KS 95% critical value at this sample size = 0.0337   (KS above it => significant miscalibration)
 
+  leading-cell 68% coverage = 0.66  95% Wilson [0.60, 0.71] on 300 jets   (target 0.68 — inside the interval)
   region-stratified (leading-emission Lund quadrant):
-        region   jets  SBC chi2  rank mean   cov68   (targets: low, 0.5, 0.68)
-     wide_soft    118     12.40      0.492    0.66
-     wide_hard     96     14.10      0.507    0.69
-   narrow_soft     54     18.20      0.463    0.61
-   narrow_hard     32     21.00      0.518    0.72
+        region   jets  SBC chi2  rank mean   cov68       95% Wilson     n   (targets: low, 0.5, 0.68)
+     wide_soft    118     12.40      0.492    0.66   [0.57, 0.74]   118
+     wide_hard     96     14.10      0.507    0.69   [0.59, 0.77]    96
+   narrow_soft     54     18.20      0.463    0.61   [0.48, 0.73]    54
+   narrow_hard     18     21.00      0.518    0.72   [0.49, 0.88]    18  < n=30, NOT SCORED
+    quadrant split at u = 3.00, v = 3.00;  u = ln(1/DeltaR) >= ln(1/R) = 0.92 at R = 0.4, so the low-u strip is kinematically unreachable
 
 TARP expected coverage (pooled references, 100 refs, 300 jets, EMD backend pot):
-  max |ECP(alpha) - alpha| = 0.061   mean signed deviation = -0.018
+  max |ECP(alpha) - alpha| = 0.061   (95% null floor 1.36/sqrt(300) = 0.079; below it => consistent with calibrated)   mean signed deviation = -0.018
     ECP(0.50) = 0.472   ECP(0.68) = 0.651   ECP(0.90) = 0.878   ECP(0.95) = 0.933   => consistent with calibrated
 ```
 
@@ -391,16 +534,63 @@ How to read them:
   note; `cinn`/`cfm` report the flow's *base space* instead (tagged `latent`).
 - **region stratification** — the same metrics per Lund quadrant of the leading emission.
   A model calibrated *on average* but not per region cannot support a localized claim.
+  **Every coverage carries its Wilson interval and its count**, and a quadrant below
+  `min_region_n` (default 30) is printed but flagged `NOT SCORED`: these are binomial
+  proportions on a few dozen jets, and "0.72 vs 0.68" on 18 of them is a coin flip, not a
+  measurement. The quadrants are also not equally reachable — `u = ln(1/ΔR) ≥ ln(1/R)`, so
+  at `R = 0.4` the strip below `u = 0.92` is empty by kinematics rather than by the model,
+  which is why the split points are printed beside the table.
 - **TARP** — expected coverage of the *whole tree* under the perturbative-Lund EMD.
   `ECP(0.68) = 0.651` reads directly as "at 68% credibility the posterior covered 65% of
   the time". **The sign is the diagnosis**: below the diagonal ⇒ over-confident, above ⇒
-  over-dispersed. Needs the `[mbr]` extra and costs `closure_jets × (K+1)` EMD solves.
+  over-dispersed. `tarp_max_dev` is a sup-norm CDF deviation — a KS statistic — so it is
+  quoted against its `1.36/√n` null floor: at 300 jets anything under 0.079 is a pass, not
+  a small failure. Needs the `[mbr]` extra and costs `closure_jets × (K+1)` EMD solves.
+- **`sbc_chi2_uniform`** is likewise quoted against the 95% point of `χ²(n_rank_bins − 1)`
+  (16.90 at the default 10 bins), because the raw number means nothing without its dof.
 
 `eval` writes `eval_metrics.json` and the three figures
 (`calibration_pit_coords.png`, `calibration_tarp.png`, `calibration_by_region.png`)
 **beside the checkpoint**. Figures need matplotlib, which is not a core dependency but an
 opt-in extra (`pip install -e ".[plots]"`) — without it you still get the JSON. A worked walkthrough on real PYTHIA data is
 [`notebooks/calibration_v2_walkthrough.ipynb`](../notebooks/calibration_v2_walkthrough.ipynb).
+
+### The leading emission off the cell grid
+
+The leading-emission line above scores cell *centres*, and at the default geometry a cell is
+`(6-0)/10 = 0.6` wide while the distances are ~0.6 — so it is largely measuring the grid.
+A fourth opt-in switch repeats the comparison with no quantisation:
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt experiment.closure_continuous=true
+```
+
+```
+  the same, OFF the cell grid (336 jets) :  identity(x) = 0.643   posterior-mode = 0.714
+     posterior-geo-median = 0.594
+      (cells are ~0.60 wide, so the cell-level row above is quantisation-limited)
+```
+
+Each draw's leading emission is placed by `sample_coordinates` and summarised by
+[`geometric_median`](../src/h2p_rsd_junipr/eval/closure.py) — the L1 Bayes point, and unlike the
+cell medoid not restricted to the drawn support. Adds `dlund_identity_cont`,
+`dlund_posterior_mode_cont`, `dlund_posterior_geomedian_cont` and `n_continuous_jets`; costs
+`closure_jets × n_closure_samples` forward passes, which is why it is opt-in. A family with no
+coordinate density (`ar_junipr_v1`) yields **NaN** for those keys rather than omitting them.
+
+For the full study behind these two changes — the oracle, per-jet win rates, stratification by
+leading `ln kt`, and a paired bootstrap on the ratio — run the script:
+
+```bash
+python scripts/leading_estimators.py runs/<id>/best.ckpt --jets 2000 --draws 200
+python scripts/leading_estimators.py runs/<id>/best.ckpt --out runs/<id>   # + json/md
+```
+
+It prints the `ln kt` thirds, which is where the pooled number can mislead: on the walkthrough
+`ar_junipr_v3` the model beats identity on the hard and middle thirds and **loses** the soft one
+(1.088×). A calibrated, fully conditional posterior beats *any* function of `x`, including the
+identity, so a ratio above 1 in one region is a localized under-conditioning finding — and it
+lands in the same corner where `experiment.stratify_regions` shows the worst coverage.
 
 ### The v2-vs-v3 A/B, and which decode knobs are still live
 
@@ -418,6 +608,25 @@ every decode cell; the output is `ab_table.md` + `ab_results.json`. See
 [`CONFIGURATION.md` §7 "v3 semantics"](CONFIGURATION.md#7-decode--inference--map--posterior-knobs)
 for the per-knob verdict and the recorded decision rule for the deferred
 feed-N-into-decoder extension.
+
+**`eval` now answers the same question for free.** `eval_metrics.json` dumps the whole
+decode config, which makes it an equally faithful record of settings that changed nothing
+— so a `decode_inert` list sits beside it naming each dead knob and why, and the same list
+is printed before the closure block:
+
+```
+[eval] decode knobs that did NOT reach these numbers:
+    cont_temperature = 1.0   — PosteriorModel.sample_batch takes no cont_temperature; every posterior draw here is at T=1
+    max_emissions = 25   — sample_batch uses its own signature default (25); the decode value reaches map_estimate but not the draws
+    beam_width = 8   — use_multiplicity_head=true routes map_decode to _map_decode_fixed_length (greedy argmax per step); beam_search_cells is never called
+    mbr_R = 8.485   — point_estimator != 'mbr'; no OT backend is imported
+    ...
+```
+
+The list is derived from the model's own flags, not hand-maintained per preset: with
+`use_multiplicity_head: true` (v3/v4) the beam keys are structurally dead, and with
+`point_estimator: map` every `mbr_*` knob is. Without this, comparing two runs on
+`beam_width` compares a knob neither of them consulted.
 
 > **The multiplicity-support guard.** A categorical `q(N|x)` head has finite support
 > `N = 0..model.max_emissions`; a longer truth is clamped into the last bin and gets the
@@ -452,6 +661,16 @@ plots in §5.4).
 The contract every model family implements is **`log_prob`** (exact per-jet
 `log q_φ(y|x)`), **`sample`** (posterior draws), and **`map_estimate`** (the MAP
 Lund tree). Everything below is built on those three.
+
+`sample` returns **cell chains only**, so a fourth method completes a draw:
+**`sample_coordinates(xf, nx, cells)`** draws the four continuous coordinates
+`(ln 1/ΔR, ln k_t, ln z, ψ)` for a given chain — AR from its four heads, `cinn`
+through `flow.inverse`, `cfm` by integrating its ODE forward, `diffusion` from the
+reverse process. It returns `None` only for **`ar_junipr_v1`**, the one family with
+no coordinate density; check `model.has_continuous_coords` before reading `ln z` or
+`ψ`, because without a coordinate head those fields hold `0.0` placeholders (i.e.
+`z = 1`, the softer prong taking the whole jet — not physical, and not a prediction).
+`describe_cells`, and through it the MBR winner, goes through this method.
 
 ### 5.1 Load a trained model once
 

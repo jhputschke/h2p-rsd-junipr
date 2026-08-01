@@ -60,30 +60,111 @@ outputs stripped. The key list is duplicated in `setup_nbstripout.sh` and
 `.pre-commit-config.yaml`; change both together or the two strippers will undo
 each other.
 
-> **ARM64 (Dell GB10, Apple Silicon):** the `[energyflow]` extra pulls in
-> `wasserstein`, a C++ extension with no prebuilt ARM wheel, so pip compiles it
-> from source. Its headers declare `enum ... : char` members with value `-1`,
-> which is out of range because `char` is *unsigned* by default on ARM — the
-> build fails with `enumerator value '-1' is outside the range of underlying
-> type 'char'`. `wasserstein` also `#include`s `<omp.h>`, which Apple clang does not
-> ship, so the build additionally needs an OpenMP include/lib (conda's `llvm-openmp`,
-> already present in most envs; `conda install -c conda-forge llvm-openmp` otherwise).
-> Force a signed `char` **and** point the compiler at conda's OpenMP:
+> **`[energyflow]` under NumPy ≥ 2, and on ARM64 (Dell GB10, Apple Silicon):** the extra
+> pulls in `wasserstein`, a SWIG/C++ extension. Two *independent* things bite — a NumPy
+> ABI mismatch on every platform, and a compile failure specific to Linux ARM.
+>
+> **1. Every published `wasserstein` 1.1.0 binary is NumPy-1 ABI.** Its `pyproject.toml`
+> lists `oldest-supported-numpy` as a build requirement, so pip's build isolation compiles
+> against NumPy 1.26 headers regardless of what the target env holds — and the PyPI wheels
+> (`macosx_11_0_arm64` and `manylinux_x86_64` exist; `linux_aarch64` does not) were built
+> the same way. Under NumPy ≥ 2 the result is `A module that was compiled using NumPy 1.x
+> cannot be run in NumPy 2.x`. The package lazy-imports its extension, so `import
+> energyflow` *succeeds* and only the first `emd()` call fails — which makes
+> `tests/test_mbr.py` **skip** its energyflow cases (`energyflow solver unavailable`)
+> instead of failing. Fix: force a source build with build isolation off, so the compiler
+> sees the env's own NumPy 2 headers.
+>
+> **2. Linux ARM additionally fails to compile.** `wasserstein`'s headers declare
+> `enum ... : char` members with value `-1`, out of range because `char` is *unsigned* by
+> default on ARM: `enumerator value '-1' is outside the range of underlying type 'char'`.
+> Force a signed `char`.
 >
 > ```bash
-> CFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
-> CXXFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
-> LDFLAGS="-L$CONDA_PREFIX/lib -lomp -Wl,-rpath,$CONDA_PREFIX/lib" \
->   pip install --no-binary wasserstein -e ".[energyflow]"
+> # Linux aarch64 — GCC ships <omp.h>, and setup.py adds -fopenmp itself
+> CFLAGS="-fsigned-char" CXXFLAGS="-fsigned-char" \
+>   pip install --no-binary wasserstein --no-build-isolation --no-cache-dir \
+>     -e ".[energyflow]"
 > ```
 >
-> Two *runtime* quirks on this platform are handled automatically by the package, so
-> no action is needed: PyTorch and `wasserstein` each link an OpenMP runtime (macOS
-> would abort with `OMP: Error #15`), so `inference.mbr` sets `KMP_DUPLICATE_LIB_OK=TRUE`
-> before first use; and `wasserstein`'s batched `emds` uses `np.array(..., copy=False)`,
-> which raises under NumPy ≥ 2, so the energyflow backend falls back to the (identical)
-> per-pair `emd`. The `[mbr]` default (`pot` backend) needs no compilation and none of
-> this applies. On x86-64 (`char` is signed there, OpenMP is found) no flags are needed.
+> `--no-build-isolation` builds against the env's own `setuptools`, `wheel` and `numpy` —
+> install those first if absent. `--no-cache-dir` matters on any re-install: pip caches the
+> wheel it built under `~/.cache/pip/wheels/` and will silently reuse a stale NumPy-1 one.
+>
+> **3. macOS additionally needs `wasserstein` to share PyTorch's OpenMP runtime.**
+> Apple clang ships no `<omp.h>`, which `wasserstein` `#include`s, so the headers have to
+> come from conda (`conda install -c conda-forge llvm-openmp` if the env lacks it). The
+> *library*, however, must not: linking `$CONDA_PREFIX/lib/libomp.dylib` puts a **second**
+> LLVM OpenMP runtime in the process, because `import energyflow` already loaded PyTorch's
+> bundled `torch/lib/libomp.dylib` (energyflow → POT → `ot.backend` imports torch — you do
+> not have to `import torch` yourself). Two runtimes means the batched `emds` **segfaults**
+> when it creates its thread team: in Jupyter the kernel just dies, no traceback. Link the
+> copy PyTorch already loads instead — headers from conda, library from `torch/lib`:
+>
+> ```bash
+> TORCH_LIB=$(python -c "import torch, os; print(os.path.dirname(torch.__file__) + '/lib')")
+> CFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
+> CXXFLAGS="-fsigned-char -I$CONDA_PREFIX/include" \
+> LDFLAGS="-L$TORCH_LIB -lomp -Wl,-rpath,$TORCH_LIB" \
+>   pip install --no-binary wasserstein --no-build-isolation --no-cache-dir \
+>     -e ".[energyflow]"
+>
+> # setup.py also bakes in an rpath to $CONDA_PREFIX/lib, and dyld searches rpaths in
+> # order — so that libomp still wins unless the entry is removed. Drop it, then re-sign
+> # (arm64 binaries carry a signature that install_name_tool invalidates).
+> python -c "import os, wasserstein as w; d = os.path.dirname(w.__file__); \
+> print('\n'.join(os.path.join(d, f) for f in os.listdir(d) if f.endswith('.so')))" \
+> | while read -r so; do
+>     install_name_tool -delete_rpath "$CONDA_PREFIX/lib" "$so" 2>/dev/null && \
+>       codesign -f -s - "$so"
+>   done
+> ```
+>
+> Verify with `otool -l …/wasserstein/_wasserstein_omp*.so | grep -A2 LC_RPATH`: only
+> `torch/lib` should remain. `mbr` then runs the parallel path and stays quiet.
+>
+> The NumPy-2 `emds` break is handled automatically, so no action is needed there:
+> `wasserstein`'s batched `emds` uses `np.array(..., copy=False)` on a *strided column
+> slice*, which raises under NumPy ≥ 2 (`Unable to avoid copy`) — a break in its *Python*
+> layer that rebuilding does not fix. `_matrix_ef` retries that one call with NumPy-1 copy
+> semantics restored in `wasserstein.wasserstein`'s namespace alone
+> (`_wasserstein_numpy2_compat`), which is what keeps the backend multi-core.
+>
+> **If the rebuild is skipped, `mbr` degrades instead of crashing.** `_guard_wasserstein_openmp`
+> dlopens the OpenMP extension (which resolves its rpath but starts no parallel region) and
+> counts the loaded runtimes. Finding two, it either takes `wasserstein`'s own documented
+> Darwin opt-out (`wasserstein.config.without_openmp()`, selecting the no-OpenMP build) or —
+> if something already ran an EMD and committed the OpenMP build — pins `emds` to
+> `n_jobs=1`, where no second thread team is spawned. Either way a `RuntimeWarning` names
+> the rebuild. Note that `inference.mbr` no longer sets `KMP_DUPLICATE_LIB_OK=TRUE`
+> unconditionally: that variable is exactly what turned OpenMP's self-explaining
+> `OMP: Error #15` abort into a silent SIGSEGV, and it is now set only in the pinned case,
+> where the abort would otherwise be unavoidable.
+>
+> **This matters more than it looks.** `emds` is the *only* parallel path —
+> `wasserstein.PairwiseEMD` fans the pairs out over OpenMP threads. The per-pair `emd`
+> fallback is single-threaded, so losing `emds` costs a factor of the core count for
+> bit-identical numbers. Measured on the GB10 (20 cores, 200×200 clouds of 3–20 points),
+> and on an Apple-Silicon 16-core (100×100 clouds of 3–20 points):
+>
+> | path | µs/pair, GB10 | µs/pair, M-series |
+> |---|---|---|
+> | `energyflow`, batched `emds` (all cores) | **2.3** | **2.9** |
+> | `energyflow`, batched `emds` (1 thread — duplicate-libomp guard) | — | 32.7 |
+> | `energyflow`, per-pair `emd` fallback (1 core) | 34.9 | 43.1 |
+> | `pot` default backend (1 core) | 49.0 | — |
+>
+> All four agree elementwise (max deviation 0.0); only the wall clock differs. If the
+> per-pair fallback ever engages it emits a `RuntimeWarning` rather than silently costing
+> ~15×, as does the macOS OpenMP guard for its ~9×. Note that energyflow's *other* batched entry point, `emds_pot`, is dead
+> against POT ≥ 0.9.5 for an unrelated reason — a bare `except:` at `energyflow/emd.py:59`
+> swallows the failed `from ot.lp import emd_c` (POT moved it to `ot.lp.emd_wrap`) and
+> leaves `_distance_wrap` unbound, surfacing as a `NameError` only when called. `mbr.py`
+> does not use that path.
+>
+> On x86-64 the compile flags are unnecessary (`char` is signed, OpenMP is found) but the
+> rebuild in (1) still applies. The `[mbr]` default (`pot` backend) needs no compilation
+> and none of this applies.
 
 ## Quickstart
 
@@ -293,7 +374,11 @@ read — the reader guards on the RNTuple descriptor.
 
 `src/h2p_rsd_junipr/` — `config` · `geometry` · `features` · `distributions` ·
 `data/` · `encoders/` · `models/` · `inference/` · `eval/` · `train/` · `serving/`
-· `cli`. `configs/` — YAML group files composed by `config.py`. `cpp/` — the
-generation stage. `tests/` — pytest mirror. See
+· `cli`. `configs/` — YAML group files composed by `config.py`. `presets/` — whole-run
+tops passed as `base=`, searched before `configs/` for group files (`prod_test_v0.yaml`
+is the production-test arm). `cpp/` — the generation stage. `tests/` — pytest mirror.
+The end-to-end production test is designed in
+[`docs/PLAN_prod_test_v0.md`](docs/PLAN_prod_test_v0.md) and reported in
+[`docs/PROD_TEST_v0_RESULTS.md`](docs/PROD_TEST_v0_RESULTS.md). See
 [`docs/PRODUCTION-PLAN-v4.md`](docs/PRODUCTION-PLAN-v4.md) for the full design and
 the §14 phased roadmap.

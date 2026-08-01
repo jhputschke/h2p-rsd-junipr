@@ -625,8 +625,15 @@ run by resuming (start a fresh run instead). See [`USAGE.md` §3](USAGE.md#3-res
 ## 7. `decode` — inference / MAP / posterior knobs
 
 **These are inference-time only** — they never touch the trained likelihood, so you can
-A/B them on a fixed checkpoint. At `eval`, the checkpoint's snapshot decode is the default,
-but an explicit CLI `decode.*` override wins (e.g. `eval <ckpt> decode.length_floor_quantile=0.9`).
+A/B them on a fixed checkpoint. At `eval`, the checkpoint's snapshot decode is the default
+and anything this invocation names explicitly wins over it — `decode=<name>`, a `base=`
+preset's `defaults:`/inline block, or a dotted `decode.*` token, in the §0 precedence order
+with the CLI last (e.g. `eval <ckpt> decode.length_floor_quantile=0.9`). Only the fields
+actually named move; the rest stay as the checkpoint left them, and every move is printed
+and recorded in `eval_metrics.json`. The same applies to `data` — see
+[USAGE §4](USAGE.md#evaluating-on-a-different-sample-a-held-out-test-set) for evaluating a
+checkpoint on a held-out test file. `geometry` and `encoder` are **not** liftable this way:
+they set tensor widths and the model contract.
 The serving layer reads the checkpoint's decode config. Source:
 [`point_estimate.py`](../src/h2p_rsd_junipr/inference/point_estimate.py),
 [`sampling.py`](../src/h2p_rsd_junipr/inference/sampling.py),
@@ -642,6 +649,9 @@ The serving layer reads the checkpoint's decode config. Source:
 | `min_emissions` | `1` | MAP | **hard floor** on MAP length — the "mincut" (never the unphysical empty tree) |
 | `length_penalty` | `0.0` | MAP | GNMT `score/len**α` at final beam rank; counters the brevity bias; `0` = off |
 | `length_floor_quantile` | `0.0` | MAP | **learned per-jet floor** at the α-quantile of `P(n|x)`; `0` = off |
+| `length_temperature` | `1.0` | posterior + point estimate | post-hoc scalar temperature on the multiplicity logits; `1` = off |
+| `length_tilt` | `0.0` | posterior + point estimate | companion term **linear in n** on the same logits — what actually moves mass between short and long trees; `0` = off |
+| `empty_threshold` | `0.0` | point estimate | **emptiness ceiling**: answer the empty tree when `q(N=0\|x) >= τ`, before any shape decode; `0` = off |
 | `point_estimator` | `"map"` | point estimate | `map` (beam-search joint mode) or `mbr` (minimum-Bayes-risk tree; §10 MBR) |
 | `mbr_backend` | `"pot"` | MBR | OT backend: `pot` (default, self-contained) / `energyflow` (reference) / `surrogate` (fast χ²) |
 | `mbr_n_candidates` | `0` | MBR | `0` = every draw is a candidate; `k>0` = only the first `k` (asymmetric MBR, faster) |
@@ -658,6 +668,100 @@ The serving layer reads the checkpoint's decode config. Source:
 `min_emissions`, `length_penalty`, and `length_floor_quantile` are explained in depth in
 §10; `point_estimator` / `mbr_*` — the whole second point-estimate family — are covered in
 the §10 MBR subsection. All are inference-time only, so you can A/B them on a fixed checkpoint.
+
+### `empty_threshold` — the one decision the other knobs cannot express
+
+At parton level **~17% of jets have no primary splitting at all**: hadronisation
+manufactured every splitting you see at hadron level, and the correct answer is nothing.
+Under the default decode no point estimator ever says so, for two unrelated reasons — and
+neither is a fitting failure:
+
+- **MAP.** With a multiplicity head the estimate is `argmax_n q(n|x)`. A model can hold 16%
+  of its length mass at `n=0` and still never put its *peak* there, because that mass has to
+  beat `n=1` and `n=2` outright. **Lifting `min_emissions` to 0 changes nothing** — the clamp
+  was never the binding constraint.
+- **MBR.** Mode-free and floor-free, so it *could* return the empty tree, but the
+  perturbative-Lund EMD charges `mbr_R` for unmatched weight and an empty cloud is nothing
+  but unmatched weight. Its risk is near-maximal: not merely unlikely, close to the worst
+  answer available.
+
+`min_emissions` and `length_floor_quantile` clamp the output *length*; they cannot
+distinguish "this jet's structure is spurious" from "this jet is short". `empty_threshold`
+is the missing decision — a **ceiling** where `length_floor_quantile` is a floor, taken on
+the model's own belief before either shape decode runs
+([`models/base.py::map_or_mbr`](../src/h2p_rsd_junipr/models/base.py)).
+
+Fit it, never guess it:
+
+```python
+from h2p_rsd_junipr.inference.length import empty_threshold_for_rate
+tau = empty_threshold_for_rate(pmfs_heldout, rate=0.17)   # then freeze
+```
+
+**It thresholds the ranking, not the scale.** Measured on the walkthrough `ar_junipr_v3`:
+`q(0|x)` separates the classes at **AUC 0.76** while its mean is 0.085 against a true rate
+of 0.161 — the head is under-confident by **1.9×**. A quantile threshold is invariant to
+that monotone squash, which is why the gate works without recalibrating first. Note the
+existing suite does **not** flag the under-confidence: SBC ranks against the sampler's own
+draws, so a uniformly squashed `q(N|x)` passes.
+
+Held-out (fit on one half of the val split, scored on the other): predicted rate 0.172
+against a truth 0.159, **recall 0.36, precision 0.33**. The population becomes right and the
+per-jet call goes from impossible to a third correct — it is not a solved classification
+problem, so report both. τ is a *quantile*, hence sample-dependent: re-fit per pT window,
+and never carry one across a selection change.
+
+Two consequences worth internalising. The gate is **backend-independent** — it never touches
+the MBR risk, unlike the empty-tree column itself, which reads ~0.2% under `pot` and ~57%
+under `surrogate`. And it **changes what a point estimate can be**: downstream consumers
+that assume `multiplicity >= 1` must tolerate an empty `LundPointEstimate`
+(`leading_emission_cell` already returns `None`). Full analysis:
+[`PLAN_empty_parton_tree.md`](PLAN_empty_parton_tree.md).
+
+### `length_temperature` + `length_tilt` — recalibrating the length head
+
+`softmax(z/T + tilt·n)` on the multiplicity logits, both fitted post-hoc on held-out jets.
+No retraining, no new weights. This is a **decode-layer** transform: it moves `length_pmf`
+and the `N` drawn by `sample`, and deliberately never touches `log_prob` or the `logprob` a
+point estimate reports — those are the trained likelihood. Applied in one place,
+`PosteriorModel.recalibrated_n_logits`, so the belief and the draws cannot disagree. A
+no-op for families with no `n_head` (`ar_junipr_v1/v2`), where the length belief *is* the
+sampler histogram; `build_model` warns rather than half-applying it.
+
+```python
+from h2p_rsd_junipr.inference.length import fit_length_recalibration
+T, tilt = fit_length_recalibration(pmfs_heldout, n_true_heldout)   # then freeze
+```
+
+**Why two parameters and not one.** A temperature is symmetric about the mode, so it can
+only pull a non-modal class toward uniform or toward zero. `q(0|x) = 0.085` sits above
+uniform (`1/26 = 0.038`) and below the mode, so flattening pushes it *down*: no scalar `T`
+reaches the truth rate, and sweeping `[0.1, 20]` tops out at 0.125 against 0.161. The
+measured error is a **monotone ramp across n** (empirical/predicted = 1.90, 0.96, 0.93,
+0.80, 0.68 at `n = 0..4`), and a ramp needs a term linear in `n`. Measured on the
+walkthrough `ar_junipr_v3`, fit on half the val split and scored on the other:
+
+| | `T=1` | scalar only | **+tilt** | truth |
+|---|---|---|---|---|
+| NLL of `N` | 1.2133 | 1.2125 | **1.1810** | |
+| mean `q(0\|x)` | 0.0846 | 0.0910 | **0.1428** | 0.1610 |
+| max `q(0\|x)` | 0.4261 | 0.4166 | **0.5089** | |
+| emp/pred at `n=0` | 1.90 | 1.77 | **1.13** | |
+
+It fixes the length *mean* as well, not only the `n=0` cell: `E[N]` goes 1.628 → **1.429**
+against a truth of 1.435 on held-out jets. Watch one interaction, though —
+`run_closure`'s `mean_mult_posterior` and `mult_bias_posterior` are computed over the
+truth-**non**-empty jets only (the `ly is None` continue), and on that subset a tilt toward
+`n=0` reads as a *worse* bias even while the full-population mean improves. Quote the
+`p_empty_*` row and the multiplicity row together, or the two look contradictory.
+
+Fitted `T = 1.21`, `tilt = −0.31`. `with_tilt=False` restricts the fit to the scalar case
+and is kept as the honest baseline. What it buys: the **cost-based** `empty_threshold` form
+(`τ = c/(1+c)`) becomes usable, since the belief now reaches 0.5; the posterior series in
+the closure notebooks moves from 0.085 to 0.143 empty against a truth 0.161. What it does
+**not** buy is gate quality — recall 0.360 → 0.368, precision 0.333 → 0.340, AUC flat —
+because a monotone-in-n transform largely preserves the cross-jet *ranking* of `q(0|x)`.
+That is the same reason `empty_threshold` works without recalibrating first.
 
 ### v3 semantics — which of these knobs are still live
 
@@ -731,6 +835,7 @@ Controls the §8 closure / calibration / systematic run (`h2p-rsd-junipr eval`).
 | `tarp` | `False` | TARP expected-coverage curve on tree-valued posteriors |
 | `tarp_refs` | `100` | size of the TARP reference pool |
 | `tarp_reference` | `"pooled"` | `pooled` (posterior draws of other jets) or `prior` (their truth trees) |
+| `closure_continuous` | `False` | leading-emission distances **off** the cell grid, via `sample_coordinates` |
 
 Trade cost vs. precision with `closure_jets` and `n_closure_samples`.
 
@@ -799,6 +904,47 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt \
 `eval` writes `eval_metrics.json` plus `calibration_pit_coords.png`,
 `calibration_tarp.png` and `calibration_by_region.png` beside the checkpoint (figures need
 matplotlib — not a core dependency, but the `[plots]` extra; without it you still get the JSON).
+
+### `closure_continuous` — the leading-emission metric off the grid
+
+`run_closure` scores the leading emission by `lund_distance` between **cell centres**. At the
+default geometry a cell is `(6-0)/10 = 0.6` wide and the distances themselves are ~0.6, so that
+metric is largely measuring the grid: it cannot resolve what the model is doing, and it can make
+the model look worse than plain RSD when it is in fact better.
+
+`closure_continuous=true` repeats the comparison with no quantisation — each draw's leading
+emission is placed by [`sample_coordinates`](../src/h2p_rsd_junipr/models/base.py) and summarised
+by [`geometric_median`](../src/h2p_rsd_junipr/eval/closure.py) (the L1 Bayes point, which unlike
+the cell medoid is not restricted to the drawn support). Four keys are added:
+`dlund_identity_cont`, `dlund_posterior_mode_cont`, `dlund_posterior_geomedian_cont` and
+`n_continuous_jets`.
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt experiment.closure_continuous=true
+```
+
+```
+  leading-emission Lund distance to true y :  identity(x) = 0.694   posterior-mode = 0.714
+     posterior-medoid = 0.642   (lower is better; medoid is the loss-matched estimator, ...)
+  the same, OFF the cell grid (336 jets) :  identity(x) = 0.643   posterior-mode = 0.714
+     posterior-geo-median = 0.594
+      (cells are ~0.60 wide, so the cell-level row above is quantisation-limited)
+```
+
+**Cost** is `closure_jets × n_closure_samples` forward passes — one `sample_coordinates` call
+per draw per jet — which is why it is opt-in. Like the WP2 switches it only *adds* keys, so
+existing tables do not move. A family with no coordinate density (`ar_junipr_v1`) returns `None`
+from the hook and the `*_cont` keys come back **NaN** rather than absent: "asked, unavailable"
+is a different fact from "never asked".
+
+> **`dlund_posterior_medoid` needs no switch.** It is reported on every eval beside
+> `dlund_posterior_mode`, because it is pure numpy over cells already drawn. The mode minimises
+> expected 0-1 loss while the score is a distance, so it is optimal for a loss nobody measures;
+> the medoid is the argmin over the same support of the quantity actually reported, and under the
+> model's own posterior it cannot do worse. Judge an arm on the medoid — see
+> [PLAN_ProductionAssessment §9.1](PLAN_ProductionAssessment.md) — and use
+> [`scripts/leading_estimators.py`](../scripts/leading_estimators.py) for the oracle, per-jet win
+> rates, `ln kt` stratification and a paired bootstrap.
 
 ---
 

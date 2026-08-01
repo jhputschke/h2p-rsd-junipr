@@ -1,6 +1,9 @@
 # PLAN — Multiplicity head: promote length-conditioning to a first-class factorization
 
-**Status:** proposed (not yet implemented)
+**Status: implemented.** `model.use_multiplicity_head` ships on by default in
+`ar_junipr_v3` / `ar_junipr_v4` (off in v1/v2, so the A/B is still a config switch);
+`ARJunipr.n_head` / `length_pmf` / `_map_decode_fixed_length`, covered by
+`tests/test_multiplicity_head.py`.
 
 Elevate length-conditioning on the autoregressive JUNIPR from a decoding trick to
 model structure: a dedicated, calibrated multiplicity head realizing

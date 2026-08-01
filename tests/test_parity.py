@@ -1,5 +1,12 @@
 """Bit-comparable-NLL parity against the original v2 research script (Phase 1
-exit criterion). Skips cleanly if the reference script is absent."""
+exit criterion). Skips cleanly if the reference script is absent.
+
+`encoder.mask_padding=false` is required and deliberate: the reference runs its
+bidirectional GRU over the zero-padded batch, so a jet's context depends on its
+batch-mates. `encoders/gru.py` fixes that by default; parity is measured against the
+reference AS IT IS, so this harness must reproduce the defect. See
+`tests/test_encoder_padding.py` for the property the fix actually buys, and
+`scripts/verify_parity.py` for the same pinning."""
 
 import sys
 from pathlib import Path
@@ -23,7 +30,8 @@ def test_refactor_matches_reference_nll():
 
     torch.manual_seed(0)
     jets = ref.synthetic_matched_dataset(128, seed=0)
-    cfg = load_config(["model=ar_junipr_v2", "encoder=gru"])
+    cfg = load_config(["model=ar_junipr_v2", "encoder=gru",
+                       "encoder.mask_padding=false"])   # match the reference; see docstring
     geom = Geometry.from_config(cfg.geometry)
     b = collate([MatchedLundDataset(jets, geom)[i] for i in range(32)])
 

@@ -1,6 +1,10 @@
 # PLAN — A learned per-jet lower bound on multiplicity (quantile floor of P(n|x))
 
-Status: proposed (not yet implemented). Replaces reliance on the hard-coded constant
+Status: **implemented, opt-in** — `decode.length_floor_quantile` (default `0.0` == off),
+applied in `eval/closure.py::print_point_estimate` and `serving/api.py::predict`, covered
+by `tests/test_length_floor.py`. Note it does **not** reach `run_closure`'s `map_or_mbr`,
+so the closure table is unfloored whatever this is set to
+([`PLAN_prod_test_v0.md`](PLAN_prod_test_v0.md) check 11). Replaces reliance on the hard-coded constant
 `decode.min_emissions=1` with an opt-in, per-jet floor derived from the model's own
 learned length distribution P(n|x). Builds on `docs/PLAN_NsplitMinCut.md` (merged).
 

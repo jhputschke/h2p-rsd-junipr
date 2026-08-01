@@ -12,6 +12,8 @@ The optional backends are guarded: `pot` needs POT, `energyflow` needs a working
 from __future__ import annotations
 
 import importlib.util
+import platform
+import warnings
 
 import numpy as np
 import pytest
@@ -30,10 +32,14 @@ def _pot_ok() -> bool:
 
 
 def _energyflow_ok() -> bool:
-    """energyflow is importable AND its underlying EMD solver actually works here."""
-    try:
-        import energyflow as ef  # noqa: F401
+    """energyflow is importable AND its underlying EMD solver actually works here.
 
+    Goes through `mbr._import_ef` rather than importing energyflow raw: that is the
+    entry point production uses, and it is where the macOS duplicate-OpenMP guard
+    runs. Probing raw would commit wasserstein's OpenMP build before the guard could
+    opt out of it, which on a duplicate-libomp host segfaults the whole session."""
+    try:
+        ef = mbr._import_ef()
         ef.emd.emd(np.array([[1.0, 0.0, 0.0]]), np.array([[1.0, 0.0, 0.0]]), R=1.0, gdim=2)
         return True
     except Exception:
@@ -128,6 +134,34 @@ def test_pot_imbalance_penalty_is_exactly_R_times_dW():
     assert mbr.lund_emd(empty, a, R=R, backend="pot") == pytest.approx(R * a[1].sum(), rel=1e-6)
 
 
+# --- the surrogate follows the model's resolution --------------------------------
+def test_surrogate_image_bins_at_geom_n_bins():
+    """`_lund_image` used to hard-code a 10x10 grid, which silently made the surrogate
+    risk COARSER than the model at any other geometry (docs/PLAN_prod_test_v0.md check
+    6). It must follow `geom.n_bins` — and still reproduce the old numbers at 10."""
+    from h2p_rsd_junipr.geometry import Geometry
+
+    g30 = Geometry(n_bins=30)
+    pts, w = mbr.lund_cloud([0, 5, 9], GEOM, lnkt_cut=0.0)
+    assert mbr._lund_image(pts, w, GEOM).size == 10 * 10
+    assert mbr._lund_image(pts, w, g30).size == 30 * 30
+    # explicit nb still wins, and nb=10 on the old geometry is unchanged
+    assert mbr._lund_image(pts, w, g30, nb=10).size == 10 * 10
+    assert np.allclose(mbr._lund_image(pts, w, GEOM), mbr._lund_image(pts, w, GEOM, nb=10))
+
+
+def test_surrogate_resolves_what_the_coarse_image_could_not():
+    """Two clouds inside one 0.6-wide cell but in different 0.2-wide cells: chi2 is 0
+    at nb=10 (indistinguishable) and > 0 at nb=30."""
+    from h2p_rsd_junipr.geometry import Geometry
+
+    g30 = Geometry(n_bins=30)
+    a = (np.array([[0.05, 0.05]]), np.array([1.0]))
+    b = (np.array([[0.55, 0.55]]), np.array([1.0]))   # same 0.6-cell, different 0.2-cell
+    assert mbr.lund_emd(a, b, backend="surrogate", geom=GEOM) == pytest.approx(0.0)
+    assert mbr.lund_emd(a, b, backend="surrogate", geom=g30) > 0.0
+
+
 # --- backend agreement: pot vs energyflow ---------------------------------------
 @pytest.mark.skipif(not (POT_OK and EF_OK), reason="need both pot and a working energyflow")
 def test_pot_energyflow_agree_on_argmin_and_ratio():
@@ -151,6 +185,73 @@ def test_energyflow_emds_matches_looped_emd():
     for i, ca in enumerate(cands):
         for j, cb in enumerate(supp):
             assert D[i, j] == pytest.approx(mbr.lund_emd(ca, cb, backend="energyflow"), rel=1e-6)
+
+
+@pytest.mark.skipif(not EF_OK, reason="energyflow solver unavailable")
+def test_energyflow_matrix_uses_the_batched_path():
+    """`emds` (OpenMP over all cores) is the only parallel path; the per-pair fallback
+    is single-threaded and ~15x slower for identical numbers. Guard that the NumPy-2
+    copy-semantics retry keeps us on it, so the cost cannot regress silently."""
+    cands = [_cloud(c, lnkt_cut=0.0) for c in ([12, 34], [5, 9, 27])]
+    supp = [_cloud(c, lnkt_cut=0.0) for c in ([12, 30], [5, 9])]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mbr.lund_emd_matrix(cands, supp, backend="energyflow")
+    fallback = [w for w in caught if issubclass(w.category, RuntimeWarning)
+                and "per-pair" in str(w.message)]
+    assert not fallback, f"fell back to the serial per-pair emd: {fallback[0].message}"
+
+
+@pytest.mark.skipif(not EF_OK, reason="energyflow solver unavailable")
+def test_batched_emds_never_runs_multithreaded_on_duplicate_openmp():
+    """The invariant that keeps a macOS session alive.
+
+    PyTorch's bundled libomp plus a `wasserstein` linked against a *different* libomp
+    is two OpenMP runtimes in one process; creating the `emds` thread team then
+    segfaults, killing the interpreter with no traceback. `mbr._import_ef` is supposed
+    to notice and either select wasserstein's no-OpenMP build or pin `emds` to one
+    thread. Assert the state, not the crash -- a segfault cannot be caught in-process,
+    so a test that merely called `emds` would take the suite down with it."""
+    if platform.system() != "Darwin":
+        pytest.skip("duplicate-runtime abort is a Darwin phenomenon; libgomp coexists "
+                    "with torch's runtime on Linux and the guard no-ops there")
+    mbr._import_ef()
+    if len(mbr._loaded_omp_runtimes()) <= 1:
+        pytest.skip("single OpenMP runtime: the parallel path is safe here")
+    from wasserstein import _wasserstein as wext
+
+    assert not wext.cvar.COMPILED_WITH_OPENMP or mbr._EMDS_N_JOBS == 1, (
+        "duplicate OpenMP runtimes with wasserstein's OpenMP build live and `emds` "
+        "unpinned -- the next batched call segfaults the interpreter"
+    )
+
+
+def test_loaded_omp_runtimes_is_total_across_platforms():
+    """It probes dyld, whose `_dyld_image_count` does not exist off macOS — so the
+    ctypes lookup raised `undefined symbol` and every caller died ON THE PROBE instead
+    of learning there was nothing to probe. Needs no energyflow: the failure was in the
+    platform check, not the solver."""
+    got = mbr._loaded_omp_runtimes()
+    assert isinstance(got, set)
+    if platform.system() != "Darwin":
+        assert got == set(), (
+            "off Darwin this must be empty: what it counts is runtimes that make a "
+            "thread team fatal, and that is a macOS phenomenon"
+        )
+
+
+@pytest.mark.skipif(not EF_OK, reason="energyflow solver unavailable")
+def test_wasserstein_numpy2_compat_restores_the_module_namespace():
+    """The shim patches `wasserstein.wasserstein`'s `np` global, not the real numpy,
+    and must put it back even when the wrapped call raises."""
+    ww = pytest.importorskip("wasserstein.wasserstein")
+    before = ww.np
+    with pytest.raises(ZeroDivisionError):
+        with mbr._wasserstein_numpy2_compat() as patched:
+            assert patched and ww.np is not before
+            assert ww.np.ndarray is np.ndarray          # forwards everything else
+            1 / 0  # noqa: B018 — deliberate raise; the point is the shim unwinds
+    assert ww.np is before
 
 
 # --- the estimator: headline property -------------------------------------------

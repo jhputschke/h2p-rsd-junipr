@@ -92,6 +92,7 @@ class _VectorField(nn.Module):
 class CFM(PosteriorModel):
     exact_likelihood = True          # the point of this family
     supports_coordinate_pit = True   # PIT via the reverse ODE into the base space
+    has_continuous_coords = True
 
     def __init__(self, cfg, geometry: Geometry):
         super().__init__()
@@ -366,10 +367,12 @@ class CFM(PosteriorModel):
     def sample(self, xf, nx, n, **kw):
         """N ~ q(N|x) then N i.i.d. cells ~ q(cell|x) — the cINN sampler. The ODE is
         NOT run here: the contract's draws are cell chains, and every consumer that
-        needs coordinates (`describe_cells`, `map_estimate`) integrates them itself."""
+        needs coordinates (`sample_coordinates`, and through it `describe_cells`;
+        `map_estimate`) integrates them itself."""
         self.eval()
         e = self.encode(xf, nx)
-        n_probs = F.softmax(self.n_head(e), dim=-1).squeeze(0)
+        n_probs = F.softmax(self.recalibrated_n_logits(self.n_head(e)),
+                            dim=-1).squeeze(0)
         cell_probs = F.softmax(self.cell_head(e), dim=-1).squeeze(0)
         ns = torch.multinomial(n_probs, n, replacement=True)
         out = []
@@ -393,11 +396,31 @@ class CFM(PosteriorModel):
         return self._to_phys(s1.detach(), cells)
 
     @torch.inference_mode()
+    def sample_coordinates(self, xf, nx, cells):
+        """The contract shape of `sample_coords` for one jet. Costs one forward ODE
+        integration per call (`n_ode_steps` steps, 2 or 4 field evals each), so a
+        consumer that wants both the MBR winner's coordinates and a posterior draw's
+        pays it twice — the same order as this family's `map_estimate` already does.
+
+        `_to_phys` bounds the first two coordinates to the drawn cell and psi to
+        (-pi, pi), so unlike the cINN these draws cannot leave the cell they were
+        conditioned on."""
+        cells = [int(c) for c in cells]
+        dev = xf.device
+        if not cells:
+            return torch.zeros(0, 4, device=dev)
+        self.eval()
+        yc = torch.tensor([cells], dtype=torch.long, device=dev)        # (1, L)
+        ctx = self._coord_ctx(self.encode(xf, nx), yc)                  # (1, L, D)
+        return self.sample_coords(yc, ctx).squeeze(0)                   # (L, 4)
+
+    @torch.inference_mode()
     def length_pmf(self, xf, nx, mults=None, n_samples: int = 500) -> np.ndarray:
         """Exact P(n|x) from the categorical multiplicity head (no sampling)."""
         self.eval()
         e = self.encode(xf, nx)
-        return F.softmax(self.n_head(e), dim=-1).squeeze(0).cpu().numpy()
+        return F.softmax(self.recalibrated_n_logits(self.n_head(e)),
+                         dim=-1).squeeze(0).cpu().numpy()
 
     @torch.inference_mode()
     def map_estimate(self, xf, nx, **kw) -> LundPointEstimate:

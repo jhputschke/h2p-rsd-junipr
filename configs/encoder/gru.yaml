@@ -5,6 +5,13 @@ num_layers: 1
 bidirectional: true
 dropout: 0.1
 
+# Ignore the zero-padding `collate` adds so a jet encodes the same alone as in a batch.
+# `false` reproduces the ORIGINAL v2 script, which does not — see encoders/gru.py. Kept
+# only so scripts/verify_parity.py can still measure bit-for-bit parity against it; a
+# checkpoint snapshot written before this field existed backfills to `false`, so it
+# evaluates in the regime it was trained in rather than a different one.
+mask_padding: true
+
 # aux conditioning: [] == off (byte-identical). docs/PLAN_Input.md
 #   e.g. encoder.aux_features="[ln_mg_pt,nsec,ln_pt]"
 aux_features: []

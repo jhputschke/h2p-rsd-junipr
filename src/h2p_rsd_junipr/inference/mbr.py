@@ -35,8 +35,13 @@ neither and parity stays dependency-free.
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import glob
 import math
 import os
+import platform
+import warnings
 
 import numpy as np
 
@@ -173,21 +178,194 @@ def _emd_pot(pa, wa, pb, wb, *, R, beta, norm, periodic_phi, phi_col) -> float:
     return float(ot.emd2(a, b, C))
 
 
+_OMP_RUNTIME_NAMES = ("libomp.dylib", "libiomp5.dylib", "libgomp")
+
+
+def _loaded_omp_runtimes() -> set:
+    """Realpaths of every OpenMP runtime currently mapped into this process.
+
+    Walks dyld's image list; `realpath` so that a symlinked duplicate counts once.
+
+    **Darwin only, and empty everywhere else — deliberately, not as a stub.** What this
+    counts is runtimes that would make a thread team *fatal*, and that is a macOS
+    phenomenon: two LLVM OpenMP runtimes abort, whereas on Linux GCC's libgomp coexists
+    with the one PyTorch bundles, which is why `_guard_wasserstein_openmp` also returns
+    early there. Enumerating `/proc/self/maps` on Linux would return a number that reads
+    like a hazard and is not one.
+
+    It must not RAISE off Darwin either: `_dyld_image_count` is a dyld symbol, so the
+    ctypes lookup fails with `undefined symbol` on Linux, and any caller probing the
+    state — including the test that asserts the pinning invariant — died on the probe
+    rather than skipping."""
+    if platform.system() != "Darwin":
+        return set()
+    dyld = ctypes.CDLL(None)
+    dyld._dyld_image_count.restype = ctypes.c_uint32
+    dyld._dyld_get_image_name.restype = ctypes.c_char_p
+    dyld._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+    found = set()
+    for i in range(dyld._dyld_image_count()):
+        raw = dyld._dyld_get_image_name(i)
+        if not raw:
+            continue
+        name = raw.decode(errors="replace")
+        if any(k in os.path.basename(name) for k in _OMP_RUNTIME_NAMES):
+            found.add(os.path.realpath(name))
+    return found
+
+
+_REBUILD_HINT = (
+    "Numbers are unaffected, but the batched solve loses ~11x. Fix: rebuild "
+    "wasserstein against the same libomp PyTorch loads -- see the [energyflow] "
+    "notes in README.md."
+)
+
+# Threads for the batched `emds`; None = energyflow's default (every core). Set to 1
+# only by the guard below, when a duplicate OpenMP runtime makes a team fatal.
+_EMDS_N_JOBS = None
+_OPENMP_GUARDED = False
+
+
+def _guard_wasserstein_openmp() -> None:
+    """macOS: keep `wasserstein`'s OpenMP off when a *second* runtime is loaded.
+
+    PyTorch bundles `torch/lib/libomp.dylib`, and `import energyflow` loads it before
+    we get here (energyflow -> POT -> `ot.backend` imports torch). If `wasserstein`'s
+    extension then resolves ``@rpath/libomp.dylib`` to a *different* file -- conda's
+    ``$CONDA_PREFIX/lib/libomp.dylib``, which is what the README's macOS build command
+    linked -- the process holds two LLVM OpenMP runtimes. Creating the batched `emds`
+    thread team then **segfaults**: a Jupyter kernel simply dies, no traceback. The
+    ``KMP_DUPLICATE_LIB_OK=TRUE`` this function used to set unconditionally is exactly
+    what downgraded OpenMP's own self-explaining "Error #15" abort into that silent
+    SIGSEGV, so it is no longer set unless it is the only thing left to try.
+
+    Probe rather than guess: dlopen the OpenMP extension -- which resolves its rpath
+    but starts no parallel region, so loading is safe even though `emds` is not -- and
+    count the runtimes. Which repair is available depends on who got here first:
+
+      * Nothing has touched the extension yet -> take wasserstein's own documented
+        Darwin opt-out (`without_openmp()`), which selects its no-OpenMP build. Clean:
+        no parallel region is ever entered, and no unsupported env var is involved.
+      * Something already ran an EMD (a probe, an earlier cell) -> the OpenMP build is
+        committed and cannot be swapped. Fall back to suppressing the duplicate-runtime
+        abort and pinning `emds` to `n_jobs=1`: with a team of one no second team is
+        spawned, which is what actually avoids the crash. Verified elementwise against
+        the single-runtime result: max deviation 0.0.
+
+    Cost, measured on an M-series 16-core (100x100 clouds of 3-20 points): 2.9 us/pair
+    with one shared runtime, 32.7 single-threaded, 43.1 on the per-pair `emd`. The
+    batched path is still worth taking, but a shared runtime is worth ~11x more --
+    hence a warning that names the repair rather than a silent degradation."""
+    global _EMDS_N_JOBS, _OPENMP_GUARDED
+    if _OPENMP_GUARDED or platform.system() != "Darwin":
+        return  # Linux: GCC's libgomp coexists with torch's runtime without aborting
+    try:
+        import wasserstein
+        import wasserstein.config as wconfig
+    except ImportError:  # pragma: no cover - energyflow imports wasserstein itself
+        return
+    sos = glob.glob(os.path.join(os.path.dirname(wasserstein.__file__),
+                                 "_wasserstein_omp*.so"))
+    if not sos:  # pragma: no cover - no OpenMP build exists, so nothing to guard
+        return
+    try:
+        ctypes.CDLL(sos[0], mode=ctypes.RTLD_LOCAL)  # resolve its libomp; no OMP init
+    except OSError:  # pragma: no cover - an unloadable extension fails at first use
+        return
+    _OPENMP_GUARDED = True
+    if len(_loaded_omp_runtimes()) <= 1:
+        return  # one runtime -> the OpenMP-parallel `emds` is safe, and ~11x faster
+    if wconfig._CAN_SET_OPENMP:
+        wconfig.without_openmp()  # no extension loaded yet: pick the no-OpenMP build
+        warnings.warn(
+            "Two OpenMP runtimes are loaded (PyTorch's bundled libomp and the one "
+            "`wasserstein` links); its parallel `emds` would segfault, so wasserstein "
+            "was switched to its single-threaded build. " + _REBUILD_HINT,
+            RuntimeWarning, stacklevel=3,
+        )
+        return
+    from wasserstein import _wasserstein as _wext
+    if not _wext.cvar.COMPILED_WITH_OPENMP:
+        return  # already committed to the no-OpenMP build; nothing can go wrong
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # or the team creation aborts outright
+    _EMDS_N_JOBS = 1
+    warnings.warn(
+        "Two OpenMP runtimes are loaded (PyTorch's bundled libomp and the one "
+        "`wasserstein` links) and its OpenMP build is already committed, so `emds` "
+        "is pinned to one thread to avoid a segfault. " + _REBUILD_HINT,
+        RuntimeWarning, stacklevel=3,
+    )
+
+
 def _import_ef():
-    # EnergyFlow's `wasserstein` OpenMP extension and PyTorch both link an OpenMP
-    # runtime; loading both in one process aborts with "OMP: Error #15 ... libomp
-    # already initialized" on macOS. Allow them to coexist (set before the first
-    # wasserstein call, which is where its runtime initialises). The MBR solves are
-    # independent LPs, so the duplicate-runtime caveat does not affect correctness.
-    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     try:
         import energyflow as ef  # lazy, per-backend
-        return ef
     except ImportError as e:  # pragma: no cover - exercised only without energyflow
         raise ImportError(
             "mbr_backend='energyflow' requires the optional [energyflow] extra: "
             "pip install 'energyflow>=1.3' (and a working `wasserstein` build)."
         ) from e
+    _guard_wasserstein_openmp()  # after energyflow, which is what pulls in torch's libomp
+    return ef
+
+
+class _NumpyCopyShim:
+    """Proxy for the ``numpy`` module that restores NumPy-1 ``copy=False`` semantics.
+
+    NumPy 1 read ``copy=False`` as "copy only if you must"; NumPy 2 reads it as
+    "never copy, raise if you must" and spells the old meaning ``copy=None``.
+    Everything but ``array`` forwards untouched."""
+
+    def __init__(self, np_mod):
+        self._np = np_mod
+
+    def __getattr__(self, name):
+        return getattr(self._np, name)
+
+    def array(self, obj, *args, **kwargs):
+        if kwargs.get("copy", True) is False:
+            kwargs["copy"] = None
+        return self._np.array(obj, *args, **kwargs)
+
+
+@contextlib.contextmanager
+def _wasserstein_numpy2_compat():
+    """Swap `wasserstein.wasserstein`'s module-global ``np`` for the shim above.
+
+    `wasserstein` 1.1.0's `_store_events` does
+    ``np.array(event[:, 0], order='C', copy=False)``; a column slice is strided, so
+    ``order='C'`` requires a copy and NumPy >= 2 raises rather than copying. That kills
+    the *only* multi-core path (`emds` -> `PairwiseEMD`, OpenMP over all pairs) and
+    drops us to the per-pair `emd` on one core — measured ~16x on a 20-core host, for
+    bit-identical numbers. It is a break in wasserstein's *Python* layer, so rebuilding
+    the C++ extension does not fix it.
+
+    Patching that one module's namespace (not the global `numpy`) keeps the blast
+    radius to the batched call. Yields False when `wasserstein` is not importable."""
+    try:
+        import wasserstein.wasserstein as _ww
+    except ImportError:  # pragma: no cover - energyflow imports wasserstein itself
+        yield False
+        return
+    original = _ww.np
+    _ww.np = _NumpyCopyShim(original)
+    try:
+        yield True
+    finally:
+        _ww.np = original
+
+
+def _emds_block(ef, eventsC, eventsS, *, R, beta, norm, gdim, periodic_phi, shape):
+    """One batched, OpenMP-parallel ``emds`` call over the non-empty sub-block.
+
+    ``n_jobs`` is passed only when `_guard_wasserstein_openmp` pinned it, so the
+    default stays energyflow's own (every core) rather than a number we chose."""
+    extra = {} if _EMDS_N_JOBS is None else {"n_jobs": _EMDS_N_JOBS}
+    return np.asarray(
+        ef.emd.emds(eventsC, eventsS, R=R, beta=beta, norm=norm,
+                    gdim=gdim, periodic_phi=periodic_phi, **extra),
+        dtype=float,
+    ).reshape(shape)
 
 
 def _emd_ef(pa, wa, pb, wb, *, R, beta, norm, periodic_phi) -> float:
@@ -201,8 +379,16 @@ def _emd_ef(pa, wa, pb, wb, *, R, beta, norm, periodic_phi) -> float:
     )
 
 
-def _lund_image(pts, w, geom, nb=10) -> np.ndarray:
-    """Normalised binned Lund image over ``(ln 1/DeltaR, ln kt)`` — the surrogate."""
+def _lund_image(pts, w, geom, nb=None) -> np.ndarray:
+    """Normalised binned Lund image over ``(ln 1/DeltaR, ln kt)`` — the surrogate.
+
+    ``nb`` defaults to ``geom.n_bins``, i.e. the surrogate bins at exactly the
+    resolution the model decides at. It used to be hard-coded to 10, which happened to
+    agree with the only geometry in use; at ``n_bins: 30`` that made the risk function
+    bin at 0.2-wide truth in 0.6-wide cells, so the surrogate was *coarser than the
+    model* and MBR could not tell apart candidates the model distinguishes. Pass ``nb``
+    explicitly only to deliberately decouple the two."""
+    nb = int(geom.n_bins if nb is None else nb)
     img = np.zeros((nb, nb), dtype=float)
     if pts.shape[0] == 0:
         return img.ravel()
@@ -260,19 +446,29 @@ def _matrix_ef(clouds_C, clouds_S, *, R, beta, norm, periodic_phi) -> np.ndarray
     if nzC and nzS:
         eventsC = [cloud_to_event(*clouds_C[i]) for i in nzC]
         eventsS = [cloud_to_event(*clouds_S[j]) for j in nzS]
-        try:  # one batched, multiprocessed call for the whole non-empty block
-            sub = np.asarray(
-                ef.emd.emds(eventsC, eventsS, R=R, beta=beta, norm=norm,
-                            gdim=g, periodic_phi=periodic_phi),
-                dtype=float,
-            ).reshape(len(nzC), len(nzS))
+        kw = dict(R=R, beta=beta, norm=norm, gdim=g, periodic_phi=periodic_phi,
+                  shape=(len(nzC), len(nzS)))
+        try:  # one batched, OpenMP-parallel call for the whole non-empty block
+            sub = _emds_block(ef, eventsC, eventsS, **kw)
         except (ValueError, TypeError):
-            # wasserstein's batched `_store_events` uses `np.array(..., copy=False)`,
-            # which raises under numpy>=2 ("Unable to avoid copy"). Fall back to the
-            # per-pair `emd` (unaffected, identical result), so the backend still works.
-            sub = np.array([[float(ef.emd.emd(ea, eb, R=R, beta=beta, norm=norm,
-                                              gdim=g, periodic_phi=periodic_phi))
-                             for eb in eventsS] for ea in eventsC])
+            try:  # same call, with wasserstein's NumPy-1 copy semantics restored
+                with _wasserstein_numpy2_compat() as patched:
+                    if not patched:
+                        raise
+                    sub = _emds_block(ef, eventsC, eventsS, **kw)
+            except (ValueError, TypeError):
+                # Batched path unavailable for some other reason. The per-pair `emd`
+                # is unaffected and gives identical numbers, but runs on one core --
+                # loud, because it is the difference between seconds and minutes.
+                warnings.warn(
+                    "energyflow's batched `emds` is unavailable; falling back to the "
+                    "per-pair `emd`. Results are identical but single-threaded (~16x "
+                    "slower on a 20-core host). See the [energyflow] notes in README.md.",
+                    RuntimeWarning, stacklevel=2,
+                )
+                sub = np.array([[float(ef.emd.emd(ea, eb, R=R, beta=beta, norm=norm,
+                                                  gdim=g, periodic_phi=periodic_phi))
+                                 for eb in eventsS] for ea in eventsC])
         for a, i in enumerate(nzC):
             for b, j in enumerate(nzS):
                 D[i, j] = sub[a, b]

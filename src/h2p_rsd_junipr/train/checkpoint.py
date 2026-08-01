@@ -81,7 +81,18 @@ def _unwrap(model):
     return getattr(model, "_orig_mod", model)
 
 
-def load_checkpoint(path: Path, map_location=None) -> dict:
+def load_checkpoint(path: Path, map_location="cpu") -> dict:
+    """`map_location` defaults to CPU, NOT to torch's None.
+
+    torch.save tags every storage with the device it was written from, and None means
+    "restore them there". A checkpoint trained on an Apple-silicon box therefore carries
+    `mps` tags, and opening it on a Linux/CUDA host — where torch has no MPS backend —
+    dies inside the unpickler with `Storage device not recognized: mps`, before any
+    caller gets a chance to move anything. CPU is the one device every host has, so it
+    is the only portable default; callers that want the tensors elsewhere pass a device
+    (the trainer does, to resume in place), and a model that is already `.to(device)`
+    absorbs a CPU state_dict on `load_state_dict` anyway.
+    """
     return torch.load(Path(path), map_location=map_location, weights_only=False)
 
 
@@ -98,14 +109,17 @@ def restore_into(model, optimizer, scheduler, scaler, state: dict, *, strict_con
     return state["epoch"], state["global_step"], state["best_val_nll"]
 
 
-def load_for_inference(path: Path, map_location=None) -> dict:
+def load_for_inference(path: Path, map_location="cpu") -> dict:
     """Export-only load: returns {model_state, config, model_name, best_val_nll,
     epoch}; ignores optimiser state (§6).
 
     `best_val_nll` / `epoch` are carried because a consumer that RESTORES a run from
     cache rather than retraining still has to report which checkpoint it got. Omitting
     them invited `info.get("best_val", nan)` at the call site, which reports `nan`
-    instead of failing — the silent-default trap the aux sentinels exist to avoid."""
+    instead of failing — the silent-default trap the aux sentinels exist to avoid.
+
+    `map_location` mirrors `load_checkpoint`'s CPU default rather than forwarding None,
+    which would hand torch back the untranslated device tags and undo it."""
     state = load_checkpoint(path, map_location=map_location)
     return {
         "model_state": state["model"]["state_dict"],

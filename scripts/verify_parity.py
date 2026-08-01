@@ -7,6 +7,15 @@ v2 model in scripts/reference/), copies its weights into the refactored
 refactor preserves the computation exactly — the discretised likelihood is
 unchanged by the module split.
 
+`encoder.mask_padding=false` is REQUIRED here, and is the one place it is used. The
+reference script runs its bidirectional GRU over the zero-padded batch
+(`conditional_rsd_junipr_v2.py`: `out, _ = self.encoder(self.x_feat(xf))`), so the
+backward pass sweeps through the padding into the real nodes and a jet's context
+depends on its batch-mates. That is a defect, fixed by default in `encoders/gru.py` —
+but parity is measured against the reference AS IT IS, so reproducing it is exactly
+what this script must do. Comparing under the fix instead would prove nothing about the
+refactor and would fail by ~3e-2.
+
 Run:  python scripts/verify_parity.py
 """
 
@@ -46,7 +55,10 @@ def main() -> int:
 
     # identical synthetic data + dataset as the v2 script
     jets = ref.synthetic_matched_dataset(256, seed=0)
-    cfg = load_config(["model=ar_junipr_v2", "encoder=gru"])
+    # mask_padding=false: match the reference's padded-GRU encode — see the module
+    # docstring. This is a parity harness, not a recommendation.
+    cfg = load_config(["model=ar_junipr_v2", "encoder=gru",
+                       "encoder.mask_padding=false"])
     geom = Geometry.from_config(cfg.geometry)
 
     ds_new = __import__(

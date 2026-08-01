@@ -63,6 +63,81 @@ the docs:
   posterior, so it never collapses to `n=0` even with no floor; a one-line `MBR_BACKEND`
   toggle (`pot` default, `energyflow` optional) runs the demo without `energyflow`
   installed. See `scripts/probe_map_collapse.py` for the floor/training sweep.
+
+- **lund_distribution_closure.ipynb** — the **population** counterpart to
+  `inference_demo.ipynb`. Where `eval/closure.py` and `eval/calibration.py` ask per-jet
+  questions, this asks whether the predicted *ensemble* of primary-Lund splittings looks
+  like the parton-level ensemble — and whether it looks more like it than **plain RSD**
+  (the file's own hadron-level `x_*` branches) already does. Five series on shared axes:
+  truth `y`, plain RSD `x`, the **MAP** and **MBR** point estimates, and a
+  posterior-predictive draw whose *continuous coordinates are sampled*, not moded — the
+  only honest comparator for point estimates, since a per-jet argmax is narrower than
+  truth by construction. Figures: the primary Lund plane with ratio-to-truth maps; the
+  four coordinate marginals pooled **and split by splitting index**; the angular-ordering
+  ladder profiles; the `k_t`-cut multiplicity spectrum `N(k_t > c)`; leading-emission
+  kinematics and multiplicity. Each observable is scored with **W1, KS and χ²/ndf**
+  (weight-aware throughout; ψ uses circular W1 and Kuiper's V), and the headline is the
+  **improvement ratio** `d(ŷ,y)/d(x,y)` — below 1 when the model beat doing nothing.
+  Reports the out-of-window, soft-drop-violation and `k_t`-floor-violation fractions up
+  front, since the model cannot emit outside the geometry window and its unbounded `ln z`
+  head knows nothing about the grooming boundary. Writes `dist_closure_metrics.json` and
+  `dist_closure_table.md` beside the checkpoint, which is the runtime harness
+  [`docs/PLAN_ProductionAssessment.md`](../docs/PLAN_ProductionAssessment.md) §7/§10 needs
+  per pT window. ~4 min for 2000 jets with the `pot` MBR backend; a cost probe cell sizes
+  the run before you commit to it. **Read the population caveat under v2 below before
+  quoting any number from this one.**
+
+- **lund_distribution_closure_v2.ipynb** — the same study on the population you could
+  actually select on data. **Prefer this one; see the note below for why both exist.**
+  Adds §5a, the observable v1 structurally could not have: the **empty-tree rate**
+  `P(n = 0)` per series, plus a `MAP_ALLOW_EMPTY` control that re-decodes the MAP with the
+  length floor lifted. Everything else is identical, and
+  `REQUIRE_TRUTH_SPLITTING = True` reproduces v1's population exactly.
+
+- **prod_test_v0.ipynb** — the end-to-end production test of
+  [`docs/PLAN_prod_test_v0.md`](../docs/PLAN_prod_test_v0.md), and the only notebook
+  here that reports on a genuinely **independent file**: `data/jet_aux_asym_test.root`,
+  a different PYTHIA seed from the one the checkpoint trained on, with
+  [`scripts/check_disjoint.py`](../scripts/check_disjoint.py) asserting the two streams
+  never collided. Four nested jet tiers over one frozen shuffled index list keep every
+  comparison paired while bounding a per-jet cost that spans four orders of magnitude.
+  What it carries that no other notebook does: the **aux ablation with a seed band**
+  (aux on/off × seed 0/1 — a single pair cannot conclude, and the previous A/B failed
+  exactly there), the per-term NLL table with a **`10-bin-comparable?` column** (the
+  total is a density on the plane and *is* comparable across `n_bins`; `split_ll` alone
+  shifts by `2·ln 3`), **split-head occupancy and effective rank** (900 cells behind a
+  `Linear(64, 900)`), and a `q(0|x)` **reliability diagram with the Brier
+  reliability/resolution decomposition** — the diagnostic SBC/PIT structurally cannot
+  provide, since SBC ranks against the sampler's own draws. Both the empty-gate `tau`
+  and the `(temperature, tilt)` length recalibration are fitted on the **training
+  file's** val split and applied frozen, because `empty_threshold_for_rate` is a
+  quantile and would otherwise reproduce its own fitted rate by construction. §7 is a
+  deliberate *pointer* to `lund_distribution_closure_v2.ipynb` rather than a second
+  implementation of the headline distances, with a staleness guard that refuses to
+  quote a `dist_closure_metrics.json` describing a different run.
+
+- **lund_distribution_closure_prod_test_v0.ipynb** — `..._v2.ipynb` pointed at the
+  production test's **held-out** file, with every setting already applied. **Generated**
+  by [`scripts/make_prod_closure_nb.py`](../scripts/make_prod_closure_nb.py): every cell
+  except the title and section 0 is byte-identical to v2, and
+  [`tests/test_prod_closure_nb.py`](../tests/test_prod_closure_nb.py) fails if the
+  committed file drifts from what the generator produces. Edit v2 (or the generator) and
+  re-run it — a hand-edited copy would be a second definition of the same headline
+  ratios, which is exactly how two closure populations drifted apart before.
+
+  Five constants differ from v2's defaults, and they are **read at runtime** from
+  `prod_test_v0_metrics.json` rather than pasted in, so they cannot disagree with the fit
+  that produced them: `CKPT_PATH`, `ROOT_PATH`, the **frozen** `EMPTY_THRESHOLD` (v2's
+  `None` rate-matches tau on the sample it reports on — circular), and
+  `LENGTH_TEMPERATURE` / `LENGTH_TILT`. That last pair reaches `sample`, not just
+  `length_pmf`, so an artifact that does not record it cannot have its empty rate
+  attributed. How much it moves depends on the checkpoint: on the pre-encoder-fix arms it
+  took the posterior empty rate from 0.047 to 0.156 against a truth of 0.168, while on the
+  fixed arms the head is already calibrated and the fitted pair is the identity to within
+  1% — which is exactly why the value has to be recorded rather than assumed either way. Run [`prod_test_v0.ipynb`](prod_test_v0.ipynb) first; without its
+  artifact this one raises rather than silently falling back to `cpp/test_data/jets.root`
+  — the file the checkpoint trained on.
+
 - **closure.ipynb** — leading-emission Lund distance, multiplicity bias, MAP vs
   plain-RSD vs truth trees (§8 closure).
 - **calibration.ipynb** — SBC rank histogram, PIT, coverage (Talts et al.,
@@ -71,6 +146,73 @@ the docs:
   region + multiplicity distribution.
 - **generator_systematic.ipynb** — PYTHIA-trained vs HERWIG-trained MAP/posterior
   spread (§8); the inter-model spread is the dominant systematic.
+
+### Why there are two distribution-closure notebooks
+
+v1 (and `inference_demo.ipynb`) select jets with at least one primary splitting **at both
+levels**:
+
+```python
+jets = [j for j in jets if len(j["x"][0]) and len(j["y"][0])]
+```
+
+The second condition reads the **parton** sequence — the thing being predicted. No analysis
+can apply it to data. On `cpp/test_data/jets.root` it discards 8 631 jets, **17.2% of
+everything selectable on data**, and they are not a random 17%: every one is a jet whose
+correct answer is the *empty tree*, where hadronisation manufactured all the visible
+structure from a parton jet with no splitting surviving grooming.
+
+| population | selection | jets | mean `n_x` | mean `n_y` | `x/y` | `P(n_y=0)` |
+|---|---|---|---|---|---|---|
+| train | none — `LundDataModule` filters nothing | 54 007 | 1.744 | 1.420 | 1.228 | 16.0% |
+| **deploy** | `len(x)>0` — **all you can apply on data** (v2) | 50 290 | 1.873 | 1.436 | 1.305 | 17.2% |
+| v1 eval | `len(x)>0 and len(y)>0` | 41 659 | 1.973 | 1.733 | 1.139 | 0.0% |
+
+Three consequences, all of which flatter the result:
+
+1. **The rate gap is understated by half.** Plain RSD over-counts primary splittings by
+   30% on the deployable population, not the 14% v1 reports.
+2. **Training never applied the cut.** `MatchedLundDataset` builds `n_y = 0` items and
+   `log_prob` scores them, so the model learned these jets; v1 just never tested it on them.
+3. **It silently rigs the MAP-vs-MBR comparison** by removing exactly the jets where MAP
+   structurally fails and MBR most clearly wins.
+
+What v2 then exposes on the walkthrough `ar_junipr_v3` checkpoint: the model holds real
+information about which jets are empty (mean `q(N=0|x)` = 0.16 on truth-empty jets against
+0.08 on the rest, AUC 0.77), and **no point estimator under the default decode can use
+it** — both read `P(n̂ = 0) ≈ 0%` against a truth rate of 17.4%, for two unrelated reasons:
+
+- **MAP** — *not* the `decode.min_emissions = 1` floor. Lifting the floor changes nothing,
+  because with a multiplicity head the MAP is `argmax q(n|x)`, and the peak lands at 0
+  essentially never however much mass sits there. The same mode-vs-distribution effect the
+  rest of the notebook is about, one level up — applied to the *length*.
+- **MBR** — mode-free and floor-free, so it *could* answer "nothing", but the
+  perturbative-Lund EMD charges an imbalance penalty (`mbr_R`) for unmatched weight, and an
+  empty cloud is entirely unmatched weight. Its risk is near-maximal, so it is close to the
+  worst answer available rather than a cheap one.
+
+Only the posterior draws produce empty trees at all (9.7% against truth's 17.4%). Getting
+these jets right needs a decision rule that can express emptiness — thresholding
+`q(0|x)` — not a different floor.
+
+**This one column is backend-dependent, and the shape panels are not.** On identical draws
+`pot` and `energyflow` both give `P(n̂=0) ≈ 0.2%` and recover 0% of the truth-empty jets,
+while `surrogate` gives 57% and 82% — a normalised binned-image χ² does not punish an empty
+image the way an EMD with an imbalance term does. Neither is "right"; they are different
+risk functions, and this is where they diverge hardest. Quote §5a together with the
+`MBR_BACKEND` it was run under.
+
+Relatedly, `beam_search_cells` calls the empty tree "unphysical (a groomed jet has >=1
+primary splitting)". At parton level that is false for 17.2% of jets in this file. The
+floor is a real fix for MAP length collapse, but its stated premise does not hold for the
+target distribution — a decode-layer question for the package, which is why v2 measures the
+cost rather than working around it.
+
+**Which to use.** v2 for anything you report or compare against data. v1 remains valid but
+narrower — it answers "given a jet with parton-level substructure, is the predicted
+substructure right?", which is a real question, just not one an analysis gets to ask. Their
+numbers are **not comparable**: different populations, so every distance, ratio and rate
+moves.
 
 Generate the underlying metrics with `h2p-rsd-junipr eval <ckpt>` (writes a JSON
 metrics record + the CSV/JSONL training curves in the run dir).

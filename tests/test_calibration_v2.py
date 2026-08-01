@@ -33,9 +33,11 @@ from h2p_rsd_junipr.distributions import (
 from h2p_rsd_junipr.eval.calibration import (
     REGION_LABELS,
     cell_region,
+    chi2_crit95,
     coordinate_pits,
     run_calibration,
     run_tarp,
+    wilson_interval,
 )
 from h2p_rsd_junipr.geometry import Geometry
 from h2p_rsd_junipr.models.base import build_model
@@ -339,6 +341,64 @@ def test_tarp_prior_reference_pool_is_supported():
 
 
 # ---------------------------------------------------------------------------
+# 4b. the uncertainty the coverage numbers are quoted with (check 12)
+# ---------------------------------------------------------------------------
+def test_wilson_interval_brackets_and_survives_the_edges():
+    lo, hi = wilson_interval(68, 100)
+    assert lo < 0.68 < hi
+    assert 0.57 < lo < 0.60 and 0.76 < hi < 0.78          # textbook [0.582, 0.768]
+    # The edges are where the normal approximation gives a zero-width interval and
+    # the ends of a near-empty Lund quadrant land.
+    for k, n in ((0, 40), (40, 40)):
+        a, b = wilson_interval(k, n)
+        assert 0.0 <= a < b <= 1.0, "a degenerate count must still get a real interval"
+    assert all(np.isnan(x) for x in wilson_interval(0, 0))  # no jets, no claim
+    # width shrinks like 1/sqrt(n): 40 jets cannot resolve what 400 can
+    w40 = np.subtract(*reversed(wilson_interval(27, 40)))
+    w400 = np.subtract(*reversed(wilson_interval(272, 400)))
+    assert w40 > 2.5 * w400
+
+
+def test_chi2_crit95_matches_the_table():
+    # the reference `sbc_chi2_uniform` is quoted against, at the default 10 rank bins
+    assert chi2_crit95(9) == pytest.approx(16.919, abs=0.05)
+    assert chi2_crit95(1) == pytest.approx(3.841, abs=0.1)
+    assert chi2_crit95(20) == pytest.approx(31.410, abs=0.05)
+    assert math.isnan(chi2_crit95(0))
+    assert chi2_crit95(30) > chi2_crit95(9)                # monotone in dof
+
+
+def test_region_strata_carry_counts_and_a_scoring_floor(batch, small_jets):
+    b, geom = batch
+    ds = MatchedLundDataset(small_jets[:64], geom)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    torch.manual_seed(3)
+    m = run_calibration(model, ds, geom, torch.device("cpu"), K=16, n_jets=40,
+                        verbose=False, stratify_regions=True, min_region_n=1000)
+    assert m["region_min_n"] == 1000
+    assert set(m["region_split"]) == {"u", "v"}
+    for label, e in m["by_region"].items():
+        assert label in REGION_LABELS
+        assert e["scored"] is False, "no region has 1000 jets here; none may be scored"
+        lo, hi = e["coverage_68_ci"]
+        if e["n_coverage"]:
+            assert lo <= e["coverage_68"] <= hi
+        else:
+            assert math.isnan(lo) and math.isnan(hi)
+
+
+def test_tarp_quotes_its_null_floor(small_jets):
+    geom = Geometry()
+    ds = MatchedLundDataset(small_jets[:32], geom)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    t = run_tarp(model, ds, geom, torch.device("cpu"), K=20, n_jets=25, n_refs=20,
+                 seed=0, verbose=False)
+    # a sup-norm CDF deviation is a KS statistic; its 95% null value is 1.36/sqrt(n)
+    assert t["tarp_null_floor95"] == pytest.approx(1.36 / math.sqrt(25))
+    assert t["tarp_exceeds_null"] == (t["tarp_max_dev"] > t["tarp_null_floor95"])
+
+
+# ---------------------------------------------------------------------------
 # 5. the all-off path is the pre-WP2 path
 # ---------------------------------------------------------------------------
 def test_all_switches_off_reproduces_the_v1_metric_dict(batch, small_jets):
@@ -352,8 +412,20 @@ def test_all_switches_off_reproduces_the_v1_metric_dict(batch, small_jets):
     again = run_calibration(model, ds, geom, dev, K=16, n_jets=12, verbose=False,
                             pit_coords=False, stratify_regions=False, tarp=False)
     assert base == again
-    assert set(base) == {"sbc_chi2_uniform", "sbc_rank_mean", "pit_mean",
-                         "coverage_68", "n_jets"}
+    # The v1 point estimates, unchanged. The uncertainty keys beside them
+    # (docs/PLAN_prod_test_v0.md check 12) are annotations on these same numbers —
+    # a Wilson interval and the chi^2 reference point — computed from what was already
+    # there, so they cost no extra RNG draws and move no published value.
+    v1 = {"sbc_chi2_uniform", "sbc_rank_mean", "pit_mean", "coverage_68", "n_jets"}
+    uncertainty = {"sbc_chi2_dof", "sbc_chi2_crit95", "sbc_chi2_exceeds_crit95",
+                   "n_coverage", "coverage_68_ci", "coverage_68_consistent"}
+    assert set(base) == v1 | uncertainty
+    lo, hi = base["coverage_68_ci"]
+    assert lo <= base["coverage_68"] <= hi
+    assert base["sbc_chi2_crit95"] == pytest.approx(16.92, abs=0.05)   # chi^2(9), 95%
+    assert base["sbc_chi2_exceeds_crit95"] == (
+        base["sbc_chi2_uniform"] > base["sbc_chi2_crit95"]
+    )
     # switching WP2 on only ADDS keys and leaves the shared ones untouched
     torch.manual_seed(7)
     grown = run_calibration(model, ds, geom, dev, K=16, n_jets=12, verbose=False,

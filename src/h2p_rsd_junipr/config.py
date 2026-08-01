@@ -74,6 +74,12 @@ class EncoderConfig:
     num_layers: int = 1                # the "encoder depth" knob
     bidirectional: bool = True
     dropout: float = 0.1               # wired in (the script defines but never applies it)
+    mask_padding: bool = True          # ignore collate's zero-padding, so a jet
+    #                                    encodes the same alone as in a batch. False
+    #                                    reproduces the original v2 script's defect
+    #                                    (encoders/gru.py); a snapshot predating this
+    #                                    field backfills to False in the encoder, so
+    #                                    it evaluates as it was trained.
     aux_features: list[str] = field(default_factory=list)  # see _AUX_DOC
 
 
@@ -85,6 +91,12 @@ class LundNetEncoderConfig:
     num_layers: int = 3
     k: int = 4                         # EdgeConv neighbourhood (chain graph -> sequential)
     dropout: float = 0.1
+    mask_padding: bool = True          # ignore collate's zero-padding, so a jet
+    #                                    encodes the same alone as in a batch. False
+    #                                    reproduces the original v2 script's defect
+    #                                    (encoders/gru.py); a snapshot predating this
+    #                                    field backfills to False in the encoder, so
+    #                                    it evaluates as it was trained.
     aux_features: list[str] = field(default_factory=list)  # see _AUX_DOC
 
 
@@ -95,6 +107,12 @@ class DeepSetsEncoderConfig:
     hidden_dim: int = 64
     num_layers: int = 2
     dropout: float = 0.1
+    mask_padding: bool = True          # ignore collate's zero-padding, so a jet
+    #                                    encodes the same alone as in a batch. False
+    #                                    reproduces the original v2 script's defect
+    #                                    (encoders/gru.py); a snapshot predating this
+    #                                    field backfills to False in the encoder, so
+    #                                    it evaluates as it was trained.
     aux_features: list[str] = field(default_factory=list)  # see _AUX_DOC
 
 
@@ -198,6 +216,27 @@ class DecodeConfig:
     length_floor_quantile: float = 0.0 # per-jet MAP floor from the learned P(n|x): the
     #                                    effective floor is max(min_emissions, Q_alpha(P(n|x))).
     #                                    0.0 == off (short-circuits; merged behavior unchanged)
+    length_temperature: float = 1.0    # post-hoc scalar temperature on the multiplicity
+    #                                    head's logits: moves length_pmf and the N drawn by
+    #                                    sample, never log_prob (that is the trained
+    #                                    likelihood). 1.0 == off and bit-identical; a no-op
+    #                                    for families with no n_head. Fit on held-out jets
+    #                                    with inference.length.fit_length_temperature.
+    length_tilt: float = 0.0           # companion to length_temperature: a term LINEAR in
+    #                                    n on the same logits. A temperature is symmetric
+    #                                    about the mode and cannot produce the monotone
+    #                                    ramp the head shows; this is what moves mass
+    #                                    between short and long trees. 0.0 == off.
+    empty_threshold: float = 0.0       # 0.0 == off. Decide the EMPTY tree when q(N=0|x) >=
+    #                                    this, BEFORE any shape decode. The parton target
+    #                                    really is empty for ~17% of jets
+    #                                    (docs/PLAN_empty_parton_tree.md); min_emissions
+    #                                    cannot express that (it clamps the output length,
+    #                                    it does not choose emptiness) and MBR's imbalance
+    #                                    penalty prices it out. A ceiling where
+    #                                    length_floor_quantile is a floor. Fit with
+    #                                    inference.length.empty_threshold_for_rate and FREEZE:
+    #                                    it is a quantile, so it is sample-dependent.
     # --- MBR point estimator (docs/PLAN_MBR_PerturbativeLund.md). All default so
     #     point_estimator="map" reproduces today exactly and imports no OT backend.
     point_estimator: str = "map"        # map | mbr
@@ -228,6 +267,9 @@ class ExperimentConfig:
     tarp: bool = False              # TARP expected-coverage curve on tree-valued posteriors
     tarp_refs: int = 100            # size of the TARP reference pool
     tarp_reference: str = "pooled"  # pooled (posterior draws of other jets) | prior (truth trees)
+    closure_continuous: bool = False  # leading-emission distances OFF the cell grid, via
+    #                                   sample_coordinates (the cell metric is quantisation-
+    #                                   limited); costs closure_jets * n_closure_samples passes
 
 
 @dataclass
@@ -359,6 +401,54 @@ def load_config(argv: list[str] | None = None) -> DictConfig:
     return cfg
 
 
+def explicit_group_keys(argv: list[str] | None, group: str) -> set[str]:
+    """Which `<group>` fields THIS invocation named explicitly.
+
+    `load_config` cannot answer that. It always returns a fully populated group, seeded
+    from `configs/config.yaml`'s defaults, so "the user asked for `beam_width=16`" and
+    "nobody said anything and the default is 8" come back identical. `eval` needs the
+    distinction because its baseline is the CHECKPOINT's snapshot, not the repo default:
+    a group nobody named must stay exactly as the checkpoint left it, or every eval would
+    silently re-decode a trained model with `configs/decode/default.yaml`.
+
+    Explicit means, in the same precedence order `load_config` merges them: every field of
+    the group file picked by `group=name` (or by `defaults.<group>` inside a `base=` file),
+    the keys of an inline `<group>:` block in that base file, and the dotted
+    `group.field=value` CLI tokens.
+
+    Only the NAMES are returned. Read the values off the composed config, so
+    interpolations (`mbr_lnkt_cut: ${geometry.ln_kt_range[0]}`) are already resolved —
+    a group file loaded on its own cannot resolve a cross-group reference."""
+    argv = list(argv or [])
+    base_path, rest = _pop_base(argv)
+    roots: tuple[Path, ...] = (CONFIGS,)
+    keys: set[str] = set()
+    selector: str | None = None
+
+    if base_path is not None and base_path.is_file():
+        base = OmegaConf.load(base_path)
+        roots = tuple(dict.fromkeys((base_path.parent, CONFIGS)))
+        sel = OmegaConf.select(base, f"defaults.{group}")
+        if sel is not None:
+            selector = str(sel)
+        block = OmegaConf.select(base, group)
+        if block is not None:
+            keys |= {str(k) for k in block.keys()}
+
+    for tok in rest:
+        if "=" not in tok:
+            continue
+        key, val = tok.split("=", 1)
+        if key == group:
+            selector = val                       # a later selector wins, as in load_config
+        elif key.startswith(f"{group}."):
+            keys.add(key[len(group) + 1:].split(".", 1)[0])
+
+    if selector is not None:
+        keys |= {str(k) for k in OmegaConf.load(_group_file(roots, group, selector)).keys()}
+    return keys
+
+
 def config_hash(cfg: DictConfig) -> str:
     """Stable hash of the resolved config — used for run-dir naming and the
     checkpoint config_hash guard (§6)."""
@@ -385,6 +475,9 @@ _DECODE_DEFAULTS: dict = {
     "min_emissions": 1,
     "length_penalty": 0.0,
     "length_floor_quantile": 0.0,
+    "length_temperature": 1.0,
+    "length_tilt": 0.0,
+    "empty_threshold": 0.0,
     "point_estimator": "map",
     "mbr_backend": "pot",
     "mbr_n_candidates": 0,
@@ -412,6 +505,7 @@ _EXPERIMENT_DEFAULTS: dict = {
     "tarp": False,
     "tarp_refs": 100,
     "tarp_reference": "pooled",
+    "closure_continuous": False,
 }
 
 
