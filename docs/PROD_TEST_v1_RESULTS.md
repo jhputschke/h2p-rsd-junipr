@@ -261,7 +261,7 @@ verdict below is unanimous across the three.
 | G5 | `narrow_soft` | **ATTRIBUTED** | no coordinate there exceeds its own critical value |
 | G6 | decode | **PASS** | MBR/identity 0.936–0.965; the ψ clause is underpowered, see §4.6 |
 | G7 | TARP | **FAIL** | 0.0415 / 0.0350 / 0.0335 vs a recomputed null of 0.0275 |
-| G8 | family A/B | *pending* | `v1_contstop` still training |
+| G8 | family A/B | **implicit continue/stop wins** | held-out NLL −0.124 nat and TARP 0.021 vs 0.037, both clearing the seed spread; PIT, coverage and medoid tie |
 
 ### 4.1 G2 — support: the one gate WP-A was built to move, and it moves completely
 
@@ -351,8 +351,52 @@ have — is met; its stated 2× ratio is not measurable at this sample size.
 Every seed exceeds its band. WP-A moved it slightly (0.046 → 0.033–0.042) and did not close
 it — which is what §1 predicted: the residue is a **width** problem in the joint tree
 posterior, and fixing a support error was never going to reach it. Together with the
-coverage clause of G4 and the attribution in G5, three independent instruments now say the
+coverage clause of G4 and the attribution in G5, three independent instruments say the
 same thing about the same defect.
+
+§4.8 identifies what causes it.
+
+### 4.8 G8 — and the defect turns out to be the multiplicity factorization
+
+| quantity | `v1_base` explicit `q(N\|x)` (3 seeds) | `v1_contstop` implicit (2 seeds) | delta | clears the spread? |
+|---|---|---|---:|---|
+| **best val NLL/jet** | 3.9169 [3.9036, 3.9237] | **3.7927** [3.7799, 3.8054] | **+0.1242** | **yes** |
+| **TARP max dev** | 0.0367 [0.0335, 0.0415] | **0.0212** [0.0200, 0.0225] | **+0.0154** | **yes** |
+| `ln z` PIT KS | 0.0423 [0.0270, 0.0529] | 0.0398 [0.0315, 0.0482] | +0.0025 | no |
+| `pit_ks_max` | 0.0441 [0.0324, 0.0529] | 0.0398 [0.0315, 0.0482] | +0.0043 | no |
+| `coverage_68` | 0.5255 [0.5179, 0.5400] | 0.5307 [0.5304, 0.5310] | −0.0053 | no |
+| medoid/identity | 0.9312 [0.9240, 0.9373] | 0.9307 [0.9286, 0.9327] | +0.0006 | no |
+
+**The implicit continue/stop factorization wins on two of the four deciding metrics and
+ties on the rest.** NLL is comparable here — both are normalized densities over the same
+space, sharing the physical `ln z` head — unlike across the WP-A head change. SBC-on-N is
+reported and does not decide, per the gate's own rule.
+
+And G7 is not close. Across the whole grid:
+
+| family | arms | TARP max dev | ECP(0.68) | signed bias | G7 |
+|---|---:|---|---|---|---|
+| explicit `q(N\|x)` | 6 | 0.0335–0.0465 | 0.635–0.652 | −0.005 … −0.020 | **FAIL ×6** |
+| implicit continue/stop | 2 | **0.0200, 0.0225** | **0.665** | −0.0002, −0.0036 | **PASS ×2** |
+
+Those six span three seeds, two aux configurations *and* both `ln z` heads; the two that
+pass differ from `v1_base` in the multiplicity factorization and nothing else. So the
+defect §6 describes — the joint tree posterior being too narrow — **is attributable to the
+explicit `q(N|x)` head**, and the signed bias going from −0.020 to −0.0002 says it is not
+merely reduced but essentially removed.
+
+A mechanism consistent with this, offered as a hypothesis rather than a result: the
+explicit factorization draws `N ~ q(N|x)` and *then* decodes exactly `N` cells, so length
+is independent of shape given `x`. The continue/stop model lets the prefix decide when to
+stop, coupling the two. TARP is a *joint* tree statistic, and it is precisely the joint
+that an independence assumption would narrow. That is a testable claim and this run does
+not test it.
+
+**This inverts the expectation the plan carried into G8.** The gate's rationale was
+protective of the explicit head — SBC-N must not decide *because* the head is calibrated on
+it by construction — and the concern was that the A/B would be biased in its favour. The
+deciding metrics say the opposite, which is the outcome a pre-registered rule exists to
+make reportable.
 
 ## 5. Retroactive pass on the v0 checkpoint
 
@@ -408,9 +452,18 @@ something v1's grid is designed to move, and G2/G3 are precisely what WP-A addre
 | G5 attribution | `narrow_soft` 0.344–0.479, with **no** coordinate above its critical value there | not a coordinate head in that quadrant |
 
 Each of the three could individually be explained away; together they cannot. Note what
-the list does *not* contain: any statistic about the multiplicity. v0 read the residue as
-a multiplicity failure because the two statistics that would have said otherwise were
-quoted against nulls they do not have (§1).
+the list does *not* contain: any statistic about the multiplicity *marginal*. v0 read the
+residue as a multiplicity failure because the two statistics that would have said
+otherwise were quoted against nulls they do not have (§1).
+
+**And §4.8 attributes it.** Every arm carrying the explicit `q(N|x)` head fails G7 — six
+of them, spanning three seeds, two aux configurations and both `ln z` heads — while both
+arms differing only in the multiplicity **factorization** pass, with the signed TARP bias
+going from −0.020 to −0.0002. So the defect is neither the coordinate heads nor the
+encoder nor the support: it is how length is attached to shape. That is a third distinct
+reading of "multiplicity", and it is worth separating from the two v0 conflated: the
+*marginal* `q(N|x)` is calibrated (§1.1, §1.2), and the *factorization* that marginal
+belongs to is what narrows the joint.
 
 **`ln z` is still miscalibrated inside its own support** — 1.05–2.07× its critical value
 after WP-A, concentrated in `wide_soft` at 2.16× on 94% of the emissions. The support half
