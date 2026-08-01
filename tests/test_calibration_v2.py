@@ -490,7 +490,7 @@ def test_support_audit_counts_every_boundary():
     ]
     v = violations(pts, geom, z_cut=0.1, beta=0.0)
     assert v == {"n": 5, "out_of_window": 2, "kt_floor": 1,
-                 "soft_drop": 1, "z_above_half": 1}
+                 "soft_drop": 1, "z_above_half": 1, "n_at_boundary": 0}
     # an unknown grooming record must read "unknown", never "zero"
     u = violations(pts, geom, z_cut=float("nan"), beta=float("nan"))
     assert u["soft_drop"] == -1 and u["z_above_half"] == -1
@@ -649,3 +649,45 @@ def test_rayleigh_p_flags_a_genuinely_anisotropic_sample():
         Rc = abs(np.exp(1j * conc).sum()) / n
         assert math.exp(-n * Rc**2) < 1e-6
         assert Rc > math.sqrt(math.pi) / (2 * math.sqrt(n))
+
+
+def test_boundary_draws_are_not_counted_as_violations():
+    """A truncated sampler CLAMPS to its bound, and the bound is only representable to
+    float32. A strict comparison then counts a draw sitting exactly ON the soft-drop cut
+    as a crossing of it — 8 in 575 525 on the first trained physical arm, all of them
+    arithmetic. They are reported as `n_at_boundary` instead, and the violation columns
+    use the same `EDGE_TOL` the training-time guard already used.
+
+    The tolerance masks nothing: an unbounded head misses the boundary by O(0.1)."""
+    import numpy as np
+
+    from h2p_rsd_junipr.eval.support import EDGE_TOL, violations
+    from h2p_rsd_junipr.geometry import Geometry
+
+    geom = Geometry()
+    lo, hi = math.log(0.1), math.log(0.5)
+    pts = [
+        [3.0, 3.0, float(np.float32(lo)), 0.0],    # on the bound after a float32 round trip
+        [3.0, 3.0, float(np.float32(hi)), 0.0],    # ditto, upper
+        [3.0, 3.0, lo - 0.5, 0.0],                 # genuinely below
+        [3.0, 3.0, -0.2, 0.0],                     # genuinely above (z = 0.82)
+    ]
+    v = violations(pts, geom, z_cut=0.1, beta=0.0)
+    assert v["soft_drop"] == 1 and v["z_above_half"] == 1, "a real violation was masked"
+    assert v["n_at_boundary"] == 2, "boundary draws must be counted, just not as violations"
+    # a leak is orders of magnitude larger than the tolerance, so the tolerance is inert
+    leak = violations([[3.0, 3.0, lo - 10 * EDGE_TOL, 0.0]], geom, z_cut=0.1, beta=0.0)
+    assert leak["soft_drop"] == 1
+
+
+def test_edge_tolerance_matches_the_training_time_guard():
+    """Two audits of the same boundary must not disagree about which side of it a point
+    lies on. `data.stats.check_lnz_support` uses 1e-6; so does the eval-time audit."""
+    import inspect
+
+    from h2p_rsd_junipr.data import stats
+    from h2p_rsd_junipr.eval.support import EDGE_TOL
+
+    src = inspect.getsource(stats.check_lnz_support)
+    assert f"lo - {EDGE_TOL:g}" in src or "lo - 1e-6" in src
+    assert EDGE_TOL == 1e-6

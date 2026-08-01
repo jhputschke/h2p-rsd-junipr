@@ -11,9 +11,10 @@ from, not opinions about the model:
 
 * **window** — `(ln 1/DeltaR, ln kt)` outside the geometry's own ranges. Outside it a
   draw is not merely improbable, it is outside the space the cell grid tiles.
-* **soft drop** — `ln z <= ln z_cut - beta * ln(1/DeltaR)`; Soft Drop discards those
+* **soft drop** — `ln z < ln z_cut - beta * ln(1/DeltaR)`; Soft Drop discards those
   splittings, so the training data crosses that line exactly zero times
-  (Larkoski et al., arXiv:1402.2657; RSD: Dreyer et al., arXiv:1804.03657).
+  (Larkoski et al., arXiv:1402.2657; RSD: Dreyer et al., arXiv:1804.03657). Strictly
+  below, within `EDGE_TOL` — see there for why a point *on* the bound is not a crossing.
 * **`z <= 1/2`** — `z = min(pT1,pT2)/(pT1+pT2)` by construction, so `ln z > ln(1/2)` is
   not a soft prong at all. v0 never measured this half of the `ln z` leak.
 * **`k_t` floor** — `ln kt` below the traversal's floor, likewise a hard generator cut.
@@ -42,6 +43,20 @@ import torch
 
 _KEYS = ("out_of_window", "soft_drop", "z_above_half", "kt_floor")
 
+# Coordinates are produced and stored in float32, so a boundary is only representable to
+# ~1e-7 relative — at ln z_cut = -2.3026 that is ~2e-7 absolute. A truncated sampler
+# CLAMPS to its bound, so a draw that lands on the boundary reappears in float64 a few
+# ulps on the wrong side of it, and a strict comparison counts it as a violation of a cut
+# it is exactly on. `EDGE_TOL` is the width of that ambiguity, and it is deliberately the
+# same constant `data.stats.check_lnz_support` uses: two audits of the same boundary
+# disagreeing about which side of it a point lies on is worse than either convention.
+#
+# It masks nothing real. A leaking unbounded head misses the boundary by O(0.1), not by
+# 1e-6 — the legacy `ln z` head measures 0.83% at this tolerance and 0.83% without it.
+# Draws sitting exactly ON the bound are still counted, and reported as `n_at_boundary`:
+# they are not violations, but they do say the head wanted to go further.
+EDGE_TOL = 1e-6
+
 
 def grooming_from_jets(jets) -> dict:
     """`(z_cut, beta, kt_floor)` from the loaded jets' own record, or NaNs.
@@ -65,17 +80,24 @@ def violations(coords, geometry, *, z_cut, beta) -> dict:
     lo_u, hi_u = geometry.ln_invdelta_range
     lo_v, hi_v = geometry.ln_kt_range
     if n == 0:
-        return {"n": 0, **{k: 0 for k in _KEYS}}
+        return {"n": 0, "n_at_boundary": 0, **{k: 0 for k in _KEYS}}
     u, v, lnz = a[:, 0], a[:, 1], a[:, 2]
     out = {
         "n": n,
-        "out_of_window": int(((u < lo_u) | (u > hi_u) | (v < lo_v) | (v > hi_v)).sum()),
-        "kt_floor": int((v < lo_v).sum()),
+        "out_of_window": int((((u < lo_u - EDGE_TOL) | (u > hi_u + EDGE_TOL)
+                               | (v < lo_v - EDGE_TOL) | (v > hi_v + EDGE_TOL))).sum()),
+        "kt_floor": int((v < lo_v - EDGE_TOL).sum()),
+        "n_at_boundary": 0,
     }
     if z_cut == z_cut:  # not NaN
         b = 0.0 if beta != beta else float(beta)
-        out["soft_drop"] = int((lnz <= math.log(z_cut) - b * u).sum())
-        out["z_above_half"] = int((lnz > math.log(0.5)).sum())
+        sd_lo, hi_z = math.log(z_cut) - b * u, math.log(0.5)
+        out["soft_drop"] = int((lnz < sd_lo - EDGE_TOL).sum())
+        out["z_above_half"] = int((lnz > hi_z + EDGE_TOL).sum())
+        # Not a violation, but not nothing: a truncated head that clamps to its own bound
+        # is a head whose untruncated mode sits outside the support for those nodes.
+        out["n_at_boundary"] = int((np.abs(lnz - sd_lo) <= EDGE_TOL).sum()
+                                   + (np.abs(lnz - hi_z) <= EDGE_TOL).sum())
     else:
         out["soft_drop"] = out["z_above_half"] = -1   # unknown, not zero
     return out
@@ -84,6 +106,9 @@ def violations(coords, geometry, *, z_cut, beta) -> dict:
 def _rates(counts) -> dict:
     n = counts["n"]
     out = {"n_emissions": int(n)}
+    # Reported, never scored: sitting ON the bound is not crossing it.
+    out["n_at_boundary"] = int(counts.get("n_at_boundary", 0))
+    out["frac_at_boundary"] = float(out["n_at_boundary"]) / n if n else 0.0
     for k in _KEYS:
         c = counts[k]
         out[k] = float("nan") if c < 0 else (float(c) / n if n else 0.0)
@@ -109,14 +134,14 @@ def run_support_audit(model, val_ds, val_jets, geometry, device, n_jets=300, K=2
     z_cut = groom["z_cut"] if z_cut is None else float(z_cut)
     beta = groom["beta"] if beta is None else float(beta)
 
-    truth = {"n": 0, **{k: 0 for k in _KEYS}}
-    post = {"n": 0, **{k: 0 for k in _KEYS}}
+    truth = {"n": 0, "n_at_boundary": 0, **{k: 0 for k in _KEYS}}
+    post = {"n": 0, "n_at_boundary": 0, **{k: 0 for k in _KEYS}}
     can_sample = bool(getattr(model, "has_continuous_coords", False))
 
     for i in range(n_jets):
         item = val_ds[i]
         t = violations(item["yraw"].numpy(), geometry, z_cut=z_cut, beta=beta)
-        for k in ("n", *_KEYS):
+        for k in ("n", "n_at_boundary", *_KEYS):
             truth[k] = truth[k] + t[k] if not (truth[k] < 0 or t[k] < 0) else -1
         if not can_sample:
             continue
@@ -132,7 +157,7 @@ def run_support_audit(model, val_ds, val_jets, geometry, device, n_jets=300, K=2
                 can_sample = False
                 break
             p = violations(c.detach().cpu().numpy(), geometry, z_cut=z_cut, beta=beta)
-            for k in ("n", *_KEYS):
+            for k in ("n", "n_at_boundary", *_KEYS):
                 post[k] = post[k] + p[k] if not (post[k] < 0 or p[k] < 0) else -1
 
     out = {
@@ -158,7 +183,8 @@ def run_support_audit(model, val_ds, val_jets, geometry, device, n_jets=300, K=2
                 continue
             print(f"    {name:>10} {e['n_emissions']:>10} "
                   + " ".join(f"{e[k]:>16.5%}" if e[k] == e[k] else f"{'n/a':>16}"
-                             for k in _KEYS))
+                             for k in _KEYS)
+                  + f"   [{e['frac_at_boundary']:.5%} ON the bound, not scored]")
         if out["truth"]["n_emissions"] and not out["truth"]["passes"]:
             print("    WARNING: the TRUTH violates a boundary — the audit's own bounds are "
                   "wrong, and nothing it says about the model follows.")
