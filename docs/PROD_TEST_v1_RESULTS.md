@@ -189,7 +189,15 @@ the same two files**: `data/jet_aux_asym.root` (seed 1) to train, `data/jet_aux_
 
 ## 3. Grid arms
 
-*Pending — filled by `scripts/prod_test_v1_gates.py` when the grid completes.*
+**What the seed band covers.** The arms vary `trainer.seed`, which sets weight
+initialisation and batch order; `data.seed` stays 0, so **every arm sees the same
+train/val split** (fingerprint `ca253883e8a6`, 445 563 train / 49 508 val). That is v0's
+convention unchanged — and it is the right one here, because the aux A/B (`v1_base` vs
+`v1_ctrl`) is only paired if both arms are fitted to the same jets. The band therefore
+measures initialisation and ordering variance, **not** split variance, and no claim below
+extends to the latter.
+
+*Table pending — filled by `scripts/prod_test_v1_gates.py` when the grid completes.*
 
 ## 4. Gates G1–G8
 
