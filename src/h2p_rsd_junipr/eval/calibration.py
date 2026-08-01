@@ -601,39 +601,51 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
             # nested dict per coordinate. Flattened here because that is the instrument
             # gate G5 reads — "which coordinate, in which quadrant" — and a reader should
             # not have to walk four nested dicts to find the worst cell of the table.
-            worst = {"coord": None, "region": None, "ks": float("nan"), "n": 0}
+            # Ranked by KS / its own 95% critical value, NOT by raw KS. The regions have
+            # very different counts, and the critical value is 1.36/sqrt(n): a KS of 0.15
+            # on 52 emissions is INSIDE its null while 0.077 on 2671 exceeds it threefold.
+            # Ranking on the raw number would name the small region every time.
+            worst = {"coord": None, "region": None, "ks": float("nan"), "n": 0,
+                     "crit95": float("nan"), "ks_over_crit": float("nan")}
             cross = {}
             for name in pits["names"]:
                 by_r = pits["coords"][name].get("by_region")
                 if not by_r:
                     continue
-                cross[name] = {r: {"ks": e["ks"], "n": e["n"], "mean": e["mean"],
-                                   "scored": bool(e["n"] >= int(min_region_n))}
-                               for r, e in by_r.items()}
+                cross[name] = {}
                 for r, e in by_r.items():
-                    if e["n"] >= int(min_region_n) and not (e["ks"] <= worst["ks"]):
-                        worst = {"coord": name, "region": r, "ks": e["ks"], "n": e["n"]}
+                    crit = 1.36 / max(np.sqrt(max(int(e["n"]), 1)), 1e-9)
+                    ratio = e["ks"] / crit if crit else float("nan")
+                    cross[name][r] = {"ks": e["ks"], "n": e["n"], "mean": e["mean"],
+                                      "crit95": float(crit), "ks_over_crit": float(ratio),
+                                      "scored": bool(e["n"] >= int(min_region_n))}
+                    if e["n"] >= int(min_region_n) and not (ratio <= worst["ks_over_crit"]):
+                        worst = {"coord": name, "region": r, "ks": e["ks"], "n": e["n"],
+                                 "crit95": float(crit), "ks_over_crit": float(ratio)}
             if cross:
                 metrics["pit_coords_by_region"] = cross
                 metrics["pit_coords_by_region_worst"] = worst
                 if verbose:
-                    print("\n  region x coordinate PIT (KS; the WP-D.3 attribution "
-                          f"instrument, regions with n < {min_region_n} not scored):")
+                    print("\n  region x coordinate PIT (the WP-D.3 attribution "
+                          f"instrument; each cell is KS / its own 95% critical value "
+                          f"1.36/sqrt(n), so >1 fails. regions with n < {min_region_n} "
+                          f"not scored):")
                     regs = sorted({r for v in cross.values() for r in v})
-                    print(f"    {'coord':>6} " + " ".join(f"{r:>13}" for r in regs))
+                    print(f"    {'coord':>6} " + " ".join(f"{r:>18}" for r in regs))
                     for name, v in cross.items():
                         cells = []
                         for r in regs:
                             e = v.get(r)
-                            cells.append("n/a".rjust(13) if e is None else
-                                         (f"{e['ks']:.3f} ({e['n']})"
-                                          + ("" if e["scored"] else "*")).rjust(13))
+                            cells.append("n/a".rjust(18) if e is None else
+                                         (f"{e['ks_over_crit']:.2f}x "
+                                          f"({e['ks']:.3f}, n={e['n']})"
+                                          + ("" if e["scored"] else "*")).rjust(18))
                         print(f"    {name:>6} " + " ".join(cells))
                     if worst["coord"]:
-                        crit = 1.36 / max(np.sqrt(max(worst["n"], 1)), 1e-9)
                         print(f"    worst scored cell: {worst['coord']} x {worst['region']}"
                               f"  KS = {worst['ks']:.3f} on n = {worst['n']}"
-                              f"  (95% critical value at that n = {crit:.3f})")
+                              f"  = {worst['ks_over_crit']:.2f}x its critical value "
+                              f"{worst['crit95']:.3f}")
 
     # --- WP2.3 / WP-D.2: TARP, with its null band recomputed at this run's size ----
     if tarp:
