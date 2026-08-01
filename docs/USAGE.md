@@ -419,6 +419,24 @@ hashes the sequences plus the jet four-vector and so covers every jet read, whil
 hashes the sequences alone and only counts jets with `>= --min-emissions` — on a typical
 sample that is under a tenth of them, which is why `full` is the headline.
 
+**Population-level closure on that test set** is a notebook rather than a CLI flag, and
+pointing it at a different file takes more than the path. `lund_distribution_closure_v2`'s
+`EMPTY_THRESHOLD` defaults to rate-matching tau on the sample it reports on — circular —
+and its `LENGTH_TEMPERATURE` / `LENGTH_TILT` reach `sample`, so an uncalibrated head
+reports a different empty rate with nothing to say which one it was. Rather than document
+five edits, the variant is generated:
+
+```bash
+python scripts/make_prod_closure_nb.py           # -> notebooks/lund_distribution_closure_prod_test_v0.ipynb
+python scripts/make_prod_closure_nb.py --check   # CI: is the committed one stale?
+```
+
+Every cell except the title and section 0 is copied byte-for-byte from v2, so there is
+never a second definition of the headline ratios; the five settings are read at runtime
+from the `prod_test_v0_metrics.json` that `notebooks/prod_test_v0.ipynb` writes, so they
+cannot disagree with the fit that produced them. Adapt `SUBS` in the generator for a
+different study.
+
 ### Configuring decode from a preset instead of a CLI chain
 
 `decode` is liftable the same way, through the full composition surface — `decode=<name>`,

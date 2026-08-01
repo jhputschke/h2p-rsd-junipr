@@ -116,6 +116,26 @@ the docs:
   implementation of the headline distances, with a staleness guard that refuses to
   quote a `dist_closure_metrics.json` describing a different run.
 
+- **lund_distribution_closure_prod_test_v0.ipynb** — `..._v2.ipynb` pointed at the
+  production test's **held-out** file, with every setting already applied. **Generated**
+  by [`scripts/make_prod_closure_nb.py`](../scripts/make_prod_closure_nb.py): every cell
+  except the title and section 0 is byte-identical to v2, and
+  [`tests/test_prod_closure_nb.py`](../tests/test_prod_closure_nb.py) fails if the
+  committed file drifts from what the generator produces. Edit v2 (or the generator) and
+  re-run it — a hand-edited copy would be a second definition of the same headline
+  ratios, which is exactly how two closure populations drifted apart before.
+
+  Five constants differ from v2's defaults, and they are **read at runtime** from
+  `prod_test_v0_metrics.json` rather than pasted in, so they cannot disagree with the fit
+  that produced them: `CKPT_PATH`, `ROOT_PATH`, the **frozen** `EMPTY_THRESHOLD` (v2's
+  `None` rate-matches tau on the sample it reports on — circular), and
+  `LENGTH_TEMPERATURE` / `LENGTH_TILT`. That last pair reaches `sample`, not just
+  `length_pmf`: on this checkpoint it moves the posterior empty rate from 0.047 to 0.156
+  against a truth of 0.168, so an artifact that does not record it cannot have its empty
+  rate attributed. Run [`prod_test_v0.ipynb`](prod_test_v0.ipynb) first; without its
+  artifact this one raises rather than silently falling back to `cpp/test_data/jets.root`
+  — the file the checkpoint trained on.
+
 - **closure.ipynb** — leading-emission Lund distance, multiplicity bias, MAP vs
   plain-RSD vs truth trees (§8 closure).
 - **calibration.ipynb** — SBC rank histogram, PIT, coverage (Talts et al.,
