@@ -82,6 +82,12 @@ def test_the_parameter_cell_changes_exactly_the_five_settings():
         "a summary block duplicating values recorded elsewhere is a second thing that "
         "can go stale"
     )
+    # tau is a quantile of q(0|x), so it only means anything on the scale it was fitted
+    # to — and (T, tilt) move that scale's mean by ~3x
+    assert 'fitted_under' in cell, (
+        "the notebook must check that EMPTY_THRESHOLD was fitted at the (T, tilt) it is "
+        "about to apply; otherwise the cut lands in the wrong place with nothing to say so"
+    )
     # the guards that catch a v2 default changing underneath this variant
     assert 'MBR_BACKEND != "surrogate"' in cell
     assert "REQUIRE_TRUTH_SPLITTING is False" in cell
@@ -104,6 +110,34 @@ def test_parameter_cell_parses_and_fails_loudly_without_the_artifact(tmp_path):
         with pytest.raises(FileNotFoundError) as exc:
             exec(compile(cell, "params", "exec"), {})
         assert "prod_test_v0.ipynb" in str(exc.value)
+    finally:
+        os.chdir(cwd)
+
+
+@pytest.mark.skipif(not PROD.exists(), reason="generated notebook not present")
+def test_a_tau_without_its_scale_is_refused(tmp_path):
+    """An artifact whose `tau` carries no `fitted_under` predates the scale fix, and its
+    tau was fitted on the RAW head. Applying it here, where the head is recalibrated,
+    leaves the ranking untouched and the cut in the wrong place — rate ~3x truth, with
+    nothing in either notebook to say why. It must refuse, not proceed."""
+    import json as _json
+    import os
+
+    art = tmp_path / "runs" / "prod_test_v0" / "r" / "prod_test_v0"
+    art.mkdir(parents=True)
+    (art / "prod_test_v0_metrics.json").write_text(_json.dumps({
+        "run": {"checkpoint": "runs/x/best.ckpt", "test_path": "data/test.root",
+                "train_path": "data/train.root"},
+        "empty_tree": {"tau": {"value": 0.1},                   # no `fitted_under`
+                       "recalibration": {"T": 1.372, "tilt": -0.511}},
+    }))
+
+    cell = _sources(PROD)[PARAM_CELL]
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        with pytest.raises(AssertionError, match="no scale for its tau"):
+            exec(compile(cell, "params", "exec"), {})
     finally:
         os.chdir(cwd)
 

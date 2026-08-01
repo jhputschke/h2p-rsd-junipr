@@ -127,6 +127,24 @@ assert PLANE_NB % 30 == 0, (
 assert str(_IN["ROOT_PATH"]) != str(_M["run"]["train_path"]), (
     "the eval file is the file this checkpoint TRAINED on — that is not a closure test"
 )
+
+# THE scale check. `EMPTY_THRESHOLD` is a QUANTILE of q(0|x), so it only means anything
+# on the distribution it was fitted to — and (T, tilt) move that distribution's mean by
+# ~3x. Fitting on the raw head and applying here, where the head is recalibrated, leaves
+# the RANKING untouched and the CUT in the wrong place: the rate goes to ~3x truth and
+# precision collapses, with nothing in either notebook to say why.
+_under = _M["empty_tree"]["tau"].get("fitted_under")
+assert _under is not None, (
+    "this artifact records no scale for its tau (prod_test_v0 predating the fix). "
+    "Re-run notebooks/prod_test_v0.ipynb: a tau without its scale cannot be applied."
+)
+assert (abs(float(_under["length_temperature"]) - LENGTH_TEMPERATURE) < 1e-9
+        and abs(float(_under["length_tilt"]) - LENGTH_TILT) < 1e-9), (
+    f"EMPTY_THRESHOLD was fitted at (T, tilt) = "
+    f"({_under['length_temperature']}, {_under['length_tilt']}) but this notebook applies "
+    f"({LENGTH_TEMPERATURE}, {LENGTH_TILT}). A tau is a quantile of q(0|x); on a "
+    f"different scale it cuts in the wrong place."
+)
 '''
 
 
