@@ -130,7 +130,7 @@ def lund_tree_str(obj, title: str, geometry: Geometry, ref=None) -> str:
 
 
 def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
-                verbose=True, decode=None, continuous=False):
+                verbose=True, decode=None, continuous=False, draws_by_jet=None):
     """Closure + calibration on held-out jets (cell-level, as the v2 script). Returns
     a metrics dict and (optionally) prints the same summary lines. `decode` is a
     decode_params(cfg) dict threaded into sampling (n_posterior_samples ignored here;
@@ -148,12 +148,19 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     `medoid_cell` for why the mode is the wrong estimator for a distance-valued score.
 
     `continuous=True` adds the same comparison OFF the cell grid, via
-    `sample_coordinates`. At this geometry cells are ~0.6 wide and the cell-level
+    `sample_coordinates_many`. At this geometry cells are ~0.6 wide and the cell-level
     distances are ~0.6, so the cell metric is quantisation-limited and cannot resolve
-    what the model is doing; `*_cont` can. Cost is one `sample_coordinates` call per
-    draw per jet (`n_closure * K` forward passes), which is why it is opt-in
-    (`experiment.closure_continuous`). Families with no coordinate density
-    (`ar_junipr_v1`) return None from the hook and the `*_cont` keys come back NaN."""
+    what the model is doing; `*_cont` can. Cost is ONE batched coordinate call per jet
+    (it used to be one per draw, i.e. `n_closure * K` forward passes — the bulk of
+    docs/PLAN_prod_test_speedup.md's 109 min). Families with no coordinate density
+    (`ar_junipr_v1`) return None from the hook and the `*_cont` keys come back NaN.
+
+    `draws_by_jet` reuses posterior draws the caller already has — `draws_by_jet[i]`
+    for jet `i`, in place of the internal `sample_batch` — the same pattern as
+    `mbr_select(draws=)` and `learned_min_emissions(mults=)`. Default None keeps
+    today's behaviour, so `h2p-rsd-junipr eval` is untouched. Sharing one sampling pass
+    across sections makes their comparisons exactly PAIRED, and makes the run not
+    bit-comparable to one that re-sampled per section."""
     dec = dict(decode or {})
     want_mbr = str(dec.get("point_estimator", "map")) == "mbr"
     d_id, d_mode, d_medoid = [], [], []
@@ -165,6 +172,11 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     true_ns = []  # true N per kept jet, aligned with the bias lists (for the per-N table)
     covered = []
     n_closure = min(n_closure, len(val_ds))
+    if draws_by_jet is not None and len(draws_by_jet) < n_closure:
+        raise ValueError(
+            f"draws_by_jet has {len(draws_by_jet)} entries but n_closure={n_closure} jets "
+            f"are scored — the shared draws must be aligned with val_ds[0..n_closure)"
+        )
     for i in range(n_closure):
         item = val_ds[i]
         xf = item["xf"].unsqueeze(0).to(device)
@@ -173,7 +185,7 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         x_cells = geometry.seq_cells(val_jets[i]["x"][0], val_jets[i]["x"][1]).tolist()
         ny_true = len(y_true)
 
-        draws = model.sample_batch(xf, nx, K)
+        draws = model.sample_batch(xf, nx, K) if draws_by_jet is None else draws_by_jet[i]
         mults = np.array([len(d) for d in draws])
         lead = [c for c in (leading_emission_cell(d, geometry) for d in draws) if c is not None]
         ly = leading_emission_cell(y_true, geometry)
@@ -200,10 +212,10 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
 
         if cont_ok:  # the same three estimators, off the grid
             pts = []
-            for d in draws:
-                if not len(d):
-                    continue
-                c = model.sample_coordinates(xf, nx, list(d))
+            # ONE batched call for the jet's K draws, not K calls: the per-draw hook
+            # re-runs encode()/xattn_kv() every time on identical conditioning
+            # (docs/PLAN_prod_test_speedup.md §2).
+            for c in model.sample_coordinates_many(xf, nx, [list(d) for d in draws if len(d)]):
                 if c is None:      # family has no coordinate density -> stop asking
                     cont_ok = False
                     break

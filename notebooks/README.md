@@ -116,14 +116,40 @@ the docs:
   implementation of the headline distances, with a staleness guard that refuses to
   quote a `dist_closure_metrics.json` describing a different run.
 
-- **lund_distribution_closure_prod_test_v0.ipynb** — `..._v2.ipynb` pointed at the
-  production test's **held-out** file, with every setting already applied. **Generated**
+- **prod_test_v1.ipynb** — the same assessment, **~109 min → ~6 min**. Same tiers, same
+  estimators, same acceptance criterion; what changes is the decode plumbing of
+  [`docs/PLAN_prod_test_speedup.md`](../docs/PLAN_prod_test_speedup.md): **one** shared
+  sampling pass feeding §3/§4/§5/§8 instead of five independent ones, one batched
+  `sample_coordinates_many` call per jet instead of one per draw (2 528 → 22 ms/jet), a
+  batched `length_pmf` (13 min → 3 s, and bit-identical — the notebook asserts it against
+  the batch-1 path), and a measured thread cap. Plus one thing that was not a decode
+  problem at all and turned out to be the largest cost in the notebook: §2b/§2c wrote
+  `MatchedLundDataset(chunk, …)[k]` inside a comprehension over `k`, rebuilding the whole
+  256-jet dataset once per jet — O(B²), 7.5 ms/jet against 0.036, ~60 min across the five
+  ablation arms. Measured end to end: **5.9 min**. **Run this one**; v0 stays as the
+  record of how the committed v0 artifact was produced. What the speedup costs in
+  comparability is less than it sounds, and §9 prints it: every **cell-level** number
+  comes back *bit-identical* to a v0 artifact (v0 re-seeded before each of its four
+  sampling passes and walked the same tier in the same order, so it was drawing the same
+  draws four times — sharing them is an exact refactor). Only the rows fed by
+  `sample_coordinates_many` move, because it consumes the RNG in a different order:
+  `dlund_*_cont` by ~0.9%, `collect()`'s cell rows by ~0.2%.
+  `METRICS["run"]["shared_draws"]` records the regime.
+
+- **lund_distribution_closure_prod_test_v0.ipynb** / **…_v1.ipynb** — `..._v2.ipynb`
+  pointed at the production test's **held-out** file, with every setting already applied,
+  one variant per `prod_test_v*.ipynb` (each reads its own artifact). **Generated**
   by [`scripts/make_prod_closure_nb.py`](../scripts/make_prod_closure_nb.py): every cell
   except the title and section 0 is byte-identical to v2, and
-  [`tests/test_prod_closure_nb.py`](../tests/test_prod_closure_nb.py) fails if the
+  [`tests/test_prod_closure_nb.py`](../tests/test_prod_closure_nb.py) fails if a
   committed file drifts from what the generator produces. Edit v2 (or the generator) and
   re-run it — a hand-edited copy would be a second definition of the same headline
-  ratios, which is exactly how two closure populations drifted apart before.
+  ratios, which is exactly how two closure populations drifted apart before. The **v1**
+  variant additionally takes `MBR_BACKEND = "energyflow"` where it is installed: the same
+  perturbative-Lund EMD, ~1.55× on the whole pass, measured to pick a bit-identical MBR
+  tree on 100% of 200 held-out jets. v0 stays on `pot` because EnergyFlow reports that
+  distance R-normalised, so `mbr_risk_mean` — recorded in the committed v0 artifact —
+  would change by 1/8.485 while the selection did not.
 
   Five constants differ from v2's defaults, and they are **read at runtime** from
   `prod_test_v0_metrics.json` rather than pasted in, so they cannot disagree with the fit

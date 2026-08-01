@@ -334,7 +334,7 @@ def run_tarp(model, val_ds, geometry, device, K=200, n_jets=300, n_refs=100,
 def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_bins=10,
                     verbose=True, pit_coords=False, stratify_regions=False, tarp=False,
                     tarp_refs=100, tarp_reference="pooled", mbr_kwargs=None, seed=0,
-                    min_region_n=30):
+                    min_region_n=30, draws_by_jet=None):
     """SBC / PIT / coverage on held-out jets, plus the opt-in WP2 additions.
 
     With `pit_coords=stratify_regions=tarp=False` (the defaults) the returned dict is
@@ -344,19 +344,30 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
     `min_region_n` is the per-region jet count below which a Lund quadrant is reported
     but marked `scored: false`. The quadrants are not equally populated (and the low-u
     strip is kinematically unreachable), so without a stated floor a 40-jet region's
-    coverage gets quoted with the same confidence as a 200-jet one."""
+    coverage gets quoted with the same confidence as a 200-jet one.
+
+    `draws_by_jet` reuses posterior draws the caller already has (`draws_by_jet[i]` for
+    jet `i`) instead of sampling K per jet here — see `eval.closure.run_closure` for
+    the same argument and what sharing one pass costs. The SBC/PIT/coverage block is
+    the only consumer; `tarp=True` still draws its own, since it needs the reference
+    pool as well. Default None is today's behaviour exactly."""
     ranks = []
     coverage_hits = []
     pit_values = []
     regions: list[str | None] = []
     covered_regions: list[str | None] = []
     n_jets = min(n_jets, len(val_ds))
+    if draws_by_jet is not None and len(draws_by_jet) < n_jets:
+        raise ValueError(
+            f"draws_by_jet has {len(draws_by_jet)} entries but n_jets={n_jets} are scored "
+            f"— the shared draws must be aligned with val_ds[0..n_jets)"
+        )
     for i in range(n_jets):
         item = val_ds[i]
         xf = item["xf"].unsqueeze(0).to(device)
         nx = torch.tensor([item["nx"]], device=device)
         ny_true = int(item["ny"])
-        draws = model.sample_batch(xf, nx, K)
+        draws = model.sample_batch(xf, nx, K) if draws_by_jet is None else draws_by_jet[i]
         mults = np.array([len(d) for d in draws])
 
         # SBC rank of the true multiplicity among posterior draws (Talts et al.).

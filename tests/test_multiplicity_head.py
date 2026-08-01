@@ -78,6 +78,26 @@ def test_length_pmf_is_exact_softmax_head(batch):
     assert np.allclose(pmf, ref, atol=1e-6)
 
 
+def test_length_pmf_batches_bit_identically(batch):
+    """One padded batch through `n_head(encode(...))` must reproduce the per-jet
+    `length_pmf` EXACTLY, row for row.
+
+    This is the identity `notebooks/prod_test_v1.ipynb` §6 relies on to replace 40,000
+    batch-1 calls (13 min, docs/PLAN_prod_test_speedup.md §3) with a chunked pass. No
+    RNG is involved, so "within noise" would be the wrong claim here — anything other
+    than equality means the collated padding is reaching the encoder, which would also
+    silently corrupt the batched NLL the notebook quotes from the same helper."""
+    model, b, _ = _v3(batch)
+    B = b["xf"].shape[0]
+    per_jet = [model.length_pmf(b["xf"][i:i + 1], b["nx"][i:i + 1]) for i in range(B)]
+    with torch.inference_mode():
+        e = model.encode(b["xf"], b["nx"])
+        batched = torch.softmax(model.recalibrated_n_logits(model.n_head(e)), dim=-1).numpy()
+    assert batched.shape == (B, model.max_emissions + 1)
+    for i, p in enumerate(per_jet):
+        assert np.array_equal(batched[i], p), f"jet {i}: batched pmf differs from batch-1"
+
+
 def test_describe_matches_log_prob_of_modes(batch):
     """Factorization consistency: describe_sequence's total (log q(N|x) + Σ cell + Σ
     coord at the head-mode coords) equals -per_jet_nll evaluated at those same coords."""

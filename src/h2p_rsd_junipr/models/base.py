@@ -141,6 +141,25 @@ class PosteriorModel(nn.Module, ABC):
         """
         return None
 
+    def sample_coordinates_many(self, xf, nx, draws) -> list:
+        """`sample_coordinates` for MANY cell chains of ONE jet at once: a list of
+        `(L_k, 4)` tensors (or `None` per entry, same meaning as the single hook).
+
+        The batched sibling exists because every consumer of the coordinate half of a
+        posterior calls it once **per draw** — `run_closure(continuous=True)` and
+        `scripts/leading_estimators.collect` both do `K` calls for one jet — and for a
+        family whose coordinate head is teacher-forced on the cells (AR) each of those
+        calls re-runs `encode()` and `xattn_kv()` on the same jet, producing an
+        identical tensor K times. That was 67 of the 109 min of
+        `notebooks/prod_test_v0.ipynb` (docs/PLAN_prod_test_speedup.md §2).
+
+        The default implementation loops the per-draw hook, so a family that does not
+        override it keeps exactly today's behaviour and today's RNG stream. An override
+        is free to reorder RNG consumption — the draws are still draws from the same
+        conditional, but they are NOT the same draws, so consumers must not claim
+        bit-comparability across the switch."""
+        return [self.sample_coordinates(xf, nx, list(d)) for d in draws]
+
     def describe_cells(self, xf, nx, cells) -> LundPointEstimate:
         """One posterior draw (a cell chain) -> LundPointEstimate: the model's joint
         log-density of that chain, with each node's coordinates drawn from

@@ -1,6 +1,6 @@
 """The Lund distribution closure as a script: PDF figures + a Markdown report.
 
-Same analysis as [`notebooks/lund_distribution_closure_prod_test_v0.ipynb`](../notebooks/lund_distribution_closure_prod_test_v0.ipynb)
+Same analysis as [`notebooks/lund_distribution_closure_prod_test_v1.ipynb`](../notebooks/lund_distribution_closure_prod_test_v1.ipynb)
 — which is `lund_distribution_closure_v2.ipynb` pointed at the held-out file with the
 five production-test constants read from the run's own artifact — with the output
 inverted: every panel goes to a **PDF** under `<out>/figures/`, and the prose, the
@@ -9,8 +9,9 @@ each figure by number and by path. Nothing is left as cell output, so the whole 
 survives a kernel restart, a `git pull` and an nbstripout smudge.
 
 Default mode is the production test: the checkpoint, the held-out file, the FROZEN
-empty-tree `tau` and the fitted `(temperature, tilt)` come from
-`runs/prod_test_v0/*/prod_test_v0/prod_test_v0_metrics.json`, so they cannot disagree
+empty-tree `tau` and the fitted `(temperature, tilt)` come from the newest
+`runs/prod_test_v*/*/prod_test_v*/prod_test_v*_metrics.json` (v1's or v0's — the report
+records which), so they cannot disagree
 with the section-6 fit that produced them — including the scale check that a `tau`
 fitted on the raw head is not applied to a recalibrated one. `--no-prod-metrics` runs
 the plain v2 configuration instead (rate-matched tau, checkpoint's own T/tilt), which
@@ -169,8 +170,8 @@ def parse_args(argv=None):
     )
     g = p.add_argument_group("what to run on")
     g.add_argument("--prod-metrics", default=None, metavar="PATH",
-                   help="prod_test_v0_metrics.json to take the five production settings "
-                        "from (default: newest under runs/prod_test_v0/)")
+                   help="prod_test_v*_metrics.json to take the five production settings "
+                        "from (default: newest under runs/prod_test_v*/)")
     g.add_argument("--no-prod-metrics", action="store_true",
                    help="ignore the artifact and use the v2 defaults: tau rate-matched on "
                         "THIS sample (circular) and the checkpoint's own (T, tilt)")
@@ -251,12 +252,14 @@ def resolve_settings(a):
         if mp is not None and not mp.is_absolute():
             mp = REPO / mp
         if mp is None:
-            mp = newest("runs/prod_test_v0/*/prod_test_v0/prod_test_v0_metrics.json")
+            # v* so a prod_test_v1 artifact is found too; newest wins, and the path is
+            # recorded in the report, so which regime produced it is never a guess.
+            mp = newest("runs/prod_test_v*/*/prod_test_v*/prod_test_v*_metrics.json")
         if mp is None:
             raise SystemExit(
-                "no prod_test_v0_metrics.json under runs/prod_test_v0/. This script takes "
+                "no prod_test_v*_metrics.json under runs/. This script takes "
                 "its checkpoint, its test file, the frozen empty-tree tau and the fitted "
-                "length recalibration from that artifact — run notebooks/prod_test_v0.ipynb "
+                "length recalibration from that artifact — run notebooks/prod_test_v1.ipynb "
                 "first, or pass --prod-metrics / --no-prod-metrics."
             )
         prod = json.loads(Path(mp).read_text())
@@ -272,8 +275,8 @@ def resolve_settings(a):
             }
         except KeyError as e:
             raise SystemExit(
-                f"{mp} has no {e} — it is not a prod_test_v0 metrics file, or predates "
-                f"the section-6 recalibration. Re-run notebooks/prod_test_v0.ipynb."
+                f"{mp} has no {e} — it is not a prod_test metrics file, or predates "
+                f"the section-6 recalibration. Re-run notebooks/prod_test_v1.ipynb."
             ) from None
     s = {
         # repo-relative when it can be, so the report and the metrics JSON name the same
@@ -309,8 +312,8 @@ def resolve_settings(a):
         under = prod["empty_tree"]["tau"].get("fitted_under")
         if under is None:
             raise SystemExit(
-                "this artifact records no scale for its tau (a prod_test_v0 predating the "
-                "fix). Re-run notebooks/prod_test_v0.ipynb: a tau without its scale cannot "
+                "this artifact records no scale for its tau (a prod_test run predating the "
+                "fix). Re-run notebooks/prod_test_v1.ipynb: a tau without its scale cannot "
                 "be applied."
             )
         if not (abs(float(under["length_temperature"]) - s["length_temperature"]) < 1e-9

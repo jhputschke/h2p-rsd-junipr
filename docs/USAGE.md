@@ -427,15 +427,20 @@ reports a different empty rate with nothing to say which one it was. Rather than
 five edits, the variant is generated:
 
 ```bash
-python scripts/make_prod_closure_nb.py           # -> notebooks/lund_distribution_closure_prod_test_v0.ipynb
-python scripts/make_prod_closure_nb.py --check   # CI: is the committed one stale?
+python scripts/make_prod_closure_nb.py           # -> notebooks/lund_distribution_closure_prod_test_{v0,v1}.ipynb
+python scripts/make_prod_closure_nb.py --check   # CI: is a committed one stale?
+python scripts/make_prod_closure_nb.py --variant v1
 ```
 
 Every cell except the title and section 0 is copied byte-for-byte from v2, so there is
 never a second definition of the headline ratios; the five settings are read at runtime
-from the `prod_test_v0_metrics.json` that `notebooks/prod_test_v0.ipynb` writes, so they
-cannot disagree with the fit that produced them. Adapt `SUBS` in the generator for a
-different study.
+from the `prod_test_v*_metrics.json` that the matching `notebooks/prod_test_v*.ipynb`
+writes, so they cannot disagree with the fit that produced them. There is one variant per
+production-test notebook — `v1` is the one to run, and it additionally switches
+`MBR_BACKEND` to `energyflow` where installed (the same perturbative-Lund EMD, ~1.55× over
+the whole pass, a bit-identical MBR tree on 100% of 200 measured jets; `v0` stays on `pot`
+because its committed artifact records the risk on POT's scale). Adapt `SUBS` / `VARIANTS`
+in the generator for a different study.
 
 ### The same closure without a kernel: PDF figures + a Markdown report
 

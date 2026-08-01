@@ -452,7 +452,11 @@ class ARJunipr(PosteriorModel):
 
         v1 (`continuous_coords=False`) has no coordinate head, so it returns None and
         callers fall back to cell centres. Reproducibility is the global torch RNG
-        (`train.trainer.seed_everything`) unless a `generator` is supplied."""
+        (`train.trainer.seed_everything`) unless a `generator` is supplied.
+
+        One jet's K draws go through `sample_coordinates_many` instead: this call
+        re-runs `encode()` and `xattn_kv()` every time, which is ~57% of it at 20
+        threads and produces the same tensor K times."""
         if not self.continuous_coords:
             return None
         dev = xf.device
@@ -470,6 +474,67 @@ class ARJunipr(PosteriorModel):
         )
 
     @torch.inference_mode()
+    def sample_coordinates_many(self, xf, nx, draws, *, generator=None):
+        """One jet's K draws' coordinates in ONE forward pass — the batched sibling of
+        `sample_coordinates`, returning a `(L_k, 4)` tensor per draw.
+
+        Same three densities, same teacher-forced replay; the only difference is that
+        `encode()` and `xattn_kv()` run once instead of K times and the whole
+        `(K, L_max)` block of cells goes through `_decode_states` / `_coord_params` /
+        the samplers as one batch. Rows are padded to `L_max` with cell 0 and sliced
+        back afterwards, so a padded position costs one wasted sample and reaches no
+        caller.
+
+        **This reorders RNG consumption** relative to the per-draw loop: the draws are
+        from the same conditional and agree in distribution, but they are not the same
+        numbers, so anything downstream shifts within Monte-Carlo noise. v1
+        (`continuous_coords=False`) returns a list of None, which is what preserves
+        every caller's `c is None -> no coordinate density` degradation path."""
+        if not self.continuous_coords:
+            return [None] * len(draws)
+        dev = xf.device
+        lens = [len(d) for d in draws]
+        K = len(lens)
+        if K == 0:
+            return []
+        empty = torch.zeros(0, 4, device=dev)
+        L_max = max(lens)
+        if L_max == 0:                       # every draw is the empty tree
+            return [empty for _ in range(K)]
+        self.eval()
+        yc = torch.zeros(K, L_max, dtype=torch.long, device=dev)
+        for k, d in enumerate(draws):
+            if lens[k]:
+                yc[k, : lens[k]] = torch.as_tensor([int(c) for c in d],
+                                                   dtype=torch.long, device=dev)
+        du_m, dv_m, du_s, dv_s, lnz_m, lnz_s, mu, kappa = self._coord_params_padded(xf, nx, yc)
+        du = trunc_normal_sample(du_m, du_s, -self.half_u, self.half_u, generator=generator)
+        dv = trunc_normal_sample(dv_m, dv_s, -self.half_v, self.half_v, generator=generator)
+        lnz = lnz_m + lnz_s * torch.randn(lnz_m.shape, device=dev, dtype=lnz_m.dtype,
+                                          generator=generator)
+        psi = vonmises_sample(mu, kappa, generator=generator)
+        coords = torch.stack(
+            [self.cell_cx[yc] + du, self.cell_cy[yc] + dv, lnz, psi], dim=-1
+        )
+        return [coords[k, : lens[k]] if lens[k] else empty for k in range(K)]
+
+    def _coord_params_padded(self, xf, nx, yc: torch.Tensor):
+        """The eight `_coord_params` tensors, each `(B, L)`, for a `(B, L)` block of
+        cell chains teacher-forced on ONE jet's conditioning.
+
+        The body `coord_head_params` (B = 1) and `sample_coordinates_many` (B = K)
+        share: encode once, decode the block, concatenate the cell embedding, read the
+        heads. Factored rather than duplicated so the batched path cannot drift from
+        the single-draw one."""
+        B, L = yc.shape
+        e = self.encode(xf, nx)
+        if e.shape[0] != B:  # one jet's context, broadcast over the block's rows
+            e = e.expand(B, -1)
+        out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
+        eh = torch.cat([out, e.unsqueeze(1).expand(-1, L + 1, -1)], dim=-1)[:, :L, :]
+        return self._coord_params(torch.cat([eh, self.y_embed(yc)], dim=-1))
+
+    @torch.inference_mode()
     def coord_head_params(self, xf, nx, cells):
         """The eight coordinate-head parameters for `cells`, teacher-forced, each `(L,)`
         — the `_coord_params` tuple `sample_coordinates` draws from.
@@ -484,13 +549,8 @@ class ARJunipr(PosteriorModel):
         if not cells:
             return tuple(torch.zeros(0, device=dev) for _ in range(8))
         self.eval()
-        L = len(cells)
-        e = self.encode(xf, nx)
         yc = torch.tensor([cells], dtype=torch.long, device=dev)
-        out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
-        eh = torch.cat([out, e.unsqueeze(1).expand(-1, L + 1, -1)], dim=-1)[:, :L, :]
-        params = self._coord_params(torch.cat([eh, self.y_embed(yc)], dim=-1))
-        return tuple(p.squeeze(0) for p in params)
+        return tuple(p.squeeze(0) for p in self._coord_params_padded(xf, nx, yc))
 
     @torch.inference_mode()
     def describe_sequence(self, xf, nx, cells) -> LundPointEstimate:
