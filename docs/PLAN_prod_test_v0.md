@@ -686,9 +686,34 @@ re-implement the population-level W1/KS/χ² — it accepts
 `dist_closure_metrics.json` only after checking that its `data.path` names the test file
 and its `checkpoint` sits in *this* run directory (not merely that the basename is
 `best.ckpt`). It also compares the artifact's recorded `(length_temperature,
-length_tilt) = (1.0, 0.0)` against §6's fitted `(1.372, −0.511)` and says so: recalibration
-reaches `sample`, so that artifact's empty rate describes the **uncalibrated** head. Both
-are legitimate numbers; without this line they are indistinguishable.
+length_tilt) = (1.0, 0.0)` against §6's fitted `(1.372, −0.511)` and says so.
+
+That comparison exposed a gap the plan had assumed away. The plan requires
+`dist_closure_metrics.json` to record `(T, tilt)` "or its empty rate is unattributable" —
+but **closure_v2 had no such knob**: it read them from the checkpoint snapshot, so it
+could only ever record the identity, however they had been fitted. It now takes
+`LENGTH_TEMPERATURE` / `LENGTH_TILT` constants (`None` → whatever the snapshot carries, so
+the default path is unchanged), applies them to the model the way `cmd_eval` applies a
+lifted override, and writes them into `DECODE` so they reach the artifact.
+
+The size of what that was hiding, measured on 400 test jets:
+
+| | mean `q(0\|x)` | **sampled `P(n̂ = 0)`** |
+|---|---|---|
+| identity `(1.0, 0.0)` — what the artifact recorded | 0.0521 | **0.0465** |
+| recalibrated `(1.372, −0.511)` | 0.1509 | **0.1559** |
+| truth | — | 0.1675 |
+
+The recalibration reaches `sample`, not just `length_pmf`, so closure_v2's posterior empty
+rate moves by a factor of **3.4** — from badly under-producing empty trees to nearly
+matching truth. That is one of its headline observables, and until now nothing in the
+artifact said which of the two numbers it was.
+
+§7 therefore prints the **complete** set of constants closure_v2 needs, each tagged
+`CHANGE` or `already right` with its provenance, rather than the two the plan named. The
+other one the plan missed: `EMPTY_THRESHOLD` defaults to `None`, which rate-matches `tau`
+on the very sample it reports on — circular in exactly the way §6 is careful not to be.
+The frozen `tau = 0.10344` is what makes it a measurement.
 
 **Support and validity** (§8). Truth and identity(x) both sit at exactly 0 out-of-window,
 0 soft-drop violation, 0 `k_t`-floor violation over 137 353 and 168 521 emissions — the
