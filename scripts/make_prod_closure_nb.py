@@ -175,6 +175,42 @@ assert (abs(float(_under["length_temperature"]) - LENGTH_TEMPERATURE) < 1e-9
     f"({LENGTH_TEMPERATURE}, {LENGTH_TILT}). A tau is a quantile of q(0|x); on a "
     f"different scale it cuts in the wrong place."
 )
+
+# The SAME rule for the sampling-time continue temperature (docs/PLAN_prod_test_v1.md
+# WP-B.2/WP-D.4). It is fitted by matching a held-out N-marginal mean, so it is as
+# scale-dependent as tau is: a T fitted on the training-val split and applied to a test
+# file whose N-marginal has drifted is measuring transfer, and must SAY so rather than be
+# quoted as a fit. Absent from the artifact means "never fitted", which is fine only as
+# long as the notebook is not about to apply one.
+_ct = _M.get("continue_temperature")
+_CONTINUE_TEMPERATURE = float((_ct or {}).get("value", 1.0))
+if _CONTINUE_TEMPERATURE != 1.0:
+    assert _ct is not None and _ct.get("fitted_under") is not None, (
+        f"this notebook would apply continue_temperature={_CONTINUE_TEMPERATURE} with no "
+        f"record of what it was fitted under. Like tau, it is fitted against a specific "
+        f"N-marginal; without its provenance it cannot be applied."
+    )
+    print(f"    {'CONTINUE_TEMPERATURE':<20} = {_CONTINUE_TEMPERATURE!r}"
+          f"   (fitted under {_ct['fitted_under']})")
+
+# The `ln z` head this artifact was produced by. The support audit's zeros mean two
+# different things — "the head cannot leave the interval" under `physical`, "it happened
+# not to" under `legacy` — so a closure report that names one while the checkpoint carries
+# the other is describing a model that does not exist.
+_ART_LNZ = _M.get("lnz_support")
+if _ART_LNZ is not None:
+    from omegaconf import OmegaConf as _OC
+
+    from h2p_rsd_junipr.train.checkpoint import load_for_inference as _lfi
+    _ckpt_lnz = str(_OC.select(_OC.create(_lfi(str(_IN["CKPT_PATH"]),
+                                               map_location="cpu")["config"]),
+                               "model.lnz_support") or "legacy")
+    assert _ckpt_lnz == str(_ART_LNZ), (
+        f"the artifact was written for lnz_support={_ART_LNZ!r} but the checkpoint it "
+        f"names carries {_ckpt_lnz!r}. The support audit and every ln z panel below mean "
+        f"different things under the two heads (docs/PLAN_prod_test_v1.md WP-A)."
+    )
+    print(f"    {'LNZ_SUPPORT':<20} = {_ckpt_lnz!r}")
 '''
 
 # Per-variant: which extra substitutions apply, and the one paragraph of the title cell

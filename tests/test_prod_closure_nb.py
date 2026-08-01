@@ -110,6 +110,16 @@ def test_the_parameter_cell_changes_exactly_the_five_settings(tag):
         "the notebook must check that EMPTY_THRESHOLD was fitted at the (T, tilt) it is "
         "about to apply; otherwise the cut lands in the wrong place with nothing to say so"
     )
+    # ...and the same discipline for every other fitted inference-layer scalar
+    # (docs/PLAN_prod_test_v1.md WP-D.4). `continue_temperature` is fitted against a
+    # specific N-marginal, so applying one without its provenance repeats the tau bug.
+    assert "continue_temperature" in cell, (
+        "a fitted continue_temperature must not be applied without a fitted_under record "
+        "— the same failure tau had"
+    )
+    # the ln z head the artifact was written for must match the checkpoint it names: the
+    # support audit's zeros mean different things under `legacy` and `physical`
+    assert "lnz_support" in cell
     # the guards that catch a v2 default changing underneath this variant
     assert 'MBR_BACKEND != "surrogate"' in cell
     assert "REQUIRE_TRUTH_SPLITTING is False" in cell
