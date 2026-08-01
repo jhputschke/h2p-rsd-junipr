@@ -273,29 +273,36 @@ def build(run_root: Path) -> str:
     P = L.append
 
     P("## Arms\n")
-    P("| arm | model | encoder | `lnz_support` | aux | held-out NLL/jet | eval jets |")
-    P("|---|---|---|---|---:|---:|---:|")
+    P("| arm | model | encoder | `lnz_support` | `q(N\\|x)` head | aux | "
+      "best val NLL/jet | eval jets |")
+    P("|---|---|---|---|---|---:|---:|---:|")
+    from omegaconf import OmegaConf
+
     for arm, e in arms.items():
         m = e["metrics"]
         cfgf = e["dir"] / "config.yaml"
-        sup, nll = "?", None
+        sup, n_aux, nhead, nll = "?", None, "?", None
         if cfgf.is_file():
-            from omegaconf import OmegaConf
-
             cfg = OmegaConf.load(cfgf)
             sup = str(OmegaConf.select(cfg, "model.lnz_support") or "legacy")
+            aux = OmegaConf.select(cfg, "encoder.aux_features")
+            n_aux = len(aux) if aux is not None else None
+            nhead = "yes" if OmegaConf.select(cfg, "model.use_multiplicity_head") else "no"
         metricsf = e["dir"] / "metrics.csv"
         if metricsf.is_file():
             rows = [r for r in metricsf.read_text().splitlines()[1:] if r]
             if rows:
                 nll = min(float(r.split(",")[3]) for r in rows)
-        n_aux = len(_get(m, "data", {}).get("overrides", {})) or None
+        # `!` on any arm whose ln z normalization differs from the base arm's
         mark = "" if sup == "physical" else " !"
-        P(f"| `{arm}` | {m.get('model')} | {m.get('encoder')} | `{sup}` | "
-          f"{n_aux or '-'} | {_fmt(nll, '.4f')}{mark} | {_get(m, 'data.n_eval_jets')} |")
+        P(f"| `{arm}` | {m.get('model')} | {m.get('encoder')} | `{sup}` | {nhead} | "
+          f"{'-' if n_aux is None else n_aux} | {_fmt(nll, '.4f')}{mark} | "
+          f"{_get(m, 'data.n_eval_jets')} |")
     P("")
-    P("`!` marks an NLL that is **not comparable** to the rows above it: a different "
-      "`ln z` normalization shifts NLL/jet by a constant unrelated to fit quality.")
+    P("`!` marks an NLL that is **not comparable** to the rows without it: a different "
+      "`ln z` normalization shifts NLL/jet by a constant unrelated to fit quality. "
+      "NLL *is* comparable between the explicit-`q(N|x)` and continue/stop arms — both "
+      "are normalized densities over the same space — as long as their `ln z` heads match.")
     P("")
 
     base_arm = next((a for a in arms if _arm_family(a) == "v1_base"), None)

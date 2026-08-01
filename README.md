@@ -307,6 +307,24 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt \
 - **TARP** expected coverage (Lemos et al., arXiv:2302.03026) on tree-valued posteriors
   under the perturbative-Lund EMD — a *joint* test in the physics metric.
 
+Two more, added by the v1 production test and off by default
+(`experiment.support_audit=true experiment.exposure_diagnostic=true`):
+
+- **the support audit** — window / soft-drop / `z > ½` / `k_t`-floor violation rates of the
+  sampled posterior, **scored against a hard zero** with the truth as the control. These
+  are generator boundaries, so a non-zero rate is a bug, and it is a *support* error that
+  no calibration statistic can see.
+- **the multiplicity diagnostics** — `⟨N⟩` on the full population and on the truth-nonempty
+  one (the latter biased low by construction), plus SBC-on-N against its **own simulated
+  null**, because `N` is discrete and χ²(9) is the null for a continuous rank.
+
+**A statistic is only as good as its null.** Three of the ones here do not have the null
+they appear to: SBC on a discrete `N` (use `exposure_diagnostic`), TARP's asymptotic
+`1.36/√n` floor (use `tarp_null_reps`, and note it is too wide to be useful below ~1000
+jets), and a ψ resultant quoted without its `√(π)/2√n` uniform floor. Each is now reported
+against a null recomputed at the run's own size — see
+[`docs/CONFIGURATION.md` §8](docs/CONFIGURATION.md#8-experiment--evaluation-suite).
+
 Walkthrough on real PYTHIA data:
 [`notebooks/calibration_v2_walkthrough.ipynb`](notebooks/calibration_v2_walkthrough.ipynb).
 Reference: [`docs/CONFIGURATION.md` §8](docs/CONFIGURATION.md#8-experiment--evaluation-suite).

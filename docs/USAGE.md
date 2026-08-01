@@ -548,14 +548,47 @@ How to read them:
 - **TARP** — expected coverage of the *whole tree* under the perturbative-Lund EMD.
   `ECP(0.68) = 0.651` reads directly as "at 68% credibility the posterior covered 65% of
   the time". **The sign is the diagnosis**: below the diagonal ⇒ over-confident, above ⇒
-  over-dispersed. `tarp_max_dev` is a sup-norm CDF deviation — a KS statistic — so it is
-  quoted against its `1.36/√n` null floor: at 300 jets anything under 0.079 is a pass, not
-  a small failure. Needs the `[mbr]` extra and costs `closure_jets × (K+1)` EMD solves.
-- **`sbc_chi2_uniform`** is likewise quoted against the 95% point of `χ²(n_rank_bins − 1)`
-  (16.90 at the default 10 bins), because the raw number means nothing without its dof.
+  over-dispersed. `tarp_max_dev` is a sup-norm CDF deviation — a KS statistic — and the
+  `1.36/√n` printed beside it is **asymptotic**. Set `experiment.tarp_null_reps=4000` to
+  get the band recomputed by Monte Carlo at your own `(n, α grid)`; it also reports
+  `floor_ok`, i.e. whether the band is tight enough to mean anything. **At 300 jets it is
+  not** — the recomputed 95% point is 0.073, so a "max dev 0.04, passes" there is a
+  statement about the sample size. At 2000 jets it is 0.028. Needs the `[mbr]` extra and
+  costs `closure_jets × (K+1)` EMD solves. `experiment.tarp_stratify=true` adds the same
+  statistic per Lund quadrant.
+- **`sbc_chi2_uniform`** is quoted against the 95% point of `χ²(n_rank_bins − 1)` (16.90 at
+  the default 10 bins) — and for **SBC on the multiplicity that is the wrong null**. `N` is
+  discrete and typically takes a handful of values, so its mid-rank statistic lands on a
+  handful of atoms and cannot be uniform on `[0,1]` for any model; χ²(9) is the null for a
+  *continuous* rank. Set `experiment.exposure_diagnostic=true` to get it quoted against a
+  simulated null instead — the same statistic when the truth is drawn from `q(N|x)` itself,
+  at your jets and your discreteness. On a real checkpoint that turns "χ² = 216 against 16.9,
+  badly miscalibrated" into "the 88th percentile of its own null, consistent with calibrated".
 
-`eval` writes `eval_metrics.json` and the three figures
-(`calibration_pit_coords.png`, `calibration_tarp.png`, `calibration_by_region.png`)
+Two more diagnostics, added by the v1 production test
+([`docs/PLAN_prod_test_v1.md`](PLAN_prod_test_v1.md)) and off by default:
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt \
+    experiment.support_audit=true experiment.exposure_diagnostic=true \
+    experiment.tarp=true experiment.tarp_null_reps=4000 experiment.tarp_stratify=true
+```
+
+- **`support_audit`** — the window / soft-drop / `z > ½` / `k_t`-floor violation rates of
+  the sampled posterior, **scored** against a hard zero, with the truth series audited
+  beside it as the control. Every boundary is a property of the generator, so a non-zero
+  rate is a bug rather than a finding — and it is a *support* error, which nothing in the
+  calibration block can see. On a checkpoint with `model.lnz_support="legacy"` this is
+  where you find out that 3.9% of its emissions have `z > ½`.
+- **`exposure_diagnostic`** — `⟨N⟩` on the full population *and* on the truth-nonempty one
+  (the second is biased low by construction; see `docs/CONFIGURATION.md` §8), SBC-on-N
+  against its own simulated null, and — for the continue/stop family only — the continue
+  probability at matched depth teacher-forced versus on-policy, which is the exposure-bias
+  probe proper.
+
+`eval` writes `eval_metrics.json` and the figures
+(`calibration_pit_coords.png`, `calibration_tarp.png`, `calibration_by_region.png`, and
+`calibration_pit_by_region.png` when both `pit_coords` and `stratify_regions` are on)
 **beside the checkpoint**. Figures need matplotlib, which is not a core dependency but an
 opt-in extra (`pip install -e ".[plots]"`) — without it you still get the JSON. A worked walkthrough on real PYTHIA data is
 [`notebooks/calibration_v2_walkthrough.ipynb`](../notebooks/calibration_v2_walkthrough.ipynb).

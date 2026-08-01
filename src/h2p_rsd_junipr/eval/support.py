@@ -21,6 +21,16 @@ from, not opinions about the model:
 The truth series is audited beside the posterior in the same pass. It is the control:
 if truth shows a nonzero rate, the audit's own boundaries are wrong and no statement
 about the model follows.
+
+**Two of the four columns cannot fail for the AR family, and that is worth knowing when
+reading a zero.** Its `(ln 1/DeltaR, ln kt)` draw is a cell centre plus a truncated
+offset bounded by half a cell, so it is inside the window — and therefore above the
+`k_t` floor — *by construction*. `kt_floor` is a strict subset of `out_of_window` for
+the same reason. Both are audited anyway, because they are not free for every family
+(`cinn`'s flow has support on all of R^4) and because a geometry change could make them
+bite. The two `ln z` columns are the ones that carry information here — and under
+`model.lnz_support="physical"` they become constructional too, which is the point of
+WP-A and exactly why the audit records `lnz_support` beside the rates.
 """
 
 from __future__ import annotations

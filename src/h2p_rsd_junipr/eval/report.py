@@ -152,6 +152,9 @@ def plot_calibration(metrics: dict, out_dir: Path) -> list[Path]:
         fig, ax = plt.subplots(figsize=(1.5 * len(regions) + 2.2, 0.85 * len(coords) + 2.0))
         im = ax.imshow(np.where(scored, ks, np.nan), cmap="magma_r", aspect="auto",
                        vmin=0.0)
+        # `ks[scored]` is empty when no region clears min_region_n — a real case on a
+        # small tier, and `nanmax` of nothing raises rather than degrading.
+        ks_hi = float(np.nanmax(ks[scored])) if scored.any() else float("inf")
         for i in range(len(coords)):
             for j in range(len(regions)):
                 if not np.isfinite(ks[i, j]):
@@ -162,7 +165,7 @@ def plot_calibration(metrics: dict, out_dir: Path) -> list[Path]:
                 ax.text(j, i, txt + ("" if scored[i, j] else "\n(not scored)"),
                         ha="center", va="center", fontsize=7,
                         color="#333333" if not scored[i, j] else
-                        ("white" if ks[i, j] > 0.6 * np.nanmax(ks[scored]) else "black"))
+                        ("white" if ks[i, j] > 0.6 * ks_hi else "black"))
         ax.set_xticks(range(len(regions)))
         ax.set_xticklabels(regions, rotation=20, fontsize=8)
         ax.set_yticks(range(len(coords)))
