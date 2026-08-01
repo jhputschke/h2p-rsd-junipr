@@ -225,7 +225,13 @@ def main(argv=None) -> int:
                     help="exit non-zero if the committed notebook is stale")
     args = ap.parse_args(argv)
 
-    text = json.dumps(build(), indent=1) + "\n"
+    # ensure_ascii=False, because nbformat writes notebooks as raw UTF-8 and this repo's
+    # prose is full of em dashes. With the default, the generator emits `—` where
+    # every other writer emits the character, so the first save in Jupyter or the first
+    # nbstripout smudge rewrites the file and `--check` goes red on an encoding
+    # difference with no content behind it -- which is exactly the false alarm that
+    # teaches people to ignore this check.
+    text = json.dumps(build(), indent=1, ensure_ascii=False) + "\n"
     if args.check:
         if not OUT.exists():
             print(f"[make_prod_closure_nb] {OUT.name} does not exist")
