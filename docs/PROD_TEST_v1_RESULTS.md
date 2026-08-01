@@ -353,13 +353,53 @@ something v1's grid is designed to move, and G2/G3 are precisely what WP-A addre
 
 ## 6. What is still broken
 
-*Pending.*
+**One defect, seen by three instruments.** The joint tree posterior is too narrow.
+
+| instrument | reading | what it is not |
+|---|---|---|
+| G7 TARP | 0.0335–0.0415 vs a 0.0275 null, signed negative | not the multiplicity: SBC-on-N is consistent with its own null |
+| G4 coverage | leading-cell 68% coverage 0.518–0.540 | not the ⟨N⟩ marginal: that ratio is 0.987–1.008 |
+| G5 attribution | `narrow_soft` 0.344–0.479, with **no** coordinate above its critical value there | not a coordinate head in that quadrant |
+
+Each of the three could individually be explained away; together they cannot. Note what
+the list does *not* contain: any statistic about the multiplicity. v0 read the residue as
+a multiplicity failure because the two statistics that would have said otherwise were
+quoted against nulls they do not have (§1).
+
+**`ln z` is still miscalibrated inside its own support** — 1.05–2.07× its critical value
+after WP-A, concentrated in `wide_soft` at 2.16× on 94% of the emissions. The support half
+of this failure is closed; the shape half is not.
+
+### The triggers that have fired
+
+Plan §12 defers three things *with stated triggers*. Two have now fired, and they are
+recorded here rather than acted on, because acting on them mid-run is exactly what a
+pre-registered plan exists to prevent:
+
+1. **Per-node joint coordinate density** (cINN coords / CFM, `PLAN_UPDATES.md` WP1).
+   Trigger: *"G3 fails on the truncated head."* **Fired** (§4.2). The deeper structural
+   reason the plan gives is worth restating now that the number agrees with it: under the
+   `LundGenerator` conventions `ln z = u + v − ln p_T,sum` holds *exactly*, so
+   coordinate-independence-given-cell is violated by a kinematic identity — and a
+   truncation cannot repair a factorization error, which is precisely the residual shape.
+2. **Monotone rational-quadratic spline on the same interval** (Durkan et al.,
+   arXiv:1906.04032), plan §4.4's pre-authorized escalation for exactly this outcome.
+   **Fired.** It is the cheaper of the two and does not disturb the factorization.
+3. **Full-tree LundNet with secondary-plane sequences** (WP3; Dreyer & Qu,
+   arXiv:2012.08526). Trigger: *"`v1_base` vs `v1_ctrl` shows the secondary columns carry
+   the aux gain."* — see §3; **pending the third `v1_ctrl` seed.**
+
+Nothing in this run was changed in response to any of them.
 
 ## 7. What is not measured
 
 - **PYTHIA vs HERWIG.** Still no `herwig_driver`; the train/test deltas remain the noise
-  floor stand-in, exactly as in v0 §10.
-- **`v1_wide` (`dec_dim = 128`).** The plan lists it as optional; it is not in the grid.
-- **The per-node joint coordinate density.** Deferred with a trigger (plan §12): G3
-  failing on the truncated head, or the region × coordinate PITs showing the
-  independence-given-cell approximation binding.
+  floor stand-in, exactly as in v0 §10. This remains the largest unquantified systematic.
+- **`v1_wide` (`dec_dim = 128`).** The plan lists it as optional; it is not in the grid, so
+  the v0 §8 capacity question — whether the residual under-coverage argues for more decoder
+  capacity — is still open.
+- **Split variance.** The seed band covers initialisation and batch order at a fixed
+  train/val split (§3). Nothing here bounds what a different split would do.
+- **Whether the spline or the joint flow actually closes G3.** Both triggers have fired;
+  neither remedy has been tried. That the support fix halved the failure is evidence about
+  the *cause*, not about either cure.
