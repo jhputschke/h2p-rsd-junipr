@@ -326,3 +326,147 @@ def test_n_candidates_shrinks_candidate_set(batch):
     draws = [[12, 34, 56], [12, 34], [5, 9, 27], [40, 41], [7], [12, 30, 56], []]
     pe = mbr.mbr_select(model, xf, nx, draws=draws, geom=geom, backend="pot", n_candidates=3)
     assert [n.cell for n in pe.nodes] in [list(d) for d in draws[:3]]
+
+
+# ---------------------------------------------------------------------------
+# WP-C of docs/PLAN_prod_test_v1.md: the medoid carries its own sample, and the psi
+# mode is reported only where the head identifies one.
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_medoid_carries_its_own_sampled_coordinates(batch):
+    """The winner's coordinates must be a DRAW, not the head's modes re-attached.
+
+    Pinned two ways, because "it is a sample" is not observable from one number:
+    supplying the coordinates the caller already drew reproduces them EXACTLY in the
+    returned nodes, and drawing them internally does not reproduce the mode."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34, 56], [12, 34], [5, 34, 56], [12, 30, 56]] * 2
+    coords = [model.sample_coordinates(xf, nx, d) for d in draws]
+
+    pe = mbr.mbr_select(model, xf, nx, draws=list(draws), geom=geom, backend="pot",
+                        coords_by_draw=coords)
+    assert pe.coords_source == "sample"
+    win = [list(d) for d in draws].index([n.cell for n in pe.nodes])
+    for t, n in enumerate(pe.nodes):
+        for j, got in enumerate((n.ln_invDelta, n.ln_kt, n.ln_z, n.psi)):
+            assert got == pytest.approx(float(coords[win][t, j]), abs=1e-5), (
+                f"node {t} coordinate {j} is not the supplied draw"
+            )
+    # ...and the modes are a different thing entirely
+    modes = model.describe_sequence(xf, nx, draws[win])
+    assert modes.coords_source == "mode"
+    assert any(abs(a.ln_z - b.ln_z) > 1e-6 for a, b in zip(pe.nodes, modes.nodes))
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_medoid_logprob_is_the_density_of_what_it_returns(batch):
+    """The `logprob` contract: it is the joint log-density OF THE RETURNED
+    CONFIGURATION. Carrying sampled coordinates without re-evaluating the density
+    would leave a number describing a tree nobody was shown."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34, 56], [12, 34], [5, 34, 56]] * 2
+    coords = [model.sample_coordinates(xf, nx, d) for d in draws]
+    pe = mbr.mbr_select(model, xf, nx, draws=list(draws), geom=geom, backend="pot",
+                        coords_by_draw=coords)
+    cells = [n.cell for n in pe.nodes]
+    yraw = torch.tensor([[[n.ln_invDelta, n.ln_kt, n.ln_z, n.psi] for n in pe.nodes]],
+                        dtype=torch.float32)
+    b = {"xf": xf, "nx": nx, "yc": torch.tensor([cells], dtype=torch.long),
+         "ny": torch.tensor([len(cells)]), "yraw": yraw}
+    with torch.inference_mode():
+        assert pe.logprob == pytest.approx(float(model.log_prob(b)[0]), abs=2e-4)
+
+
+def test_kappa_gate_substitutes_a_draw_and_flags_it(batch):
+    """Below `kappa_min_mode` the reported psi is a draw and the node says so; above
+    it the mode is reported unchanged. Driven by pinning kappa on both sides of the
+    bound, so the test does not depend on what an untrained head happens to hold."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    cells = [12, 34, 56]
+    real = model._coord_params
+
+    def pinned(kappa_value):
+        def _params(coord_in):
+            p = list(real(coord_in))
+            p[7] = torch.full_like(p[7], kappa_value)
+            return tuple(p)
+        return _params
+
+    model.kappa_min_mode = 0.5
+    model._coord_params = pinned(5.0)                      # well identified
+    hi = model.describe_sequence(xf, nx, cells)
+    assert [n.psi_identified for n in hi.nodes] == [True] * 3
+    assert hi.n_psi_unidentified == 0
+    assert all(n.kappa == pytest.approx(5.0) for n in hi.nodes)
+    # the mode is deterministic, so two calls agree exactly
+    assert [n.psi for n in hi.nodes] == [n.psi for n in
+                                         model.describe_sequence(xf, nx, cells).nodes]
+
+    model._coord_params = pinned(0.02)                     # v0's measured median kappa
+    torch.manual_seed(1)
+    lo = model.describe_sequence(xf, nx, cells)
+    assert [n.psi_identified for n in lo.nodes] == [False] * 3
+    assert lo.n_psi_unidentified == 3
+    torch.manual_seed(2)
+    again = model.describe_sequence(xf, nx, cells)
+    assert [n.psi for n in lo.nodes] != [n.psi for n in again.nodes], (
+        "a substituted psi must be a DRAW, not a second deterministic value"
+    )
+    model._coord_params = real
+
+
+def test_kappa_gate_off_is_the_unconditional_mode(batch):
+    """`kappa_min_mode = 0.0` is the pinned reference path: the ungated mode, exactly
+    as before WP-C, and deterministic."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru",
+                                     "decode.kappa_min_mode=0.0"]), geom).eval()
+    assert model.kappa_min_mode == 0.0
+    a = model.map_estimate(xf, nx)
+    b = model.map_estimate(xf, nx)
+    assert [n.psi for n in a.nodes] == [n.psi for n in b.nodes]
+    assert all(n.psi_identified is True for n in a.nodes)
+    assert a.logprob == pytest.approx(b.logprob)
+
+
+def test_psi_flag_is_none_for_a_carried_sample(batch):
+    """Mode identifiability is not a question about a draw, so the flag is None there
+    rather than a True/False a reader would act on."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    cells = [12, 34]
+    pe = model.describe_cells(xf, nx, cells)
+    assert pe.coords_source == "sample"
+    assert all(n.psi_identified is None for n in pe.nodes)
+    assert pe.n_psi_unidentified == 0
+    assert all(n.kappa is not None for n in pe.nodes)
+
+
+def test_kappa_gate_default_is_on():
+    from h2p_rsd_junipr.config import decode_params
+
+    assert decode_params(load_config(["model=ar_junipr_v2"]))["kappa_min_mode"] == 0.5
+    m = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), GEOM)
+    assert m.kappa_min_mode == 0.5
+
+
+def test_decode_draws_never_touch_the_sampling_stream(batch):
+    """A point estimate must not change which posterior draws come next.
+
+    The psi gate and the medoid's coordinates are both DRAWS, so routing them through
+    the global RNG would make a run that computed a MAP disagree with one that did not
+    on every sampled number downstream — silently, and only in the numbers, never in a
+    shape. They go through `decode_generator` instead."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+
+    torch.manual_seed(0)
+    plain = model.sample(xf, nx, 32)
+
+    torch.manual_seed(0)
+    model.map_estimate(xf, nx)                    # psi gate fires here
+    model.describe_cells(xf, nx, [12, 34, 56])    # and a coordinate draw here
+    assert model.sample(xf, nx, 32) == plain

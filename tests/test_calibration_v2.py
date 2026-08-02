@@ -454,3 +454,240 @@ def test_experiment_switches_are_schema_checked():
     assert cfg.experiment.tarp is True and cfg.experiment.tarp_refs == 32
     with pytest.raises(ConfigKeyError):     # unknown key rejected at load, as designed
         load_config(["experiment.tarpp=true"])
+
+
+# ---------------------------------------------------------------------------
+# WP-D of docs/PLAN_prod_test_v1.md: support audit, TARP power, region x coordinate PITs
+# ---------------------------------------------------------------------------
+def _v1_model_ds(small_jets, n=40, extra=None):
+    from h2p_rsd_junipr.config import load_config
+    from h2p_rsd_junipr.data.dataset import MatchedLundDataset
+    from h2p_rsd_junipr.geometry import Geometry
+    from h2p_rsd_junipr.models.base import build_model
+
+    cfg = load_config(["model=ar_junipr_v2", "encoder=gru", *(extra or [])])
+    geom = Geometry.from_config(cfg.geometry)
+    torch.manual_seed(0)
+    model = build_model(cfg, geom).eval()
+    jets = small_jets[:n]
+    return model, MatchedLundDataset(jets, geom), jets, geom
+
+
+def test_support_audit_counts_every_boundary():
+    """`violations` on hand-placed points, one per boundary, so a miscounted column
+    cannot hide behind a rate that happens to look plausible."""
+    from h2p_rsd_junipr.eval.support import violations
+    from h2p_rsd_junipr.geometry import Geometry
+
+    geom = Geometry()                       # (0, 6)^2
+    lnz_ok, lnz_lo, lnz_hi = math.log(0.3), math.log(0.05), math.log(0.8)
+    pts = [
+        [3.0, 3.0, lnz_ok, 0.0],            # clean
+        [7.0, 3.0, lnz_ok, 0.0],            # u above the window
+        [3.0, -1.0, lnz_ok, 0.0],           # v below the window == below the kt floor
+        [3.0, 3.0, lnz_lo, 0.0],            # below soft drop
+        [3.0, 3.0, lnz_hi, 0.0],            # z > 1/2
+    ]
+    v = violations(pts, geom, z_cut=0.1, beta=0.0)
+    assert v == {"n": 5, "out_of_window": 2, "kt_floor": 1,
+                 "soft_drop": 1, "z_above_half": 1, "n_at_boundary": 0}
+    # an unknown grooming record must read "unknown", never "zero"
+    u = violations(pts, geom, z_cut=float("nan"), beta=float("nan"))
+    assert u["soft_drop"] == -1 and u["z_above_half"] == -1
+
+
+def test_support_audit_target_is_a_hard_zero(small_jets):
+    from h2p_rsd_junipr.eval.support import run_support_audit
+
+    model, ds, jets, geom = _v1_model_ds(small_jets, n=8)
+    for j in jets:                            # synthetic jets carry no grooming record
+        j["z_cut"], j["beta"], j["kt_floor"] = 0.1, 0.0, 1.0
+    out = run_support_audit(model, ds, jets, geom, torch.device("cpu"),
+                            n_jets=8, K=4, verbose=False)
+    assert out["z_cut"] == 0.1 and out["beta"] == 0.0
+    assert out["posterior"] is not None and out["truth"]["n_emissions"] > 0
+    # `passes` is an equality against zero, not a tolerance
+    assert out["posterior"]["passes"] == (out["posterior"]["max_rate"] == 0.0)
+    assert set(out["posterior"]) >= {"out_of_window", "soft_drop", "z_above_half",
+                                     "kt_floor", "max_rate", "passes"}
+
+
+def test_physical_lnz_head_passes_the_lnz_columns(small_jets):
+    """The WP-A/WP-D.1 join: a truncated `ln z` head cannot produce either violation,
+    so the audit's two `ln z` columns are exactly zero by construction."""
+    from h2p_rsd_junipr.eval.support import run_support_audit
+
+    model, ds, jets, geom = _v1_model_ds(small_jets, n=8,
+                                         extra=["model.lnz_support=physical"])
+    for j in jets:
+        j["z_cut"], j["beta"], j["kt_floor"] = 0.1, 0.0, 1.0
+    out = run_support_audit(model, ds, jets, geom, torch.device("cpu"),
+                            n_jets=8, K=8, verbose=False)
+    p = out["posterior"]
+    assert p["soft_drop"] == 0.0 and p["z_above_half"] == 0.0
+    assert out["lnz_support"] == "physical"
+
+
+def test_tarp_null_band_is_recomputed_at_the_runs_own_size():
+    from h2p_rsd_junipr.eval.calibration import tarp_null_band
+
+    small = tarp_null_band(300, n_reps=4000, seed=0)
+    large = tarp_null_band(2000, n_reps=4000, seed=0)
+    assert small["p95"] > large["p95"], "the null band must tighten with n"
+    # the plan's precondition for quoting the statistic at all
+    assert small["floor_ok"] is False and large["floor_ok"] is True
+    # ...and the MC band is below the asymptotic 1.36/sqrt(n) at these sizes, because
+    # the deviation is evaluated on a finite alpha grid
+    for b in (small, large):
+        assert b["p95"] < b["analytic_floor95"]
+        assert b["mean"] < b["p95"] < b["p99"]
+
+
+def test_tarp_null_band_calibrates_its_own_false_positive_rate():
+    """A 95% point must reject 5% of calibrated runs — no more. Checked by simulation,
+    because the whole purpose of replacing 1.36/sqrt(n) is that its rate was wrong."""
+    import numpy as np
+
+    from h2p_rsd_junipr.eval.calibration import tarp_null_band
+
+    n_jets, n_alpha = 300, 21
+    band = tarp_null_band(n_jets, n_alpha=n_alpha, n_reps=6000, seed=0)
+    rng = np.random.default_rng(99)
+    alpha = np.linspace(0.0, 1.0, n_alpha)
+    f = rng.random((3000, n_jets))
+    dev = np.abs((f[:, None, :] < alpha[None, :, None]).mean(axis=2) - alpha).max(axis=1)
+    rate = float(np.mean(dev > band["p95"]))
+    assert 0.03 < rate < 0.07, f"false-positive rate {rate:.3f}, expected ~0.05"
+
+
+def test_run_tarp_reports_the_band_and_the_quotability_verdict(small_jets):
+    from h2p_rsd_junipr.eval.calibration import run_tarp
+
+    model, ds, _, geom = _v1_model_ds(small_jets, n=12)
+    t = run_tarp(model, ds, geom, torch.device("cpu"), K=6, n_jets=12, n_refs=8,
+                 null_reps=400, stratify=True, min_region_n=4, verbose=False)
+    assert "null_band" in t and t["null_band"]["n_jets"] == 12
+    assert t["tarp_passes_g7"] == (t["null_band"]["floor_ok"]
+                                   and t["tarp_max_dev"] <= t["null_band"]["p95"])
+    # 12 jets can never make the floor: the gate must SAY so rather than pass quietly
+    assert t["tarp_quotable"] is False
+    if "by_region" in t:
+        for e in t["by_region"].values():
+            assert {"tarp_max_dev", "n_jets", "scored"} <= set(e)
+
+
+def test_region_by_coordinate_pit_cross_is_surfaced(small_jets):
+    """The cross already existed nested inside `pit_coords`; gate G5 reads it, so it is
+    flattened to a scannable table with the worst SCORED cell named."""
+    from h2p_rsd_junipr.eval.calibration import run_calibration
+
+    model, ds, _, geom = _v1_model_ds(small_jets, n=40)
+    m = run_calibration(model, ds, geom, torch.device("cpu"), K=8, n_jets=40,
+                        pit_coords=True, stratify_regions=True, min_region_n=5,
+                        verbose=False)
+    cross = m["pit_coords_by_region"]
+    assert set(cross) <= {"du", "dv", "ln_z", "psi"} and cross
+    for v in cross.values():
+        for r, e in v.items():
+            assert r in REGION_LABELS
+            assert 0.0 <= e["ks"] <= 1.0 and e["scored"] == (e["n"] >= 5)
+    worst = m["pit_coords_by_region_worst"]
+    if worst["coord"] is not None:
+        assert worst["ks"] == cross[worst["coord"]][worst["region"]]["ks"]
+        assert cross[worst["coord"]][worst["region"]]["scored"]
+
+
+def test_new_switches_are_all_off_by_default(small_jets):
+    """Every WP-D addition is opt-in: with the switches at their defaults the metric
+    dict gains no key, so published tables stay stable."""
+    from h2p_rsd_junipr.config import experiment_params, load_config
+    from h2p_rsd_junipr.eval.calibration import run_calibration
+
+    exp = experiment_params(load_config([]))
+    assert exp["support_audit"] is False and exp["tarp_stratify"] is False
+    assert exp["tarp_null_reps"] == 0 and exp["exposure_diagnostic"] is False
+    model, ds, _, geom = _v1_model_ds(small_jets, n=8)
+    m = run_calibration(model, ds, geom, torch.device("cpu"), K=4, n_jets=8, verbose=False)
+    for k in ("pit_coords_by_region", "pit_coords_by_region_worst", "tarp", "by_region"):
+        assert k not in m
+
+
+def test_psi_resultant_carries_its_uniform_floor(small_jets):
+    """`|R|` is a norm: it is positive under uniformity too, and its floor moves as
+    `1/sqrt(n)`. Gate G6 compares two rows pooled over very different node counts, so
+    without each row's own floor the ratio is a ratio of noise."""
+    from h2p_rsd_junipr.eval.closure import run_closure
+
+    model, ds, jets, geom = _v1_model_ds(small_jets, n=24)
+    m = run_closure(model, ds, jets, geom, torch.device("cpu"), K=16, n_closure=24,
+                    verbose=False, continuous=True)
+    p = m["psi"]
+    for key in ("truth", "point_estimate", "posterior"):
+        n = p[f"n_nodes_{key}"]
+        if not n:
+            continue
+        assert p[f"resultant_null_{key}"] == pytest.approx(
+            math.sqrt(math.pi) / (2 * math.sqrt(n)), rel=1e-9
+        ), key
+        assert 0.0 <= p[f"rayleigh_p_{key}"] <= 1.0
+    # the null must fall as 1/sqrt(n): the posterior row pools far more nodes than truth
+    if p["n_nodes_posterior"] > p["n_nodes_truth"] > 0:
+        assert p["resultant_null_posterior"] < p["resultant_null_truth"]
+
+
+def test_rayleigh_p_flags_a_genuinely_anisotropic_sample():
+    """The statistic itself, on samples whose answer is known: uniform angles give a
+    large p, concentrated ones a vanishing p."""
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    for n in (200, 2000):
+        uni = rng.uniform(-math.pi, math.pi, n)
+        R = abs(np.exp(1j * uni).sum()) / n
+        assert math.exp(-n * R**2) > 0.01, "a uniform sample was flagged as anisotropic"
+        conc = rng.normal(0.4, 0.5, n)          # a real preferred direction
+        Rc = abs(np.exp(1j * conc).sum()) / n
+        assert math.exp(-n * Rc**2) < 1e-6
+        assert Rc > math.sqrt(math.pi) / (2 * math.sqrt(n))
+
+
+def test_boundary_draws_are_not_counted_as_violations():
+    """A truncated sampler CLAMPS to its bound, and the bound is only representable to
+    float32. A strict comparison then counts a draw sitting exactly ON the soft-drop cut
+    as a crossing of it — 8 in 575 525 on the first trained physical arm, all of them
+    arithmetic. They are reported as `n_at_boundary` instead, and the violation columns
+    use the same `EDGE_TOL` the training-time guard already used.
+
+    The tolerance masks nothing: an unbounded head misses the boundary by O(0.1)."""
+    import numpy as np
+
+    from h2p_rsd_junipr.eval.support import EDGE_TOL, violations
+    from h2p_rsd_junipr.geometry import Geometry
+
+    geom = Geometry()
+    lo, hi = math.log(0.1), math.log(0.5)
+    pts = [
+        [3.0, 3.0, float(np.float32(lo)), 0.0],    # on the bound after a float32 round trip
+        [3.0, 3.0, float(np.float32(hi)), 0.0],    # ditto, upper
+        [3.0, 3.0, lo - 0.5, 0.0],                 # genuinely below
+        [3.0, 3.0, -0.2, 0.0],                     # genuinely above (z = 0.82)
+    ]
+    v = violations(pts, geom, z_cut=0.1, beta=0.0)
+    assert v["soft_drop"] == 1 and v["z_above_half"] == 1, "a real violation was masked"
+    assert v["n_at_boundary"] == 2, "boundary draws must be counted, just not as violations"
+    # a leak is orders of magnitude larger than the tolerance, so the tolerance is inert
+    leak = violations([[3.0, 3.0, lo - 10 * EDGE_TOL, 0.0]], geom, z_cut=0.1, beta=0.0)
+    assert leak["soft_drop"] == 1
+
+
+def test_edge_tolerance_matches_the_training_time_guard():
+    """Two audits of the same boundary must not disagree about which side of it a point
+    lies on. `data.stats.check_lnz_support` uses 1e-6; so does the eval-time audit."""
+    import inspect
+
+    from h2p_rsd_junipr.data import stats
+    from h2p_rsd_junipr.eval.support import EDGE_TOL
+
+    src = inspect.getsource(stats.check_lnz_support)
+    assert f"lo - {EDGE_TOL:g}" in src or "lo - 1e-6" in src
+    assert EDGE_TOL == 1e-6

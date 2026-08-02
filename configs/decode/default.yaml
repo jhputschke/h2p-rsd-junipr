@@ -19,3 +19,17 @@ mbr_beta: 1.0                # ground-distance exponent (1.0 == KMT 1-Wasserstei
 mbr_norm: false              # energyflow weight normalisation; false keeps the empty-tree-never-wins term
 mbr_periodic_phi: false      # wrap the psi column (only when mbr_coords=+psi)
 mbr_phi_col: -1              # psi column index; -1 == last coordinate
+
+# --- length knobs at SAMPLING time (docs/PLAN_prod_test_v1.md WP-B.2) ---
+# `continue_temperature` tempers the CONTINUE/STOP logit: p_cont = sigmoid(logit / T).
+# NOT `cont_temperature` above, which is the softmax temperature on the CELL logits (a
+# historical name — it tempers WHICH cell is emitted, not WHETHER one is). 1.0 is off and
+# bit-identical; sampling only, so per_jet_nll and the beam-search MAP never see it. A
+# no-op for families with an explicit q(N|x) head, where length_temperature is the knob.
+continue_temperature: 1.0
+
+# psi mode identifiability (docs/PLAN_prod_test_v1.md WP-C.2): below this von Mises
+# concentration the psi MODE is the direction of a near-zero resultant, i.e. arbitrary,
+# so a point estimate reports a DRAW there and flags the node. 0.5 is peak/trough ~ e.
+# 0.0 disables the gate (the pinned reference path for the parity harness).
+kappa_min_mode: 0.5

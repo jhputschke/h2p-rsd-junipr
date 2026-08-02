@@ -37,6 +37,20 @@ class LundNode:
     logp_split: float
     logp_coord: float
     logp_cont: float
+    # --- psi identifiability (docs/PLAN_prod_test_v1.md WP-C.2) ----------------
+    # The von Mises concentration this node's psi came from. It is a diagnostic in its
+    # own right, not decoration: at kappa ~ 0 the density is flat and its MODE is the
+    # direction of a near-zero resultant (Mardia & Jupp, *Directional Statistics*,
+    # Wiley 2000), i.e. arbitrary. v0 measured median kappa = 0.022 — peak/trough
+    # 1.04 — while MAP/MBR reported a psi resultant |R| = 0.69 against a truth of
+    # 0.045. A psi panel is unreadable without this column beside it.
+    kappa: float | None = None
+    # Is the reported `psi` an IDENTIFIED mode?
+    #   True  — it is the conditional mode and kappa >= decode.kappa_min_mode.
+    #   False — the mode was rejected as unidentified and a DRAW was substituted.
+    #   None  — the node carries a genuine posterior sample (the MBR medoid), where
+    #           "is the mode identified" is not a question that applies.
+    psi_identified: bool | None = None
 
 
 @dataclass
@@ -52,18 +66,32 @@ class LundPointEstimate:
     # set only by `inference.mbr.mbr_select`; None for MAP/mode estimates. This is
     # NOT a likelihood — never feed it to anything expecting an NLL.
     risk: float | None = None
+    # Where the continuous coordinates came from: "mode" (the staged MAP's head modes)
+    # or "sample" (a genuine draw — what the MBR medoid carries, since the medoid IS a
+    # posterior sample and re-attaching modes forfeits exactly that property).
+    coords_source: str = "mode"
+
+    @property
+    def n_psi_unidentified(self) -> int:
+        """Nodes whose reported psi is a mode the head does not actually identify."""
+        return sum(1 for n in self.nodes if n.psi_identified is False)
 
     def pretty(self) -> str:
         head = (
-            f"MAP groomed shower: {self.multiplicity} primary splittings, "
-            f"log q(y_hat|x) = {self.logprob:.3f}"
+            f"{'MBR' if self.risk is not None else 'MAP'} groomed shower: "
+            f"{self.multiplicity} primary splittings, "
+            f"log q(y_hat|x) = {self.logprob:.3f}   (coordinates: {self.coords_source})"
         )
         rows = [
             f"  [{n.depth}] kt={n.kt:6.2f} GeV  DeltaR={n.delta_R:5.3f}  z={n.z:5.3f}  "
-            f"psi={n.psi:+5.2f}  (ln1/DR={n.ln_invDelta:4.2f}, lnkt={n.ln_kt:4.2f}, "
+            f"psi={n.psi:+5.2f}{'' if n.psi_identified is not False else '*'}  "
+            f"(ln1/DR={n.ln_invDelta:4.2f}, lnkt={n.ln_kt:4.2f}, "
             f"lnz={n.ln_z:5.2f})  logP={n.logp_split + n.logp_coord:+.2f}"
             for n in self.nodes
         ]
+        if self.n_psi_unidentified:
+            rows.append(f"  * psi drawn, not moded: kappa below the identifiability bound "
+                        f"({self.n_psi_unidentified} of {self.multiplicity} nodes)")
         return "\n".join([head, *rows]) if rows else head + "\n  (empty: MAP is immediate stop)"
 
 

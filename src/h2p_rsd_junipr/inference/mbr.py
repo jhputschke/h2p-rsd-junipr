@@ -541,7 +541,7 @@ def _qn_importance_weights(model, xf, nx, draws) -> np.ndarray:
 def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
                lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
                norm=False, periodic_phi=False, phi_col=-1, backend="pot",
-               resample_to_qn=False):
+               resample_to_qn=False, coords_by_draw=None):
     """Sampling-based MBR (Eikema & Aziz, EMNLP 2022): pick the drawn tree of least
     mean perturbative-Lund EMD to the ``K`` draws.
 
@@ -552,7 +552,14 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     ``n_candidates>0`` shrinks the candidate set ``C`` (asymmetric MBR) while the
     expectation still runs over all ``K`` draws. ``resample_to_qn=True`` reweights the
     support to the calibrated ``q(N|x)`` marginal (``_qn_importance_weights``), an
-    opt-in decode-layer exposure-bias correction; off keeps the plain mean risk."""
+    opt-in decode-layer exposure-bias correction; off keeps the plain mean risk.
+
+    The winner keeps **its own** continuous coordinates (docs/PLAN_prod_test_v1.md
+    WP-C.1): ``describe_cells`` draws them, or ``coords_by_draw`` supplies the ones the
+    caller already drew alongside the cells. It used to re-attach the head modes, which
+    threw away the one property that makes a medoid worth reporting — that it is a
+    genuine posterior sample. v0 measured the price: a psi resultant ``|R| = 0.69``
+    against a truth of 0.045, out of a head whose median ``kappa`` is 0.022."""
     if draws is None:
         draws = model.sample_batch(xf, nx, n_samples)
     K = len(draws)
@@ -576,7 +583,12 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     else:
         risk = D.mean(axis=1)
     best = int(np.argmin(risk))
-    winner = draws[cand_idx[best]]
-    pe = model.describe_cells(xf, nx, winner)  # genuine drawn tree -> LundPointEstimate
+    win_idx = cand_idx[best]
+    winner = draws[win_idx]
+    win_coords = None
+    if coords_by_draw is not None and win_idx < len(coords_by_draw):
+        win_coords = coords_by_draw[win_idx]
+    # genuine drawn tree -> LundPointEstimate, carrying its own sampled coordinates
+    pe = model.describe_cells(xf, nx, winner, win_coords)
     pe.risk = float(risk[best])
     return pe

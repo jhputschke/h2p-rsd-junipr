@@ -459,9 +459,54 @@ continuous coordinates) over the parton tree.
 | `max_emissions` | `25` | multiplicity-head width (categorical over `n=0..max_emissions`); only used when `use_multiplicity_head=True`. **Guarded**: see "the support guard" below |
 | `use_cross_attention` | `False` | **v4** ⇒ `True`: the decoder attends to the encoder's *per-node* hadron states instead of only the pooled `e(x)`; `False` is byte-identical to today |
 | `xattn_heads` | `4` | attention heads when `use_cross_attention=True`; must divide `dec_dim` |
+| `lnz_support` | `"legacy"` | `legacy` = the unbounded Normal on `ln z`; `physical` = a truncated normal on the interval the grooming actually leaves. See below |
+| `lnz_zcut` | `0.1` | the file's soft-drop `z_cut`; read only when `lnz_support="physical"` |
+| `lnz_beta` | `0.0` | the file's soft-drop `β`; read only when `lnz_support="physical"` |
 
 **`ar_junipr_v2` vs `ar_junipr_v1`** is exactly `continuous_coords` True vs False — v1 drops
 the coordinate density and is the categorical-cell-only backbone.
+
+#### `lnz_support` — the one coordinate head that was on the wrong space
+
+The coordinate likelihood is `TN(du)·TN(dv)·N(ln z)·vM(ψ)`. Three of those four are on
+bounded or periodic supports; `ln z` was a plain Normal on all of ℝ. It should not have
+been: Soft Drop keeps a splitting only if `z > z_cut (ΔR/R)^β`, and
+`z = min(p_{T1},p_{T2})/(p_{T1}+p_{T2}) ≤ ½` by construction, so
+
+    ln z ∈ ( ln z_cut − β·ln(1/ΔR),  ln ½ ].
+
+On the fielded files (`z_cut = 0.1`, `β = 0`) that is `[−2.3026, −0.6931]`, width `ln 5`,
+and **both endpoints are attained** — the truth is flush against both walls. A Normal there
+necessarily leaks, and production test v0 measured both halves of the leak: PIT KS 0.066
+against a 0.016 critical value, and 0.88% of sampled emissions below the `z_cut` boundary
+the training data never crosses.
+
+`"physical"` puts the same truncated normal on `ln z` that `du`/`dv` already use. The
+sampler, the PIT and the reported mode all inherit the truncation, so the violation rate is
+zero *by construction* rather than by a downstream repair.
+
+`"legacy"` is the default and is bit-identical: no new parameter, no new buffer (the bounds
+are built from the existing `cell_cx`), and `scripts/verify_parity.py` still matches the
+reference v2 script bit-for-bit.
+
+The bound is **cell-conditional, not node-conditional** — evaluated at the `u` inside the
+cell that makes it loosest, `lo = ln z_cut − β·c_x − |β|·half_u`. That keeps the coordinate
+likelihood a product of independent-given-cell factors; a bound reading the node's own drawn
+`u` would couple `ln z` to `du`, which this factorization cannot express. At `β = 0` the two
+coincide exactly; for `β ≠ 0` the residual slack is `|β|·half_u`, and the WP-D support audit
+*measures* what leaks through it rather than assuming.
+
+`(lnz_zcut, lnz_beta)` are config fields because `build_model` sees only the config, but
+they are properties of the **file**. `data.stats.check_lnz_support` runs before training and
+checks two things: that the declared pair matches the jets' own grooming record, and that
+every truth `ln z` lies inside the resulting interval. The second catches a convention error
+— a sign on `β`, an `R ≠ 1` — that matching scalars cannot.
+
+> ⚠️ **NLL is not comparable across the head change.** A different coordinate normalization
+> shifts NLL/jet by a constant that has nothing to do with fit quality. Numbers from a
+> `physical` run are comparable only to other `physical` runs; the bridge to the older
+> record is a `legacy` arm trained on the same data. Never put a `physical` NLL and a
+> `legacy` NLL in the same column.
 
 **`ar_junipr_v3`** is the v2 backbone with `use_multiplicity_head=True`: it factorizes
 `q(y|x) = q(N|x)·q(y|N,x)` with a dedicated categorical multiplicity head (the same head cINN
@@ -645,7 +690,9 @@ The serving layer reads the checkpoint's decode config. Source:
 | `topk_cells` | `6` | MAP | candidate cells expanded per beam step |
 | `max_emissions` | `25` | MAP + posterior | hard cap on decoded / sampled tree length |
 | `n_posterior_samples` | `500` | posterior | default number of posterior draws |
-| `cont_temperature` | `1.0` | posterior | softmax temperature on the cell logits at **sampling** time (exposure-bias remedy); `>1` flattens, `<1` sharpens |
+| `cont_temperature` | `1.0` | posterior | softmax temperature on the **cell** logits at **sampling** time; `>1` flattens, `<1` sharpens. A historical name — it tempers *which* cell is emitted, not *whether* one is. For the length knob see `continue_temperature` |
+| `continue_temperature` | `1.0` | posterior | temperature on the **continue/stop** logit at sampling: `p_cont = σ(logit/T)`. `>1` pulls `p_cont` toward ½, which *lengthens* trees where the head is confident to stop and *shortens* them where it is confident to continue. Sampling only; `1.0` = off and bit-identical. **No-op** for families with an explicit `q(N\|x)` head |
+| `kappa_min_mode` | `0.5` | point estimate | below this von Mises concentration the ψ **mode** is not identified, so a point estimate reports a **draw** there and flags the node `psi_identified=False`. `0.5` is peak/trough ≈ e; `0.0` disables the gate |
 | `min_emissions` | `1` | MAP | **hard floor** on MAP length — the "mincut" (never the unphysical empty tree) |
 | `length_penalty` | `0.0` | MAP | GNMT `score/len**α` at final beam rank; counters the brevity bias; `0` = off |
 | `length_floor_quantile` | `0.0` | MAP | **learned per-jet floor** at the α-quantile of `P(n|x)`; `0` = off |
@@ -836,8 +883,42 @@ Controls the §8 closure / calibration / systematic run (`h2p-rsd-junipr eval`).
 | `tarp_refs` | `100` | size of the TARP reference pool |
 | `tarp_reference` | `"pooled"` | `pooled` (posterior draws of other jets) or `prior` (their truth trees) |
 | `closure_continuous` | `False` | leading-emission distances **off** the cell grid, via `sample_coordinates` |
+| `exposure_diagnostic` | `False` | the WP-B block: `<N>` on **both** populations, SBC-on-N against its own simulated null, and the teacher-forced vs on-policy continue probability by depth |
+| `support_audit` | `False` | window / soft-drop / `z>½` / `k_t`-floor violation rates of the sampled posterior, **scored** against a hard zero (gate G2) |
+| `tarp_null_reps` | `0` | Monte-Carlo reps for the TARP null band at this run's own `(n_jets, α grid)`; `0` keeps only the asymptotic `1.36/√n` floor |
+| `tarp_stratify` | `False` | TARP additionally per Lund quadrant |
 
 Trade cost vs. precision with `closure_jets` and `n_closure_samples`.
+
+### The three references that are not what they look like
+
+Each of these was a *reference* that failed, not a model that did — and each cost a
+conclusion in production test v0 before it was found. They are grouped because the
+mistake is the same one three times: quoting a statistic against a null it does not have.
+
+**SBC-on-N has no χ²(9) null.** `N` is discrete and, at the fielded grooming, takes a
+handful of values, so its mid-rank statistic lands on a handful of atoms and cannot be
+uniform on `[0,1]` **for any model**. v0 read χ² = 107 against the χ²(9) 95% point of
+16.90 and concluded the multiplicity was broken. With `exposure_diagnostic=True` the same
+statistic is quoted against its own simulated null — the truth redrawn from `q(N|x)`
+itself, same jets, same discreteness — which on the v0 checkpoint puts the observed value
+at the **88th percentile of its own null**, i.e. consistent with calibrated. The χ²(9)
+reference is still reported, labelled as the continuous-rank one it is.
+
+**TARP's `1.36/√n` floor is asymptotic, and at n = 300 it is 0.079.** A band that wide
+cannot detect a 5% miscalibration, so "max dev 0.037, inside the band" was a statement
+about the sample size. `tarp_null_reps>0` recomputes the band by Monte Carlo at the run's
+own `(n, α grid)` and reports `floor_ok` — whether the band is tight enough for the
+statistic to be quotable at all. At n = 300 the recomputed 95% point is 0.073 (**not**
+quotable); at n = 2000 it is 0.028.
+
+**`mean_mult_posterior` used to be a mean over a different set of jets than
+`mean_mult_true`, and the truth-nonempty version of it is biased by construction.**
+Selecting jets by `N_true ≥ 1` and comparing them to `E_q[N|x]` is regression to the mean:
+the deficit is negative even for a perfect posterior. The closure metrics now report the
+**full-population** pair (`mean_mult_posterior`, `mean_mult_ratio` — what gate G4 reads)
+and the truth-selected pair beside it, flagged. On the v0 checkpoint the two read 0.977
+and 0.871 respectively; only the first is a measurement of the model.
 
 ### The mandatory validation — and why SBC-on-N is not it
 
@@ -1169,6 +1250,76 @@ Applies a softmax temperature to the cell logits during **ancestral sampling** o
 posterior, not the MAP). It is the documented exposure-bias remedy for an over-counted
 posterior multiplicity: `>1` flattens the cell distribution (more diverse draws), `<1`
 sharpens it. It never touches the trained likelihood.
+
+> **`cont_temperature` and `continue_temperature` are different knobs.** The first is a
+> softmax temperature on the **cell** logits — it changes *which* emission is drawn. The
+> second (below) is a temperature on the **continue/stop** logit — it changes *how many*
+> are drawn. The names are close because the first predates the second; the code paths
+> share nothing.
+
+### `continue_temperature` — the length knob for the continue/stop family
+
+`p_cont = σ(logit / T)` at sampling only. `T > 1` pulls every continue probability toward
+½: where the head is confident to **stop** that lengthens trees, and where it is confident
+to **continue** it shortens them, so the direction of a fit depends on which side of ½ the
+head sits — do not assume "hotter is longer".
+
+It is an inference-layer object and follows the `tau` pattern from production test v0: fit
+on **training-val** jets with `inference.length.fit_continue_temperature`, record the value
+*and* its `fitted_under` description in the artifact, then apply it **frozen** to the test
+file. That bookkeeping is not ceremony — v0's `tau` was fitted on one scale and applied on
+another, which left the ranking intact and the cut in the wrong place, and the empty rate
+went from 1.07× to 2.83× off.
+
+```python
+from h2p_rsd_junipr.inference.length import fit_continue_temperature
+
+def mean_n(T):                       # measured on TRAINING-VAL jets
+    model.continue_temperature = T
+    return float(np.mean([len(d) for jet in val for d in model.sample(*jet, 200)]))
+
+T, info = fit_continue_temperature(mean_n, target_mean_n=val_truth_mean_N)
+assert info["bracketed"], info        # no root in [0.2, 5] => the knob cannot get there
+```
+
+It is a **no-op** for `ar_junipr_v3`/`v4`, `cinn`, `diffusion` and `cfm`: they draw `N`
+from an explicit `q(N|x)` and take no per-step continue decision. `build_model` says so out
+loud, and `eval_metrics.json` lists it under `decode_inert`. Their length knobs are
+`length_temperature` / `length_tilt`.
+
+### `kappa_min_mode` — when the ψ mode is not a prediction
+
+The azimuth head is a von Mises `vM(μ, κ)`. As `κ → 0` the density is **flat**, and its
+mode is the direction of a near-zero resultant (Mardia & Jupp, *Directional Statistics*,
+Wiley 2000) — a number the head does not actually determine. Production test v0 measured a
+median `κ = 0.022` (peak/trough 1.04) while the point estimate reported a ψ resultant
+`|R| = 0.69` against a truth of 0.045: a 17.5× pooled row, entirely manufactured by
+reporting an unidentified mode as though it were a prediction.
+
+Below `kappa_min_mode` the point estimate carries a **draw** from that same von Mises and
+flags the node `psi_identified = False`; above it, the mode, flagged `True`. The default
+`0.5` is peak/trough `e^{2κ} ≈ e`. `0.0` restores the ungated mode (the pinned reference
+path for the parity harness). The per-node `κ` is recorded on every node, because a ψ panel
+is unreadable without it.
+
+Two consequences worth stating:
+
+- **A point estimate with unidentified nodes is stochastic in ψ.** That is the honest
+  representation of "flat density", not a defect. The draw comes from a generator private
+  to the decode layer (`PosteriorModel.decode_generator`), so it never advances the global
+  RNG — taking a point estimate cannot change which posterior draws a later section gets.
+- `eval_metrics.json` reports `closure.psi.frac_psi_unidentified` beside the resultants.
+
+### The MBR medoid carries its own coordinates
+
+`mbr_select` returns a genuine posterior **sample**, and it now keeps that sample's own
+continuous coordinates for **all four** of them (`coords_source = "sample"`). It used to
+re-attach the head modes, which forfeited exactly the property that makes a medoid worth
+reporting. `map_estimate` is unchanged — it is still the staged mode decode — but it is a
+**diagnostic**, not a headline: the argmax of a high-entropy sequence posterior is an
+estimator for a loss nobody is measuring (Stahlberg & Byrne, arXiv:1908.10090; Eikema &
+Aziz, arXiv:2005.10283). The decode headline is MBR; the population headline is the
+decode-free posterior series.
 
 ---
 

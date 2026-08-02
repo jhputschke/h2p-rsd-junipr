@@ -181,18 +181,22 @@ def test_decode_config_has_new_fields():
 def test_decode_params_full():
     dec = decode_params(load_config([]))
     assert set(dec) == {"beam_width", "topk_cells", "max_emissions", "n_posterior_samples",
-                        "cont_temperature", "min_emissions", "length_penalty",
+                        "cont_temperature", "continue_temperature",
+                        "min_emissions", "length_penalty",
                         "length_floor_quantile", "length_temperature", "length_tilt",
                         "empty_threshold",
                         "point_estimator", "mbr_backend",
                         "mbr_n_candidates", "mbr_lnkt_cut", "mbr_weight", "mbr_coords",
                         "mbr_R", "mbr_beta", "mbr_norm", "mbr_periodic_phi", "mbr_phi_col",
-                        "mbr_resample_to_qn"}
+                        "mbr_resample_to_qn", "kappa_min_mode"}
     assert dec["min_emissions"] == 1
     assert dec["length_floor_quantile"] == pytest.approx(0.0)
     assert dec["empty_threshold"] == pytest.approx(0.0)  # the gate is opt-in
     assert dec["length_temperature"] == pytest.approx(1.0)  # recalibration is opt-in
     assert dec["length_tilt"] == pytest.approx(0.0)
+    assert dec["continue_temperature"] == pytest.approx(1.0)  # sampling-only, opt-in
+    # the psi mode-identifiability gate is ON by default (docs/PLAN_prod_test_v1.md WP-C.2)
+    assert dec["kappa_min_mode"] == pytest.approx(0.5)
     assert dec["point_estimator"] == "map" and dec["mbr_backend"] == "pot"
     assert dec["mbr_lnkt_cut"] is None  # None default preserved through the tolerant read
 

@@ -58,6 +58,39 @@ class PosteriorModel(nn.Module, ABC):
     # shows (empirical/predicted = 1.90, 0.96, 0.93, 0.80, 0.68 at n = 0..4); the tilt is
     # what moves mass between short and long trees. 0.0 is off.
     length_tilt: float = 0.0
+    # The continue/stop family's counterpart to `length_temperature`: a temperature on the
+    # CONTINUE logit, applied at SAMPLING only (docs/PLAN_prod_test_v1.md WP-B.2). It moves
+    # the lengths `sample` draws and nothing else — not `log_prob`, not `per_jet_nll`, not
+    # the beam-search MAP, which read the head directly. 1.0 is off and bit-identical (the
+    # branch is skipped, not divided by one). A no-op for families with an explicit q(N|x)
+    # head, which take no per-step continue decision.
+    continue_temperature: float = 1.0
+    # Below this von Mises concentration the psi MODE is not identified, so a point
+    # estimate reports a DRAW and flags the node (docs/PLAN_prod_test_v1.md WP-C.2). The
+    # class default 0.0 is the ungated mode — the pre-WP-C behaviour — and `build_model`
+    # overrides it from `decode.kappa_min_mode`, which defaults to 0.5.
+    kappa_min_mode: float = 0.0
+
+    def decode_generator(self, device) -> torch.Generator:
+        """A `torch.Generator` private to the DECODE layer, one per device.
+
+        Two decode-layer draws exist — the psi substituted below `kappa_min_mode`, and
+        the MBR medoid's own coordinates — and neither may consume the global RNG. If
+        they did, taking a point estimate would change which posterior draws the NEXT
+        jet gets, so a run that computed a MAP and one that did not would disagree on
+        every sampled number downstream. (That is not hypothetical: it is what
+        `tests/test_shared_draws.py` caught the moment the psi gate was added.)
+
+        Seeded deterministically and advanced per call, so a decode is reproducible
+        within a process and the sampling stream is untouched. Pass an explicit
+        `generator=` to override."""
+        key = str(device)
+        gens = self.__dict__.setdefault("_decode_generators", {})
+        if key not in gens:
+            g = torch.Generator(device=device)
+            g.manual_seed(0)
+            gens[key] = g
+        return gens[key]
 
     def recalibrated_n_logits(self, z):
         """`z / T + tilt * n` — post-hoc affine recalibration of the multiplicity logits.
@@ -123,7 +156,7 @@ class PosteriorModel(nn.Module, ABC):
     def map_estimate(self, xf: torch.Tensor, nx: torch.Tensor) -> LundPointEstimate:
         ...
 
-    def sample_coordinates(self, xf, nx, cells) -> torch.Tensor | None:
+    def sample_coordinates(self, xf, nx, cells, *, generator=None) -> torch.Tensor | None:
         """`(L, 4)` continuous coordinates drawn from `q(coords | cells, x)` for one
         jet, in `features.node_raw` column order `(ln 1/DeltaR, ln kt, ln z, psi)` —
         or **None** when the family has no continuous coordinate density.
@@ -138,14 +171,40 @@ class PosteriorModel(nn.Module, ABC):
 
         Returning None and setting `has_continuous_coords = False` is a legitimate
         implementation — `ar_junipr_v1` is exactly that model — but the two must agree.
+
+        `generator` is honoured where the family's draw is a single `torch` call it can
+        be threaded into; a family whose sampler goes through an ODE or a reverse
+        diffusion accepts it and draws from the global stream, which every caller must
+        assume anyway (`train.trainer.seed_everything` is the reproducibility contract).
         """
         return None
 
-    def describe_cells(self, xf, nx, cells) -> LundPointEstimate:
+    def sample_coordinates_many(self, xf, nx, draws, *, generator=None) -> list:
+        """`sample_coordinates` for MANY cell chains of ONE jet at once: a list of
+        `(L_k, 4)` tensors (or `None` per entry, same meaning as the single hook).
+
+        The batched sibling exists because every consumer of the coordinate half of a
+        posterior calls it once **per draw** — `run_closure(continuous=True)` and
+        `scripts/leading_estimators.collect` both do `K` calls for one jet — and for a
+        family whose coordinate head is teacher-forced on the cells (AR) each of those
+        calls re-runs `encode()` and `xattn_kv()` on the same jet, producing an
+        identical tensor K times. That was 67 of the 109 min of
+        `notebooks/prod_test_v0.ipynb` (docs/PLAN_prod_test_speedup.md §2).
+
+        The default implementation loops the per-draw hook, so a family that does not
+        override it keeps exactly today's behaviour and today's RNG stream. An override
+        is free to reorder RNG consumption — the draws are still draws from the same
+        conditional, but they are NOT the same draws, so consumers must not claim
+        bit-comparability across the switch."""
+        return [self.sample_coordinates(xf, nx, list(d), generator=generator) for d in draws]
+
+    def describe_cells(self, xf, nx, cells, coords=None, *, generator=None
+                       ) -> LundPointEstimate:
         """One posterior draw (a cell chain) -> LundPointEstimate: the model's joint
         log-density of that chain, with each node's coordinates drawn from
         `sample_coordinates` when the family has them and placed at the Lund-cell
-        centre when it does not.
+        centre when it does not. `coords` — an `(L, 4)` table the caller already drew
+        alongside the cells — is carried verbatim instead of drawing again.
 
         The MBR winner (`inference.mbr.mbr_select`) is a genuine drawn tree, so a draw
         from `q(coords | cells, x)` is the coordinate-space completion of it. AR still
@@ -162,7 +221,14 @@ class PosteriorModel(nn.Module, ABC):
         cells = [int(c) for c in cells]
         L = len(cells)
         dev = xf.device
-        drawn = self.sample_coordinates(xf, nx, cells) if L else None
+        if coords is not None:
+            drawn = torch.as_tensor(coords, device=dev).reshape(L, 4) if L else None
+        elif L:
+            # the decode stream, not the global one — see `decode_generator`
+            g = self.decode_generator(dev) if generator is None else generator
+            drawn = self.sample_coordinates(xf, nx, cells, generator=g)
+        else:
+            drawn = None
         nodes, rows = [], []
         for t, c in enumerate(cells):
             if drawn is None:
@@ -192,7 +258,8 @@ class PosteriorModel(nn.Module, ABC):
             logprob = float(self.log_prob(batch)[0])
         return LundPointEstimate(nodes=nodes, logprob=logprob, multiplicity=L)
 
-    def map_or_mbr(self, xf, nx, *, draws=None, **decode) -> LundPointEstimate:
+    def map_or_mbr(self, xf, nx, *, draws=None, coords_by_draw=None, **decode
+                   ) -> LundPointEstimate:
         """Point estimate dispatched by ``decode['point_estimator']``: ``"map"``
         (default) -> ``map_estimate``; ``"mbr"`` -> minimum-Bayes-risk selection over
         posterior draws (`inference.mbr.mbr_select`, reusing ``draws`` when given).
@@ -218,6 +285,7 @@ class PosteriorModel(nn.Module, ABC):
             from ..inference.mbr import mbr_kwargs_from_decode, mbr_select
 
             return mbr_select(self, xf, nx, draws=draws, geom=self.geometry,
+                              coords_by_draw=coords_by_draw,
                               **mbr_kwargs_from_decode(decode))
         return self.map_estimate(xf, nx, **decode)
 
@@ -258,6 +326,13 @@ def build_model(cfg, geometry: Geometry) -> PosteriorModel:
               f"{name!r} — it has no multiplicity head, so its length belief is the "
               f"sampler histogram and tempering it would decouple the two.")
     model.length_temperature, model.length_tilt = t, tilt
+    ct = float(dec["continue_temperature"])
+    if ct != 1.0 and not hasattr(model, "cont_head"):
+        print(f"[model] WARNING: decode.continue_temperature={ct:g} is a NO-OP for "
+              f"{name!r} — it has an explicit q(N|x) head and takes no per-step continue "
+              f"decision. decode.length_temperature/length_tilt is this family's length knob.")
+    model.continue_temperature = ct
+    model.kappa_min_mode = float(dec["kappa_min_mode"])
     return model
 
 

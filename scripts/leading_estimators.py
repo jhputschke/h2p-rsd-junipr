@@ -67,11 +67,16 @@ def _leading(arr):
     return None if (a.ndim != 2 or not a.shape[0]) else a[int(np.argmax(a[:, 1])), :2]
 
 
-def collect(model, val_ds, jets, geom, device, n_jets, K, n_cont):
+def collect(model, val_ds, jets, geom, device, n_jets, K, n_cont, draws_by_jet=None):
     """One pass. Every estimator for a jet shares that jet's draws, so all the
     comparisons below are exactly paired — but the RNG stream differs from a run
     without the continuous branch, so absolute numbers are not comparable across
-    scripts. Ratios are."""
+    scripts. Ratios are.
+
+    `draws_by_jet` extends that sharing ACROSS callers: a notebook that already drew
+    K posterior samples per jet for another section passes them here rather than
+    paying for a second pass (docs/PLAN_prod_test_speedup.md §4). None re-samples,
+    which is what the CLI below does."""
     cell_rows, cont_rows = [], []
     with torch.inference_mode():
         for i in range(min(n_jets, len(val_ds))):
@@ -81,7 +86,7 @@ def collect(model, val_ds, jets, geom, device, n_jets, K, n_cont):
             ly = leading_emission_cell(item["yc"].tolist(), geom)
             x_cells = geom.seq_cells(jets[i]["x"][0], jets[i]["x"][1]).tolist()
 
-            draws = model.sample_batch(xf, nx, K)
+            draws = model.sample_batch(xf, nx, K) if draws_by_jet is None else draws_by_jet[i]
             lead = [c for c in (leading_emission_cell(d, geom) for d in draws) if c is not None]
             if ly is None or not lead:
                 continue                       # the selection run_closure applies
@@ -101,10 +106,9 @@ def collect(model, val_ds, jets, geom, device, n_jets, K, n_cont):
             if len(cont_rows) >= n_cont:
                 continue
             pts = []
-            for d in draws:
-                if not len(d):
-                    continue
-                c = model.sample_coordinates(xf, nx, list(d))
+            # one batched call per jet, not one per draw: the per-draw hook re-encodes
+            # the same jet K times (docs/PLAN_prod_test_speedup.md §2)
+            for c in model.sample_coordinates_many(xf, nx, [list(d) for d in draws if len(d)]):
                 if c is None:
                     return np.array(cell_rows), np.zeros((0, 5))   # no coordinate density
                 p = _leading(c.detach().cpu().double().numpy().reshape(-1, 4))
