@@ -100,6 +100,11 @@ from .base import PosteriorModel, register_model
 # already blocks the head's own gradient at these positions.
 _NO_ANCHOR = -1e9
 
+# Cap on the elements of `edit_v2`'s per-block free-cell head, `(K, n_col, L, n_cells)`.
+# ~16M float32 is ~64 MB, which is the scale at which chunking stops mattering and well
+# under what a long-tailed jet at K = 200 would otherwise ask for (~450 MB).
+_MAX_BLOCK_ELEMS = 16_000_000
+
 
 def _inv_softplus(y: float) -> float:
     return math.log(math.expm1(y))
@@ -727,6 +732,153 @@ class EditTransducer(PosteriorModel):
         zero = torch.zeros_like(t_idx)
         return _EmitParams(*[f[0, i_idx, t_idx if f.shape[2] > 1 else zero] for f in p])
 
+    def _coord_lattice(self, xf, nx, yc):
+        """Everything `q(coords | cells, x)` needs for a `(B, L)` block of cell chains on
+        ONE jet: `(stay, edge, p, log_mass, log_anch, nx0)`.
+
+        Deterministic — it consumes no RNG — which is what lets the single-draw
+        `sample_coordinates` and the batched `sample_coordinates_many` share it without
+        the batched path changing the single one's draws. Factored rather than duplicated
+        for the reason `ARJunipr._coord_params_padded` records: two copies of this drift,
+        and only a distributional test would notice.
+
+        `B == 1` reproduces the pre-batching arithmetic exactly. For `B > 1` the two
+        stages differ in what has to be broadcast: `edit_v1`'s emission block does not
+        depend on the chain at all (`T == 1`), so ONE evaluation serves every row and
+        broadcasts against the `(B, 1, L)` cell index — `edit_v2`'s prefix states are
+        per-row, so the conditioning is expanded to `B` first."""
+        B, L = yc.shape
+        nx0 = int(nx[0])
+        S, e, anchor, anchor_ok = self._encode(xf, nx)
+        S, anchor, anchor_ok = S[:, : nx0 + 1], anchor[:, : nx0 + 1], anchor_ok[:, : nx0 + 1]
+        log_stay, log_emit = self._op_logprobs(S, e)
+        n_col = log_stay.shape[1]
+        if self.prefix_conditioning:
+            e_b = e.expand(B, -1)
+            C = self._prefix_states(yc, e_b)[:, :L]
+            p = self._emit_params(
+                self._emit_input(S.expand(B, -1, -1), e_b, C),
+                anchor.expand(B, -1, -1)[:, :, None, :],
+                anchor_ok.expand(B, -1)[:, :, None],
+            )
+        else:
+            p = self._emit_params(self._emit_input(S, e, None),
+                                  anchor[:, :, None, :], anchor_ok[:, :, None])
+        log_mass, log_anch = self._log_cell_mass(p, yc[:, None, :])
+        stay = log_stay[:, :, None].expand(B, n_col, L + 1)
+        edge = log_emit[:, :, None] + log_mass
+        return stay, edge, p, log_mass, log_anch, nx0
+
+    def _gather_states(self, p: _EmitParams, cols: torch.Tensor) -> _EmitParams:
+        """`_index`'s batched sibling: pick state `(cols[k, t], t)` of row `k`, giving
+        every field a leading `(K, L)`.
+
+        Each field is indexed on its OWN axes, exactly as `_index` does and for the same
+        reason: the physics widths depend on the anchor alone so they come back with
+        `T == 1` even in `edit_v2`, and `edit_v1`'s whole block has `B == 1`."""
+        K, L = cols.shape
+        dev = cols.device
+        kk = torch.arange(K, device=dev)[:, None].expand(K, L)
+        tt = torch.arange(L, device=dev)[None, :].expand(K, L)
+        return _EmitParams(*[f[0 if f.shape[0] == 1 else kk, cols,
+                               0 if f.shape[2] == 1 else tt] for f in p])
+
+    def _block_rows(self, n_col: int, L: int) -> int:
+        """How many draws may share one block, from a memory budget.
+
+        `edit_v2` evaluates the free-cell head at `(K, n_col, L, n_cells)` — 900 cells at
+        `n_bins = 30` — so a long-tailed jet at `K = 200` would ask for ~450 MB where AR's
+        8-wide coordinate head asks for nothing. `edit_v1`'s block is chain-independent and
+        only the `(K, n_col, L)` masses scale, so it is left unchunked."""
+        if not self.prefix_conditioning:
+            return 1 << 30
+        return max(1, _MAX_BLOCK_ELEMS // max(n_col * L * self.n_cells, 1))
+
+    @torch.inference_mode()
+    def sample_coordinates_many(self, xf, nx, draws, *, generator=None):
+        """One jet's K draws' coordinates in ONE pass — the batched sibling of
+        `sample_coordinates`, returning a `(L_k, 4)` tensor per draw.
+
+        Same conditional, same constrained forward-backward, same two-component draw; the
+        difference is that `_encode`, `_op_logprobs` and (for `edit_v1`) the whole emission
+        block run ONCE instead of K times, the alignment walk runs as one lockstep batch
+        (`edit_dp.sample_alignment_batch`), and the coordinate draws vectorise over
+        `(K, L_max)`. Rows are padded to `L_max` with cell 0 and sliced back, so a padded
+        position costs one wasted sample and reaches no caller.
+
+        WHY. The per-draw call is ~6 ms and its cost is FLAT in `L` and `n_x` — it is
+        ~100 tiny op launches, not arithmetic — so K calls cost K x 6 ms for work that one
+        call can do. `eval.support.run_support_audit` is 2 000 jets x 200 draws = 400 000
+        of them per arm (~1 h 50 m), which is what made `scripts/refresh_support_audit.py`
+        unaffordable on this family. This is the same fix `PLAN_prod_test_speedup.md` §2
+        made for the AR family, plus the one piece that has no AR counterpart: AR's
+        coordinates are conditionally independent given the cell chain, so its batched path
+        is a padded teacher-forced replay, while here the alignment is LATENT and has to be
+        sampled per draw before any coordinate can be.
+
+        **This reorders RNG consumption** relative to the per-draw loop: the draws are from
+        the same conditional and agree in distribution, but they are not the same numbers.
+        The same trade `ARJunipr.sample_coordinates_many` already documents."""
+        chains = [[int(c) for c in d] for d in draws]
+        K = len(chains)
+        dev = xf.device
+        empty = torch.zeros(0, 4, device=dev)
+        if K == 0:
+            return []
+        lens = [len(c) for c in chains]
+        L_max = max(lens)
+        if L_max == 0:
+            return [empty for _ in range(K)]
+        self.eval()
+        n_col = min(int(nx[0]), xf.shape[1]) + 1
+        step = self._block_rows(n_col, L_max)
+        out: list = [None] * K
+        for s in range(0, K, step):
+            rows = list(range(s, min(s + step, K)))
+            yc = torch.zeros(len(rows), L_max, dtype=torch.long, device=dev)
+            for r, k in enumerate(rows):
+                if lens[k]:
+                    yc[r, : lens[k]] = torch.as_tensor(chains[k], dtype=torch.long,
+                                                       device=dev)
+            coords = self._draw_coords_block(
+                xf, nx, yc, torch.as_tensor([lens[k] for k in rows], device=dev),
+                generator=generator)
+            for r, k in enumerate(rows):
+                out[k] = coords[r, : lens[k]] if lens[k] else empty
+        return out
+
+    def _draw_coords_block(self, xf, nx, yc, ny, *, generator=None):
+        """`(B, L, 4)` coordinates for a padded `(B, L)` cell block — the batched body of
+        `sample_coordinates`, step for step."""
+        B, L = yc.shape
+        dev = yc.device
+        stay, edge, p, log_mass, log_anch, nx0 = self._coord_lattice(xf, nx, yc)
+        cols = edit_dp.sample_alignment_batch(
+            stay, edge, torch.as_tensor([nx0], device=dev), ny, generator=generator)
+        q = self._gather_states(p, cols)
+        kk = torch.arange(B, device=dev)[:, None].expand(B, L)
+        tt = torch.arange(L, device=dev)[None, :].expand(B, L)
+        r = torch.exp((log_anch[kk, cols, tt] - log_mass[kk, cols, tt]).clamp(max=0.0))
+        take = torch.rand(B, L, device=dev, generator=generator) < r
+        u_lo, u_hi, v_lo, v_hi = self._cell_bounds(yc)
+        u_a = trunc_normal_sample(q.mu_u, q.sig_u, u_lo, u_hi, generator=generator)
+        v_a = trunc_normal_sample(q.mu_v, q.sig_v, v_lo, v_hi, generator=generator)
+        z_a = self._draw_lnz(q.mu_z, q.sig_z, u_a, (B, L), generator=generator)
+        psi_a = vonmises_sample(q.mu_psi, q.kappa, generator=generator)
+        du = trunc_normal_sample(q.f_du_m, q.f_du_s, -self.half_u, self.half_u,
+                                 generator=generator)
+        dv = trunc_normal_sample(q.f_dv_m, q.f_dv_s, -self.half_v, self.half_v,
+                                 generator=generator)
+        u_f = self.cell_cx[yc] + du
+        z_f = self._draw_lnz(q.f_lz_m, q.f_lz_s, u_f, (B, L), generator=generator)
+        psi_f = vonmises_sample(q.f_psi_m, q.f_kappa, generator=generator)
+        return torch.stack([
+            torch.where(take, u_a, u_f),
+            torch.where(take, v_a, self.cell_cy[yc] + dv),
+            torch.where(take, z_a, z_f),
+            wrap_to_pi(torch.where(take, psi_a, psi_f)),
+        ], dim=-1)
+
     @torch.inference_mode()
     def sample_coordinates(self, xf, nx, cells, *, generator=None):
         """`(L, 4)` coordinates drawn from `q(coords | cells, x)` — the one genuinely new
@@ -742,20 +894,11 @@ class EditTransducer(PosteriorModel):
         if not cells:
             return torch.zeros(0, 4, device=dev)
         self.eval()
-        L, nx0 = len(cells), int(nx[0])
-        S, e, anchor, anchor_ok = self._encode(xf, nx)
-        S, anchor, anchor_ok = S[:, : nx0 + 1], anchor[:, : nx0 + 1], anchor_ok[:, : nx0 + 1]
-        log_stay, log_emit = self._op_logprobs(S, e)
+        L = len(cells)
         yc = torch.tensor([cells], dtype=torch.long, device=dev)
-        C = self._prefix_states(yc, e)[:, :L] if self.prefix_conditioning else None
-        p = self._emit_params(
-            self._emit_input(S, e, C), anchor[:, :, None, :], anchor_ok[:, :, None]
-        )
-        cell_t = yc[:, None, :]                                   # (1, 1, L)
-        log_mass, log_anch = self._log_cell_mass(p, cell_t)       # (1, n_col, L)
-        n_col = log_stay.shape[1]
-        stay = log_stay[:, :, None].expand(1, n_col, L + 1)
-        edge = log_emit[:, :, None] + log_mass
+        # the SAME deterministic body the batched path uses, so the two cannot drift; it
+        # consumes no RNG, so this path's draws below are unchanged by the refactor
+        stay, edge, p, log_mass, log_anch, nx0 = self._coord_lattice(xf, nx, yc)
         cols = edit_dp.sample_alignment(stay[0], edge[0], nx0, L, generator=generator)
 
         i_idx = torch.tensor(cols, dtype=torch.long, device=dev)

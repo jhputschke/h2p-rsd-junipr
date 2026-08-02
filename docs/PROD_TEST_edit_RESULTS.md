@@ -88,33 +88,48 @@ rejected. §4.12 repeats the deep pass on `e_v2_s0` and `notebooks/prod_test_v1.
 `CKPT_ROOT` now points there. §4.11 is kept rather than replaced: the two together are what
 show the `q(0|x)` deficit is a family property and not a stage-1 artifact.
 
-**0.1 `scripts/refresh_support_audit.py` was NOT run (plan §12.5).** Three reasons, in order
-of weight:
+**0.1 `scripts/refresh_support_audit.py` was skipped, then RUN — plan §12.5 is honoured.**
+It was skipped when the grid first finished, on three stated reasons; one of them was
+wrong by ~8x, the fix that removed it landed, and the step was then run properly. Both
+halves are recorded, because a plan step that gets honoured only after its stated obstacle
+turns out to be overstated is a fact about this document, not just about the code.
 
-1. **It was redundant.** The refresh exists to bring artifacts written under an *older*
-   `EDGE_TOL` up to the current convention, so a gate table cannot mix two. Every one of the
-   11 artifacts in this comparison — 9 edit arms and 2 re-evaluated reference arms — was
-   written by *this* run's eval, and `eval/support.py` last changed on 2026-08-01, before all
-   of them. They already come from one code path at one convention, which is the only
-   property the refresh establishes.
-2. **On the edit root it costs ~16 hours.** `EditTransducer` does not override
-   `sample_coordinates_many`, so the base class loops `sample_coordinates` once per draw:
-   2 000 jets × 200 draws = **400 000 sequential lattice builds per arm**, ~1 h 50 m each,
-   nine arms. See §6.4 — this is a fired trigger, not an accepted cost.
-3. **On the v1 root `--force` would collaterally rewrite all 11 arms**, including the nine
-   that [`PROD_TEST_v1_RESULTS.md`](PROD_TEST_v1_RESULTS.md) is written against. Altering a
-   completed run's artifacts for no benefit to this one is a worse outcome than skipping.
+The three reasons as given, and how each held up:
 
-The skip was checked rather than assumed. The refresh had completed **one** arm
-(`e_v1_freewidth_s0`) before it was stopped, so that arm has been audited under *both*
-procedures, and they agree on everything scored: all four rates `0.0`, `passes: true`. The
-only difference is the emission count — 559 341 (eval, shared draws) vs 558 938 (refresh,
-re-sampled) — 0.07% MC noise from a different draw set.
+1. **Redundancy — held.** The refresh exists to bring artifacts written under an *older*
+   `EDGE_TOL` up to the current convention. Every artifact in this comparison was written
+   by this run's eval on one code path, so there were no two conventions to reconcile.
+2. **"~16 hours on the edit root" — WRONG, by about 8x.** That figure came from a single
+   arm's file mtime during a run that was killed partway, under no `OMP_NUM_THREADS` cap
+   and with contention I did not record — not from a controlled measurement. The
+   controlled numbers, same function and same inputs with only the sampler swapped:
 
-**0.2 One arm carries a stamp the others do not.** As a consequence of 0.1,
-`e_v1_freewidth_s0`'s `eval_metrics.json` carries `audit_refreshed_at_edge_tol: 1e-06` and
-the other eight do not. Substantively inert per the check above, but it is a real
-inconsistency in the files and is named here rather than left to be discovered.
+   | `run_support_audit`, 2 000 jets | per arm | 9 arms |
+   |---|---:|---:|
+   | looped (base class) | 13.8 min | ~2 h 04 m |
+   | batched (§6.4's fix) | ~3.3 min | **29.6 min, MEASURED** |
+
+   So the pre-fix cost was ~2 h, not ~16 h. It was still the single most expensive step in
+   the run, and the fix still bought ~4.2x — but the magnitude that justified skipping was
+   not real.
+3. **Collateral rewrite of the v1 root — held, and still governs.** `--force` on
+   `runs/prod_test_v1` would rewrite all 11 arms, including the nine
+   [`PROD_TEST_v1_RESULTS.md`](PROD_TEST_v1_RESULTS.md) is written against. **The v1 root
+   was therefore left untouched and remains so**, which is also correct on its own terms:
+   only `edit.py` / `edit_dp.py` changed, so no AR artifact could have moved.
+
+**What the refresh changed: nothing that decides anything.** Re-run under the batched
+sampler, TARP and `coverage_68` came back **bit-identical** on every arm — they consume
+cell chains from `sample_batch` and never touch `sample_coordinates_many`. Only
+coordinate-level quantities moved, all within MC noise: `<N>` ratio 0.9843 -> 0.9848, the
+`e_v1_legacy_lnz` leak rates 1.403% / 3.905% -> 1.352% / 3.887%. Every `physical` arm is
+still a hard zero on all four walls and the legacy arm still fails, so **no gate verdict
+moved**.
+
+**0.2 The stamp inconsistency is resolved.** While the skip stood, one arm
+(`e_v1_freewidth_s0`) carried `audit_refreshed_at_edge_tol: 1e-06` from the partial run and
+the other eight did not. The completed refresh stamps all nine, so the edit root is now
+uniform. The v1 root is deliberately unstamped — see 0.1 reason 3.
 
 **0.3 The deep notebook pass reports no aux ablation for this grid.** `notebooks/prod_test_v1.ipynb`
 §2c compares aux-on against aux-off arms under `ABLATION_ROOT`. Left pointing at
@@ -524,7 +539,27 @@ arms pass E3's criterion**, so that row ranks without deciding.
 
 The plan warned that `v1_contstop`'s band is narrow because it is 2 draws rather than because
 it is stable, and that a three-seed edit band clearing it would not be decisive on its own.
-That caution is not load-bearing here: the gaps are 5–50× the width of either band.
+For the three deciding rows that caution is not load-bearing: the gaps are 5–50× the width
+of either band. **For the decode-tier rows it is load-bearing, and it was measured.**
+
+> ⚠️ **The decode-tier band separations are NOT stable under resampling.** Regenerating
+> these artifacts under the batched sampler (§0.1) — a change that draws different samples
+> from the same conditional and nothing else — left NLL, TARP and `coverage_68` untouched
+> (the first is deterministic, the other two bit-identical, since they consume cell chains
+> and never reach the coordinate sampler) and **flipped two band-separation verdicts**:
+>
+> | row | before | after |
+> |---|---|---|
+> | `<N>` ratio, this table | separated, edit worse | **tie — bands overlap** |
+> | geo-median/identity, E8 | tie | **separated, `e_v2` better** |
+>
+> Both are decode-tier ratios from `run_closure` on 300 jets, where three seeds give bands
+> ~0.02 wide and the deltas are ~0.01–0.02. A band that clears by less than its own width
+> clears by luck. **No E-gate verdict moved**, because E4/E5/E6 are decided on TARP,
+> coverage and NLL — but the `medoid/identity`, `geo-median/identity` and `<N>` rows of this
+> table and of §4.8 should be read as descriptive, not as measurements, and
+> `scripts/prod_test_edit_gates.py` currently prints `**yes**` for a separation of any
+> width. Closing that would mean a resampling band, not a seed band — see §8.
 
 ## 6. What this run found
 
@@ -602,15 +637,37 @@ of the two-component mixture are the place to look, not the epoch count.
 
 ### 6.4 Triggers that have fired
 
-- **A batched `sample_coordinates_many` for the edit family.** The base class loops the
-  per-draw hook, so the support audit costs 400 000 sequential lattice builds per arm
-  (~1 h 50 m) where the AR family — which overrides it — takes minutes. This blocked plan
-  §12.5 (§0.1) and dominated every evaluation in this run. It is the same fix
-  `PLAN_prod_test_speedup.md` §2 made for AR ("67 of the 109 min"), and the base-class
-  docstring explicitly invites the override. **It was deliberately not made mid-run**: an
-  override "is free to reorder RNG consumption — the draws are still draws from the same
-  conditional, but they are NOT the same draws", so landing it would have made post-fix
-  audits non-comparable with the ones already written. Follow-up plan.
+- **A batched `sample_coordinates_many` for the edit family — FIRED AND FIXED.** The base
+  class loops the per-draw hook, so the support audit paid one full call per draw. Deferred
+  mid-run on purpose (an override "is free to reorder RNG consumption… they are NOT the
+  same draws", so landing it would have made post-fix audits non-comparable with the ones
+  already written), then landed once the grid's artifacts were complete and regenerated
+  together. What it took, and what it bought:
+
+  | | |
+  |---|---|
+  | new code | `edit_dp.sample_alignment_batch` — B lattice walks in lockstep |
+  | | `EditTransducer.sample_coordinates_many`, sharing `_coord_lattice` with the single-draw path |
+  | speedup, K = 200 | **222x** (`edit_v1`), **39.5x** (`edit_v2`) |
+  | `run_support_audit`, per arm | 13.8 min -> **3.3 min** |
+  | `refresh_support_audit`, 9 arms | ~2 h 04 m -> **29.6 min** |
+  | full eval, 9 arms @ concurrency 5 | ~55 min -> **26.9 min** |
+  | single-draw path | **bit-identical** to before (max\|Δ\| = 0 over 480 values) |
+
+  The diagnosis is worth keeping separately from the fix. The per-draw call is ~6 ms and
+  its cost is **flat in `L` and flat in `n_x`** — 9.1 ms at `L = 1`, 13.3 ms at `L = 100` —
+  so it is ~100 tiny op launches, not arithmetic, and the `O(n_x n_y)` recursion is
+  irrelevant at these sizes. That rules out the obvious fix: hoisting the encoder out of
+  the K-loop is worth **1.2x**, measured, and it was the *RNG-preserving* option. The only
+  thing that helps is paying the fixed cost once per jet instead of once per draw.
+
+  This is the fix [`PLAN_prod_test_speedup.md`](PLAN_prod_test_speedup.md) §2 already made
+  for the AR family, plus the one piece AR never needed: its coordinates are conditionally
+  independent given the cell chain, so its batched path is a padded teacher-forced replay,
+  while here the alignment is **latent** and has to be sampled per draw before any
+  coordinate can be. Hence `sample_alignment_batch`, and hence tests that check
+  DISTRIBUTIONAL agreement (two-sample KS per coordinate, plus the alignment-column
+  histogram) rather than bit-identity — `tests/test_edit_batched_coords.py`.
 - **`physics_width = true` costs likelihood.** `e_v1_freewidth` beats all three physics-width
   seeds on NLL while E7 confirms the imposed form is correct. One seed; a proper multi-seed
   A/B would say whether the regularization is worth its cost.
@@ -711,4 +768,10 @@ that number first. On one arm of one stage it is a lead, not a law — stated he
 - **Whether `edit_v2`'s closure win survives a decode that does not collapse.** Its MBR trees
   are ~1.07 nodes long against a truth of 1.435 (§4.13); nothing here separates "good
   observable shapes" from "good shapes because too few nodes were emitted to get them wrong".
+- **A resampling band on the decode-tier ratios.** §5 shows two band-separation verdicts
+  flipping when the same model is re-evaluated with different draws, so the seed band alone
+  understates the uncertainty on `medoid/identity`, `geo-median/identity` and `<N>` at 300
+  jets. The right instrument is the seed band *convolved with* a resampling band — several
+  evaluations of one checkpoint — and this run has exactly two evaluations, which is enough
+  to show the problem and not enough to quantify it.
 </content>

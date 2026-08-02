@@ -253,6 +253,71 @@ def viterbi_path(
     return float(scores[n_star]), cols
 
 
+def sample_alignment_batch(
+    log_stay: torch.Tensor,
+    log_emit_edge: torch.Tensor,
+    nx: torch.Tensor,
+    ny: torch.Tensor,
+    *,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """`sample_alignment` for a whole BLOCK of draws at once -> `columns (B, J-1)`.
+
+    Same walk, same conditional, `B` of them advancing in LOCKSTEP — the pattern
+    `EditTransducer.sample` already uses for the ancestral walk. `log_stay` `(B, n_col, J)`,
+    `log_emit_edge` `(B, n_col, J-1)`, `nx`/`ny` `(B,)`. Row `b`'s alignment is
+    `columns[b, :ny[b]]`; entries past `ny[b]` are 0 and mean nothing.
+
+    Why this exists. The per-draw `sample_alignment` is a python `while` of `nx + ny`
+    steps, and `sample_coordinates` runs one per draw — so a K-draw posterior pays K walks
+    plus K encoder passes plus K head evaluations. MEASURED, that call is ~6 ms and is
+    almost entirely dispatch: its cost is FLAT in `L` (9.1 ms at L = 1, 13.3 ms at L = 100)
+    and flat in `n_x`, i.e. it is ~100 tiny op launches on `L`-sized tensors rather than
+    arithmetic. So the fix is not to make any one step cheaper — hoisting the encoder out
+    of the loop is only 1.2x — but to stop paying the fixed cost K times, which is what
+    `EditTransducer.sample_coordinates_many` does on top of this.
+
+    The loop runs `max_b(nx_b + ny_b)` steps because each step advances exactly one of
+    `i`, `j`; rows that reach their terminal early are held there by `done`. That makes
+    the step count data-dependent but identical for every row, which is the property that
+    lets the walk vectorise at all.
+
+    **This reorders RNG consumption** relative to `sample_alignment`: one `rand(B)` per
+    step instead of one `rand(())` per step per draw. The draws are from the same
+    conditional and agree in distribution, but they are NOT the same draws — the same
+    trade `ARJunipr.sample_coordinates_many` already makes, and the reason
+    `tests/test_edit_batched_coords.py` checks agreement in DISTRIBUTION rather than
+    bit-identity."""
+    B, n_col, J = _check(log_stay, log_emit_edge)
+    dev = log_stay.device
+    L = J - 1
+    cols = torch.zeros(B, max(L, 1), dtype=torch.long, device=dev)
+    if L == 0 or B == 0:
+        return cols[:, :L]
+    nx = nx.to(device=dev, dtype=torch.long).expand(B)
+    ny = ny.to(device=dev, dtype=torch.long).expand(B)
+    beta = backward_beta(log_stay, log_emit_edge, nx, ny)
+    b_idx = torch.arange(B, device=dev)
+    i = torch.zeros(B, dtype=torch.long, device=dev)
+    j = torch.zeros(B, dtype=torch.long, device=dev)
+    for _ in range(int((nx + ny).max())):
+        can_stay = i < nx
+        can_emit = j < ny
+        # every index is clamped BEFORE use: a finished row keeps walking through the
+        # loop with `can_stay = can_emit = False`, and an unclamped `i + 1` at the
+        # terminal column would index past the lattice rather than be masked away.
+        ic, jc = i.clamp(max=n_col - 1), j.clamp(max=L - 1)
+        w_stay = log_stay[b_idx, ic, jc] + beta[b_idx, (i + 1).clamp(max=n_col - 1), jc]
+        w_emit = log_emit_edge[b_idx, ic, jc] + beta[b_idx, ic, (j + 1).clamp(max=J - 1)]
+        u = torch.rand(B, device=dev, generator=generator)
+        take = torch.where(can_stay & can_emit, u < torch.sigmoid(w_emit - w_stay),
+                           can_emit)
+        cols[b_idx, jc] = torch.where(take, i, cols[b_idx, jc])
+        j = j + take.long()
+        i = i + (can_stay & ~take).long()
+    return cols[:, :L]
+
+
 def sample_alignment(
     log_stay: torch.Tensor,
     log_emit_edge: torch.Tensor,
