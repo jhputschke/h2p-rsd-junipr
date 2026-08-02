@@ -3,10 +3,15 @@
 #
 #   bash scripts/eval_prod_test_v1_stream.sh [--concurrency N] [--expect 11]
 #
-# Training is GPU-bound and evaluation is CPU-only (`CUDA_VISIBLE_DEVICES=""`), so the two
-# barely contend — waiting for the whole grid before starting any eval leaves ~20 cores
-# idle for hours. This polls for arms that have a `best.ckpt` and no merged
-# `eval_metrics.json` yet, and hands each to `eval_prod_test_v1.sh --only`.
+# Training is GPU-bound and evaluation is run on the CPU here (`eval_prod_test_v1.sh`
+# defaults to `--device cpu`, i.e. `CUDA_VISIBLE_DEVICES=""`), so the two barely contend —
+# waiting for the whole grid before starting any eval leaves ~20 cores idle for hours.
+# That is a CHOICE made for this concurrency, not a property of `eval`: `h2p-rsd-junipr
+# eval` calls `select_device()` and runs on cuda wherever one is visible. Streaming
+# alongside training is exactly the case where cpu is the right choice, so this script
+# does not expose `--device` — pass it to `eval_prod_test_v1.sh` directly, and only for a
+# whole grid at once (see its header). This polls for arms that have a `best.ckpt` and no
+# merged `eval_metrics.json` yet, and hands each to `eval_prod_test_v1.sh --only`.
 #
 # An arm is "finished" when its log carries the trainer's own completion line, not when
 # `best.ckpt` merely exists — the checkpoint is rewritten at every improvement, so
@@ -27,7 +32,7 @@ while [[ $# -gt 0 ]]; do
     --expect)      EXPECT="$2"; shift 2 ;;
     --run-root)    RUN_ROOT="$2"; shift 2 ;;
     --poll)        POLL="$2"; shift 2 ;;
-    -h|--help)     sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

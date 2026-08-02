@@ -1,0 +1,65 @@
+# presets/prod_test_edit.yaml — the production-test edit base arm (`e_v1`).
+#
+#   h2p-rsd-junipr train base=presets/prod_test_edit.yaml
+#   h2p-rsd-junipr train base=presets/prod_test_edit.yaml trainer=fast_dev data.n_jets=256  # smoke
+#
+# Identical to presets/prod_test_v1.yaml except for the ONE variable this run changes:
+# the FAMILY. Geometry (n_bins = 30), data files, encoder (lundnet), the nine aux
+# columns, epochs (60) and batch size (256) are held fixed against the reference arm
+# `v1_contstop`, so the head-to-head is about the factorization of the length/shape
+# coupling and nothing else. See docs/PLAN_prod_test_edit.md; the arms of the §7 grid
+# are generated from this file by scripts/run_prod_test_edit.sh.
+#
+# NOTE ON NLL: `model.lnz_support: physical` is what makes this arm's NLL/jet comparable
+# with `v1_contstop`'s at all (WP-E, gate E6). Both families are exact_likelihood = True
+# and both then normalize `ln z` over the same grooming interval, so the number means
+# the same thing on both sides. A `legacy` arm's NLL is NOT comparable in either
+# direction — that is the whole point of the `e_v1_legacy_lnz` attribution arm.
+# See docs/CONFIGURATION.md §4.
+#
+# CAPACITY IS NOT MATCHED, and is reported rather than assumed away: `ctx_dim = 64` here
+# and `dec_dim = 64` on ar_junipr_v4 are not the same parameter budget, and edit's
+# free-cell head is a Linear(ctx, 900) evaluated across the whole lattice. Every table
+# scripts/prod_test_edit_gates.py writes prints parameter counts (plan §13).
+
+defaults:
+  model: edit_v1             # the pair-HMM stage; `e_v2` overrides prefix_conditioning
+  encoder: lundnet           # returns_sequence=True — REQUIRED here: the anchors ARE
+                             # the encoder's per-node states, not the pooled e(x)
+  data: rntuple
+  optim: default
+  trainer: default
+  decode: default
+  experiment: closure
+
+geometry:
+  n_bins: 30                 # 900 cells; cell 0.6 -> 0.2, half_u/half_v 0.3 -> 0.1
+
+data:
+  path: data/jet_aux_asym.root
+
+encoder:
+  num_layers: 5
+  aux_features: [ln_mg_pt, ln_ptg_pt, ln_pt, abs_eta,
+                 nsec, has_sec, ln_kt_sec, ln_kt_sec_sum, sec_depth]
+
+model:
+  sigma_floor: 0.005         # half_u/half_v shrank 3x with n_bins; the default 0.01
+                             # did not, and would start to bind. Same value as the v1
+                             # preset, for the same reason.
+  physics_width: true        # sigma_0 + Lambda_eff/k_t; `e_v1_freewidth` ablates it, and
+                             # E7 is READ OFF that arm — quoting Lambda_eff from the arm
+                             # told the functional form restates the parametrization.
+  # --- the WP-E intervention: the same ln z support the reference arm was trained on ---
+  lnz_support: physical      # truncated normal on (ln z_cut - beta*ln(1/DeltaR), ln 1/2]
+  lnz_zcut: 0.1              # verified against the file's own grooming record by
+  lnz_beta: 0.0              # data.stats.check_lnz_support before training starts
+
+trainer:
+  max_epochs: 60             # early stopping is NOT wired, and resume cannot extend a
+                             # finished run — so 60 is a commitment.
+  batch_size: 256            # edit_v2's free-cell head is (B, n_col, Ny, 900); if the
+                             # smoke pass shows this does not fit, drop it for BOTH
+                             # stages so E8 stays matched, and record it (plan §13).
+
+run_root: runs/prod_test_edit

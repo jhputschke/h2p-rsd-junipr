@@ -6,6 +6,18 @@
 `model=edit_v1|edit_v2`, tests `tests/test_edit_dp.py` / `tests/test_edit_model.py`.
 `verify_parity.py` is unchanged.
 
+**Since: the `ln z` support port (WP-E of [`PLAN_prod_test_edit.md`](PLAN_prod_test_edit.md)).**
+`model.lnz_support` / `lnz_zcut` / `lnz_beta` now exist on this family with the same names
+and semantics as on the AR families, so `data.stats.check_lnz_support` covers it unchanged.
+Both mixture components put the truncated normal on `ln z` under `physical`, evaluated at
+the node's **own** `u` — which this factorization supports and the AR one does not — while
+`legacy` stays bit-identical and is the arm that *attributes* the v0 support failure.
+`_log_cell_mass` is untouched by the port and the constrained forward–backward therefore
+draws the same alignments under both supports; that is asserted in
+`tests/test_edit_lnz_support.py`, not assumed. The port is what makes this family's
+held-out NLL comparable with a `physical` AR arm at all
+(`tests/test_nll_comparability.py`).
+
 Three deviations from the design below, each argued at its site: the op head is
 prefix-free in **both** stages (that is the condition for the exact `length_pmf`, and
 `edit_v2`'s prediction network runs over the emitted *cell* prefix into the emission heads
@@ -33,6 +45,35 @@ the decode-layer gate, exactly as the exact `q(N=0|x)` predicts. Caveats: these 
 6-epoch runs on the small test file, not production fits, and `frac_anchored` sits at
 0.20 — mixture identifiability (risk 2) is live and wants a longer fit and a look at
 `p_anch` initialization before any of this is quoted as a result.
+
+**The production-scale re-run of verification 4 is gate E7 of
+[`PLAN_prod_test_edit.md`](PLAN_prod_test_edit.md)**, measured by
+[`scripts/edit_anchoring_diagnostic.py`](../scripts/edit_anchoring_diagnostic.py) on the
+seed-2 test file and read — as here — off the `physics_width=false` arm
+(`e_v1_freewidth`). Its criterion was fixed before the grid ran: `Λ_eff ∈ [0.2, 5] GeV`
+and `R² ≥ 0.9`, with the widths falling in `k_t`. The `Λ_eff = 1.29 GeV, R² = 1.000`
+above stands only as a 6-epoch result on a 54k-jet file, and the plan pre-commits to
+reporting a flat production fit as an *informative* failure — the anchoring premise not
+holding on this selection — rather than retuning into a pass. The same script reports
+`frac_anchored` at production scale, the deletion rate against `ln k_t`, the insertion
+rate against the distance to the grooming boundary, the alignment-crossing count
+(monotonicity, risk 1) and the `n_x = 0` rate that bounds the mechanism's reach.
+**Result: E7 PASSES at production scale.** On 4 000 jets of the seed-2 test file, read off
+`e_v1_freewidth` (60 epochs, 495k-jet training file): **Λ_eff = 0.631 GeV at R² = 0.949**
+over six scoreable `ln k_t` bins, with the residual width falling monotonically from 0.661
+to 0.177 — a factor of 3.7. `ln z` gives Λ_eff = 0.317 GeV (R² 0.866) and `ψ` 2.144
+(R² 0.953). All nine arms of the grid independently show falling widths with Λ_eff in
+0.32–0.63 GeV. Zero alignment-crossing pairs; `n_x = 0` on 6.8% of jets. So the 6-epoch
+`Λ_eff = 1.29 GeV` above was optimistic in magnitude but right in kind — the smearing
+kernel is real and of hadronic scale.
+
+**But `frac_anchored` did not recover with training: 0.20 at 6 epochs, 0.19 at 60.** Risk 2
+is the binding constraint, not risk 1 — only about a fifth of parton nodes are smeared
+copies, and the free insertion head supplies the other four fifths, which is what
+[`PROD_TEST_edit_RESULTS.md`](PROD_TEST_edit_RESULTS.md) §6.3 identifies as the reason the
+family loses its head-to-head against `v1_contstop` on TARP, coverage and NLL despite the
+physics being right. `p_anch` initialization and mixture identifiability are where a
+follow-up starts.
 
 A **fourth model family** (`edit_v1` / `edit_v2`) beside §5.1 AR
 JUNIPR, §5.2 cINN, §5.3 diffusion/CFM. It changes the *factorization* of

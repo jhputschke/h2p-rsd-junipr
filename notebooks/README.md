@@ -64,6 +64,34 @@ the docs:
   toggle (`pot` default, `energyflow` optional) runs the demo without `energyflow`
   installed. See `scripts/probe_map_collapse.py` for the floor/training sweep.
 
+- **per_jets_estimation.ipynb** — the follow-up to `inference_demo.ipynb` §5 on the
+  **current** coordinates (30×30 cells, `lnz_support="physical"`) and the **extended**
+  model (`ar_junipr_v4` + cross-attention + the nine groomed aux columns), pinned by
+  default to the `v1_contstop_s0` winner and its held-out file, read from the
+  `prod_test_v1` artifact. **One knob, `RUN`, repoints it at anything** — a run directory,
+  an arm root, a `best.ckpt` or an artifact JSON — and the checkpoint, the held-out file
+  and the frozen `tau` are found from there (`RUN =
+  "runs/prod_test_edit/e_v2_s0/<stamp>"` assesses the edit transducer instead). The
+  evaluation file is the one thing never derived from the checkpoint, which records only
+  what it *trained* on; §3 asserts the two differ. Everything below §0 is family-agnostic:
+  the shape-decode keys come off the loaded class, and the length belief is **probed**
+  (`length_pmf` fed two different `mults`) rather than inferred from a config field — so
+  `edit_v2` is correctly reported as having an exact `q(N|x)` where `v1_contstop` has a
+  K-sample sampler histogram. Two things: **`showcase_jet(i)`**, one call that runs the full
+  per-jet inference and shows the posterior cloud on the Lund plane, the length belief,
+  the MAP / MBR / plain-RSD / truth ladders each over a per-splitting residual strip, the
+  aux vector the encoder saw, and the printed tree tables; and the **difference
+  distribution** `Δ = estimate − truth` per splitting, for `ln(1/ΔR)`, `ln kt` and `ln z`,
+  once over all splittings and once over the first two. The alignment is the **splitting
+  index** — the only correspondence the data offers, since there is no per-node `x↔y`
+  matching — so a residual exists only where both sides have a node at `t`; §5 prints the
+  pairing rate per series and the notebook carries two pairings, **own depth** (what each
+  estimator produced; the population the figures plot) and **common depth** (row-matched,
+  the only rows on which the RMS ratio to plain RSD is a comparison, with a jet-level
+  bootstrap CI). ψ is deliberately excluded — its von Mises κ is below
+  `decode.kappa_min_mode` for most splittings. ~2 min for 2000 jets at `K=200` with the
+  `energyflow` MBR backend; writes `per_jet_residuals.json` beside the checkpoint.
+
 - **lund_distribution_closure.ipynb** — the **population** counterpart to
   `inference_demo.ipynb`. Where `eval/closure.py` and `eval/calibration.py` ask per-jet
   questions, this asks whether the predicted *ensemble* of primary-Lund splittings looks
@@ -127,8 +155,16 @@ the docs:
   [`docs/PLAN_prod_test_speedup.md`](../docs/PLAN_prod_test_speedup.md): **one** shared
   sampling pass feeding §3/§4/§5/§8 instead of five independent ones, one batched
   `sample_coordinates_many` call per jet instead of one per draw (2 528 → 22 ms/jet), a
-  batched `length_pmf` (13 min → 3 s, and bit-identical — the notebook asserts it against
-  the batch-1 path), and a measured thread cap. Plus one thing that was not a decode
+  batched `length_pmf` (13 min → 3 s — the notebook asserts it against the batch-1 path
+  rather than claiming it, to a float32 bound that depends on the backend: bit-identical
+  on Linux/x86 cpu, ~2 ulp on Apple Silicon, ~5e-7 on cuda), and a measured thread cap.
+  That batching is an identity only a checkpoint **with** a multiplicity head has; without
+  one, §6's `length_pmf` is a 500-draw sample per jet, and that section alone is ~53 min on
+  cpu against 3.1 min on cuda — which is what §0's `DEVICE` is for
+  ([`docs/PLAN_notebook_speedup_cuda.md`](../docs/PLAN_notebook_speedup_cuda.md); `"auto"`
+  there resolves cuda-or-cpu and **deliberately never mps**, unlike `select_device()`).
+  Measured same-arm, the whole notebook is **9.41 min → 1.32 min** on cuda with no section
+  slower, so §0's cost table now carries both columns. Plus one thing that was not a decode
   problem at all and turned out to be the largest cost in the notebook: §2b/§2c wrote
   `MatchedLundDataset(chunk, …)[k]` inside a comprehension over `k`, rebuilding the whole
   256-jet dataset once per jet — O(B²), 7.5 ms/jet against 0.036, ~60 min across the five

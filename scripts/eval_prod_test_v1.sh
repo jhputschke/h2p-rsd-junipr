@@ -3,6 +3,19 @@
 # WP-D switches the gates need.
 #
 #   bash scripts/eval_prod_test_v1.sh [--concurrency N] [--run-root DIR] [--only ARM,...]
+#                                     [--device cpu|auto|cuda]
+#
+# --device DEFAULTS TO cpu, and changing it is a whole-grid decision, not a per-arm one.
+# `scripts/prod_test_v1_gates.py` compares the arms TO EACH OTHER, and cpu and cuda are a
+# different RNG stream *and* different float kernels — so a half-cpu/half-cuda grid is a
+# silent ranking hazard. Flipping this flag means re-running all 11 arms.
+#   cpu   `CUDA_VISIBLE_DEVICES=""` — the only lever there is, since `eval` has no device
+#         flag of its own (cli.py calls `select_device()` unconditionally) — plus the
+#         CPU-only `OMP_NUM_THREADS=2` that keeps the concurrent arms from thrashing.
+#   auto  neither is set, so `select_device()` picks: cuda > mps > cpu.
+#   cuda  the same, and fails loudly if torch cannot see a GPU rather than falling back.
+# The device that actually ran is recorded in each arm's `eval_metrics.json` under
+# `device`, so a mixed grid is at least detectable after the fact.
 #
 # TWO passes per arm, because one cannot be afforded:
 #
@@ -27,6 +40,7 @@ RUN_ROOT="runs/prod_test_v1"
 TEST_FILE="data/jet_aux_asym_test.root"
 CONCURRENCY=6
 ONLY=""
+DEVICE="cpu"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,10 +48,28 @@ while [[ $# -gt 0 ]]; do
     --run-root)    RUN_ROOT="$2"; shift 2 ;;
     --test-file)   TEST_FILE="$2"; shift 2 ;;
     --only)        ONLY="$2"; shift 2 ;;
-    -h|--help)     sed -n '2,22p' "$0"; exit 0 ;;
+    --device)      DEVICE="$2"; shift 2 ;;
+    -h|--help)     sed -n '2,33p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$DEVICE" in
+  cpu)  EVAL_ENV=(CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=2) ;;
+  auto) EVAL_ENV=() ;;
+  cuda)
+    EVAL_ENV=()
+    # `eval` has no device flag, so "cuda" cannot be *requested* — only left available.
+    # Refuse up front rather than silently producing a cpu grid labelled cuda.
+    python - <<'PY' || exit 2
+import sys
+import torch
+if not torch.cuda.is_available():
+    sys.exit("--device cuda: torch.cuda.is_available() is False — nothing would use a GPU.")
+PY
+    ;;
+  *) echo "--device must be cpu, auto or cuda (got: $DEVICE)" >&2; exit 2 ;;
+esac
 
 COMMON="data.path=$TEST_FILE experiment.pit_coords=true experiment.stratify_regions=true"
 
@@ -59,7 +91,7 @@ if [[ "${#CKPTS[@]}" -eq 0 ]]; then
   echo "no best.ckpt under $RUN_ROOT — has the grid finished?" >&2
   exit 1
 fi
-echo "[eval] ${#CKPTS[@]} checkpoints, concurrency $CONCURRENCY, test file $TEST_FILE"
+echo "[eval] ${#CKPTS[@]} checkpoints, concurrency $CONCURRENCY, test file $TEST_FILE, device $DEVICE"
 
 merge_py() {
 python - "$1" <<'PY'
@@ -108,11 +140,11 @@ one_arm() {
   {
     echo "===== PASS A (calibration tier) ====="
     # shellcheck disable=SC2086
-    CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=2 h2p-rsd-junipr eval "$ckpt" $PASS_A \
+    env "${EVAL_ENV[@]}" h2p-rsd-junipr eval "$ckpt" $PASS_A \
       && mv "$dir/eval_metrics.json" "$dir/eval_metrics_calib.json"
     echo "===== PASS B (decode tier) ====="
     # shellcheck disable=SC2086
-    CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=2 h2p-rsd-junipr eval "$ckpt" $PASS_B \
+    env "${EVAL_ENV[@]}" h2p-rsd-junipr eval "$ckpt" $PASS_B \
       && mv "$dir/eval_metrics.json" "$dir/eval_metrics_decode.json"
   } > "$log" 2>&1
   merge_py "$dir" >> "$log" 2>&1

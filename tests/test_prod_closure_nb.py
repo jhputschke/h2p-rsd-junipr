@@ -20,7 +20,24 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 V2 = REPO / "notebooks" / "lund_distribution_closure_v2.ipynb"
 GEN = REPO / "scripts" / "make_prod_closure_nb.py"
-TAGS = ["v0", "v1"]
+TAGS = ["v0", "v1", "edit"]
+
+# Which artifact each variant reads, and which notebook writes it. v0 and v1 each have a
+# production-test notebook of their own; `edit` does NOT — the edit grid reuses
+# `notebooks/prod_test_v1.ipynb` pointed at a different run root, so its artifact is still
+# named `prod_test_v1_metrics.json` while living under `runs/prod_test_edit/`. Deriving the
+# artifact name from the variant name is exactly the assumption that breaks there.
+READS = {"v0": ("prod_test_v0", "prod_test_v0.ipynb"),
+         "v1": ("prod_test_v1", "prod_test_v1.ipynb"),
+         "edit": ("prod_test_v1", "prod_test_v1.ipynb")}
+
+# A directory each variant's OWN artifact search will actually find, relative to a tmp
+# cwd. `edit` pins both of its globs inside runs/prod_test_edit/e_v2_s0/, so an artifact
+# written where v0's or v1's would go is invisible to it — which is the point of the pin.
+def art_dir(tag):
+    metrics_tag = READS[tag][0]
+    root = "runs/prod_test_edit/e_v2_s0" if tag == "edit" else "runs/prod_test_v0"
+    return f"{root}/r/{metrics_tag}"
 
 TITLE_CELL = 0
 PARAM_CELL = 2
@@ -128,14 +145,36 @@ def test_the_parameter_cell_changes_exactly_the_five_settings(tag):
 
 @pytest.mark.parametrize("tag", TAGS)
 def test_each_variant_reads_its_own_artifact(tag):
-    """v0 and v1 are different RNG regimes of the same assessment, so pointing one at
-    the other's `prod_test_v*_metrics.json` would silently mix them."""
+    """v0 and v1 are different RNG regimes of the same assessment, so pointing one at the
+    other's `prod_test_v*_metrics.json` would silently mix them. `edit` shares v1's
+    artifact NAME but not its run root, so what has to be pinned there is the ROOT."""
     _skip_missing(tag)
     cell = _sources(prod(tag))[PARAM_CELL]
-    other = "v1" if tag == "v0" else "v0"
-    assert f"prod_test_{tag}_metrics.json" in cell
-    assert f"notebooks/prod_test_{tag}.ipynb" in cell
-    assert f"prod_test_{other}_metrics.json" not in cell
+    metrics_tag, source_nb = READS[tag]
+    assert f"{metrics_tag}_metrics.json" in cell
+    assert f"notebooks/{source_nb}" in cell
+    for other, (other_tag, _nb) in READS.items():
+        if other_tag != metrics_tag:
+            assert f"{other_tag}_metrics.json" not in cell
+
+
+def test_the_edit_variant_is_pinned_to_the_arm_gate_e8_selected():
+    """`edit` is the one variant whose run root holds NINE arms, so "newest artifact under
+    the root" is not a choice — it is whichever arm happened to be deep-passed last, and
+    this run deep-passed the LOSING stage (`e_v1_s0`) first. Both globs must also stay
+    inside `runs/prod_test_edit/`: the default fallback is `runs/prod_test_v*`, which does
+    not match it, so an unpinned fallback would land on an `ar_junipr` checkpoint — a
+    wrong-FAMILY silent repoint, which is the failure this whole cell exists to prevent."""
+    _skip_missing("edit")
+    cell = _sources(prod("edit"))[PARAM_CELL]
+    assert 'runs/prod_test_edit/e_v2_s0/**' in cell, "not pinned to the E8 winner"
+    assert "runs/prod_test_v*/**" not in cell, (
+        "the fallback glob can reach an ar_junipr run root — a different FAMILY, not "
+        "merely a different arm"
+    )
+    for g in ('_own = _find_artifacts("runs/prod_test_edit/',
+              '_any = _find_artifacts("runs/prod_test_edit/'):
+        assert g in cell, f"missing or unpinned: {g}"
 
 
 def test_only_v1_switches_the_mbr_backend():
@@ -167,7 +206,9 @@ def test_parameter_cell_parses_and_fails_loudly_without_the_artifact(tag, tmp_pa
     try:
         with pytest.raises(FileNotFoundError) as exc:
             exec(compile(cell, "params", "exec"), {})
-        assert f"prod_test_{tag}.ipynb" in str(exc.value)
+        # the notebook it names is the one that WRITES the artifact, which for `edit` is
+        # v1's — the edit grid has no production-test notebook of its own
+        assert READS[tag][1] in str(exc.value)
     finally:
         os.chdir(cwd)
 
@@ -182,9 +223,9 @@ def test_a_tau_without_its_scale_is_refused(tag, tmp_path):
     import os
 
     _skip_missing(tag)
-    art = tmp_path / "runs" / "prod_test_v0" / "r" / f"prod_test_{tag}"
+    art = tmp_path / art_dir(tag)
     art.mkdir(parents=True)
-    (art / f"prod_test_{tag}_metrics.json").write_text(_json.dumps({
+    (art / f"{READS[tag][0]}_metrics.json").write_text(_json.dumps({
         "run": {"checkpoint": "runs/x/best.ckpt", "test_path": "data/test.root",
                 "train_path": "data/train.root"},
         "empty_tree": {"tau": {"value": 0.1},                   # no `fitted_under`

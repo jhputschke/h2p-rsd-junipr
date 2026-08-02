@@ -41,6 +41,15 @@ learned kernel directly confrontable with the shape-function expectation
 (arXiv:1906.11843) instead of opaque, and regularizes the low-statistics tail.
 `model.physics_width=false` swaps in the free-MLP head as the ablation.
 
+**The `ln z` support** (`model.lnz_support`, docs/PLAN_prod_test_edit.md WP-E). The plane
+coordinates are truncated to the geometry range in both mixture components; `ln z` was
+the one coordinate left on an unbounded Normal while the grooming puts its truth on
+`(ln z_cut - beta*u, ln 1/2]`. `physical` puts the same truncated normal there, read at
+the node's OWN `u` — which this factorization supports and the AR families' does not
+(see `lnz_bounds`). `legacy` is the default and is bit-identical to the pre-WP-E path,
+so old checkpoints load unchanged; it is also the arm that ATTRIBUTES the v0 support
+failure. NLL is not comparable across the switch, in either direction.
+
 **Two stages**, selected by `model.prefix_conditioning`:
 
 * `edit_v1` (pair-HMM). Ops and emissions conditioned on `(i, s_i, e)` only — zero
@@ -90,6 +99,11 @@ from .base import PosteriorModel, register_model
 # this underflows to p_anch = 0 exactly while every gradient stays finite, and `where`
 # already blocks the head's own gradient at these positions.
 _NO_ANCHOR = -1e9
+
+# Cap on the elements of `edit_v2`'s per-block free-cell head, `(K, n_col, L, n_cells)`.
+# ~16M float32 is ~64 MB, which is the scale at which chunking stops mattering and well
+# under what a long-tailed jet at K = 200 would otherwise ask for (~450 MB).
+_MAX_BLOCK_ELEMS = 16_000_000
 
 
 def _inv_softplus(y: float) -> float:
@@ -149,6 +163,26 @@ class EditTransducer(PosteriorModel):
         self.half_u, self.half_v = geometry.half_u, geometry.half_v
         self.lo_u, self.hi_u = (float(t) for t in geometry.ln_invdelta_range)
         self.lo_v, self.hi_v = (float(t) for t in geometry.ln_kt_range)
+        # bounded-support ln z head (docs/PLAN_prod_test_edit.md WP-E); getattr-tolerant so
+        # pre-WP-E checkpoint configs rebuild as the unbounded Normal they were trained as.
+        self.lnz_support = str(getattr(m, "lnz_support", "legacy"))
+        if self.lnz_support not in ("legacy", "physical"):
+            raise ValueError(
+                f"model.lnz_support must be 'legacy' or 'physical', got {self.lnz_support!r}"
+            )
+        self.lnz_physical = self.lnz_support == "physical"
+        self.lnz_zcut = float(getattr(m, "lnz_zcut", 0.1))
+        self.lnz_beta = float(getattr(m, "lnz_beta", 0.0))
+        if self.lnz_physical and not (0.0 < self.lnz_zcut < 0.5):
+            raise ValueError(
+                f"model.lnz_support='physical' needs 0 < model.lnz_zcut < 0.5 (the soft-drop "
+                f"lower bound must sit below the kinematic z <= 1/2), got {self.lnz_zcut!r}"
+            )
+        # plain floats; the bound itself is built on the fly from the emitted `u`
+        # (see `lnz_bounds`), so NO buffer is added and the `legacy` state_dict is
+        # byte-identical.
+        self._ln_zcut = math.log(self.lnz_zcut) if self.lnz_physical else float("-inf")
+        self._ln_half = math.log(0.5)
 
         emb = int(cfg.encoder.emb_dim)
         self.emb_dim = emb
@@ -343,14 +377,62 @@ class EditTransducer(PosteriorModel):
             f_lz_m=free[4], f_lz_s=free[5], f_psi_m=free[6], f_kappa=free[7],
         )
 
+    # ------------------------------------- WP-E: the physical ln z support
+    def lnz_bounds(self, u):
+        """`(lo, hi)` of the `ln z` support at the EMITTED `u = ln(1/DeltaR)`, or `None`
+        in `legacy` mode.
+
+        Soft Drop keeps a splitting iff `z > z_cut (DeltaR/R)^beta` (Larkoski et al.,
+        arXiv:1402.2657; RSD: Dreyer et al., arXiv:1804.03657), i.e. — with this repo's
+        `u = ln(1/DeltaR)` convention and `R = 1` — `ln z > ln z_cut - beta*u`; and
+        `z = min(pT1,pT2)/(pT1+pT2) <= 1/2` by construction. So
+
+            ln z  in  ( ln z_cut - beta*u ,  ln(1/2) ].
+
+        Unlike `ARJunipr.lnz_bounds`, which has to loosen the bound to the whole CELL,
+        this family can evaluate it at the node's own `u`: the emission density here
+        factorizes as `f(u, v) . f(ln z | u) . f(psi)`, and a `u`-dependent `ln z` factor
+        is exactly what that supports. It is also the bound `data.stats.check_lnz_support`
+        verifies the truth against, so the head normalizes over precisely the interval the
+        guard checked. At the fielded `beta = 0` the bound is the constant `(ln z_cut,
+        ln 1/2]` and the two families' conventions coincide.
+
+        `hi` is materialised as a tensor rather than left a float: `torch.clamp` takes two
+        Tensors or two Numbers, never one of each, and every caller clamps against the
+        pair."""
+        if not self.lnz_physical:
+            return None
+        lo = self._ln_zcut - self.lnz_beta * u
+        return lo, torch.full_like(lo, self._ln_half)
+
+    def _log_lnz(self, lz, mu, sig, u):
+        """The `ln z` log-density factor of either mixture component: the unbounded
+        Normal in `legacy`, the same Normal truncated to `lnz_bounds(u)` in `physical`."""
+        bounds = self.lnz_bounds(u)
+        if bounds is None:
+            return gauss_logpdf(lz, mu, sig)
+        lo, hi = bounds
+        return trunc_normal_logpdf(lz.clamp(min=lo, max=hi), mu, sig, lo, hi)
+
+    def _draw_lnz(self, mu, sig, u, shape, *, generator=None):
+        """One `ln z` draw per element, from the density `_log_lnz` describes — same
+        branch, same bounds, so sampler and likelihood cannot drift apart."""
+        bounds = self.lnz_bounds(u)
+        if bounds is None:
+            return mu + sig * torch.randn(shape, device=mu.device, dtype=mu.dtype,
+                                          generator=generator)
+        lo, hi = bounds
+        return trunc_normal_sample(mu, sig, lo, hi, generator=generator)
+
     # --------------------------------------------------------------- densities
     def _log_f_anch(self, p: _EmitParams, u, v, lz, psi):
         """The smeared (kept-node) component: a truncated normal on each plane
         coordinate — truncated to the GEOMETRY range, so the density is normalized on
-        exactly the support the geometry defines — a normal on ln z, a von Mises on psi."""
+        exactly the support the geometry defines — a normal on ln z (truncated to the
+        grooming interval under `lnz_support=physical`), a von Mises on psi."""
         ll = trunc_normal_logpdf(u, p.mu_u, p.sig_u, self.lo_u, self.hi_u)
         ll = ll + trunc_normal_logpdf(v, p.mu_v, p.sig_v, self.lo_v, self.hi_v)
-        ll = ll + gauss_logpdf(lz, p.mu_z, p.sig_z)
+        ll = ll + self._log_lnz(lz, p.mu_z, p.sig_z, u)
         return ll + vonmises_logpdf(psi, p.mu_psi, p.kappa)
 
     def _gather_cell_lp(self, cell_lp, cell):
@@ -371,7 +453,9 @@ class EditTransducer(PosteriorModel):
         ll = self._gather_cell_lp(p.cell_lp, cell)
         ll = ll + trunc_normal_logpdf(du, p.f_du_m, p.f_du_s, -self.half_u, self.half_u)
         ll = ll + trunc_normal_logpdf(dv, p.f_dv_m, p.f_dv_s, -self.half_v, self.half_v)
-        ll = ll + gauss_logpdf(lz, p.f_lz_m, p.f_lz_s)
+        # the bound is read at the emitted `u`, not the cell centre: the free component's
+        # own `u` is `cx + du`, and both are already in hand here.
+        ll = ll + self._log_lnz(lz, p.f_lz_m, p.f_lz_s, u)
         return ll + vonmises_logpdf(psi, p.f_psi_m, p.f_kappa)
 
     def _log_f_emit(self, p: _EmitParams, cell, u, v, lz, psi):
@@ -531,7 +615,7 @@ class EditTransducer(PosteriorModel):
         take = torch.rand(shape, device=dev, generator=generator) < p.log_p_anch.exp()
         u_a = trunc_normal_sample(p.mu_u, p.sig_u, self.lo_u, self.hi_u, generator=generator)
         v_a = trunc_normal_sample(p.mu_v, p.sig_v, self.lo_v, self.hi_v, generator=generator)
-        z_a = p.mu_z + p.sig_z * torch.randn(shape, device=dev, generator=generator)
+        z_a = self._draw_lnz(p.mu_z, p.sig_z, u_a, shape, generator=generator)
         psi_a = vonmises_sample(p.mu_psi, p.kappa, generator=generator)
 
         probs = p.cell_lp.exp().reshape(-1, self.n_cells)
@@ -542,7 +626,7 @@ class EditTransducer(PosteriorModel):
                                  generator=generator)
         u_f = self.cell_cx[cell_f] + du
         v_f = self.cell_cy[cell_f] + dv
-        z_f = p.f_lz_m + p.f_lz_s * torch.randn(shape, device=dev, generator=generator)
+        z_f = self._draw_lnz(p.f_lz_m, p.f_lz_s, u_f, shape, generator=generator)
         psi_f = vonmises_sample(p.f_psi_m, p.f_kappa, generator=generator)
 
         u = torch.where(take, u_a, u_f)
@@ -618,7 +702,16 @@ class EditTransducer(PosteriorModel):
     def _log_cell_mass(self, p: _EmitParams, cell):
         """`(log mixture mass in `cell`, log anchored share)` — the emission likelihood
         with the coordinates integrated over the cell, which is what the CONSTRAINED
-        lattice runs on."""
+        lattice runs on.
+
+        **Untouched by WP-E, and that is a fact rather than an oversight.** A cell is a
+        box in `(u, v)` only, so this integrates `u` and `v` and marginalises `ln z` and
+        `psi` — whose factors integrate to 1 and never appear below. The physical `ln z`
+        head makes that factor `f(ln z | u)`, and `int f(ln z | u) d ln z = 1` for EVERY
+        `u`, so the marginal is unchanged bound or no bound. Hence `sample_coordinates`'
+        constrained forward-backward, and every alignment it draws, are identical under
+        the two supports; only the `ln z` finally drawn inside the chosen component
+        differs. `tests/test_edit_lnz_support.py` asserts this rather than trusting it."""
         u_lo, u_hi, v_lo, v_hi = self._cell_bounds(cell)
         mu = (trunc_normal_cdf(u_hi, p.mu_u, p.sig_u, self.lo_u, self.hi_u)
               - trunc_normal_cdf(u_lo, p.mu_u, p.sig_u, self.lo_u, self.hi_u)).clamp(min=1e-12)
@@ -639,6 +732,153 @@ class EditTransducer(PosteriorModel):
         zero = torch.zeros_like(t_idx)
         return _EmitParams(*[f[0, i_idx, t_idx if f.shape[2] > 1 else zero] for f in p])
 
+    def _coord_lattice(self, xf, nx, yc):
+        """Everything `q(coords | cells, x)` needs for a `(B, L)` block of cell chains on
+        ONE jet: `(stay, edge, p, log_mass, log_anch, nx0)`.
+
+        Deterministic — it consumes no RNG — which is what lets the single-draw
+        `sample_coordinates` and the batched `sample_coordinates_many` share it without
+        the batched path changing the single one's draws. Factored rather than duplicated
+        for the reason `ARJunipr._coord_params_padded` records: two copies of this drift,
+        and only a distributional test would notice.
+
+        `B == 1` reproduces the pre-batching arithmetic exactly. For `B > 1` the two
+        stages differ in what has to be broadcast: `edit_v1`'s emission block does not
+        depend on the chain at all (`T == 1`), so ONE evaluation serves every row and
+        broadcasts against the `(B, 1, L)` cell index — `edit_v2`'s prefix states are
+        per-row, so the conditioning is expanded to `B` first."""
+        B, L = yc.shape
+        nx0 = int(nx[0])
+        S, e, anchor, anchor_ok = self._encode(xf, nx)
+        S, anchor, anchor_ok = S[:, : nx0 + 1], anchor[:, : nx0 + 1], anchor_ok[:, : nx0 + 1]
+        log_stay, log_emit = self._op_logprobs(S, e)
+        n_col = log_stay.shape[1]
+        if self.prefix_conditioning:
+            e_b = e.expand(B, -1)
+            C = self._prefix_states(yc, e_b)[:, :L]
+            p = self._emit_params(
+                self._emit_input(S.expand(B, -1, -1), e_b, C),
+                anchor.expand(B, -1, -1)[:, :, None, :],
+                anchor_ok.expand(B, -1)[:, :, None],
+            )
+        else:
+            p = self._emit_params(self._emit_input(S, e, None),
+                                  anchor[:, :, None, :], anchor_ok[:, :, None])
+        log_mass, log_anch = self._log_cell_mass(p, yc[:, None, :])
+        stay = log_stay[:, :, None].expand(B, n_col, L + 1)
+        edge = log_emit[:, :, None] + log_mass
+        return stay, edge, p, log_mass, log_anch, nx0
+
+    def _gather_states(self, p: _EmitParams, cols: torch.Tensor) -> _EmitParams:
+        """`_index`'s batched sibling: pick state `(cols[k, t], t)` of row `k`, giving
+        every field a leading `(K, L)`.
+
+        Each field is indexed on its OWN axes, exactly as `_index` does and for the same
+        reason: the physics widths depend on the anchor alone so they come back with
+        `T == 1` even in `edit_v2`, and `edit_v1`'s whole block has `B == 1`."""
+        K, L = cols.shape
+        dev = cols.device
+        kk = torch.arange(K, device=dev)[:, None].expand(K, L)
+        tt = torch.arange(L, device=dev)[None, :].expand(K, L)
+        return _EmitParams(*[f[0 if f.shape[0] == 1 else kk, cols,
+                               0 if f.shape[2] == 1 else tt] for f in p])
+
+    def _block_rows(self, n_col: int, L: int) -> int:
+        """How many draws may share one block, from a memory budget.
+
+        `edit_v2` evaluates the free-cell head at `(K, n_col, L, n_cells)` — 900 cells at
+        `n_bins = 30` — so a long-tailed jet at `K = 200` would ask for ~450 MB where AR's
+        8-wide coordinate head asks for nothing. `edit_v1`'s block is chain-independent and
+        only the `(K, n_col, L)` masses scale, so it is left unchunked."""
+        if not self.prefix_conditioning:
+            return 1 << 30
+        return max(1, _MAX_BLOCK_ELEMS // max(n_col * L * self.n_cells, 1))
+
+    @torch.inference_mode()
+    def sample_coordinates_many(self, xf, nx, draws, *, generator=None):
+        """One jet's K draws' coordinates in ONE pass — the batched sibling of
+        `sample_coordinates`, returning a `(L_k, 4)` tensor per draw.
+
+        Same conditional, same constrained forward-backward, same two-component draw; the
+        difference is that `_encode`, `_op_logprobs` and (for `edit_v1`) the whole emission
+        block run ONCE instead of K times, the alignment walk runs as one lockstep batch
+        (`edit_dp.sample_alignment_batch`), and the coordinate draws vectorise over
+        `(K, L_max)`. Rows are padded to `L_max` with cell 0 and sliced back, so a padded
+        position costs one wasted sample and reaches no caller.
+
+        WHY. The per-draw call is ~6 ms and its cost is FLAT in `L` and `n_x` — it is
+        ~100 tiny op launches, not arithmetic — so K calls cost K x 6 ms for work that one
+        call can do. `eval.support.run_support_audit` is 2 000 jets x 200 draws = 400 000
+        of them per arm (~1 h 50 m), which is what made `scripts/refresh_support_audit.py`
+        unaffordable on this family. This is the same fix `PLAN_prod_test_speedup.md` §2
+        made for the AR family, plus the one piece that has no AR counterpart: AR's
+        coordinates are conditionally independent given the cell chain, so its batched path
+        is a padded teacher-forced replay, while here the alignment is LATENT and has to be
+        sampled per draw before any coordinate can be.
+
+        **This reorders RNG consumption** relative to the per-draw loop: the draws are from
+        the same conditional and agree in distribution, but they are not the same numbers.
+        The same trade `ARJunipr.sample_coordinates_many` already documents."""
+        chains = [[int(c) for c in d] for d in draws]
+        K = len(chains)
+        dev = xf.device
+        empty = torch.zeros(0, 4, device=dev)
+        if K == 0:
+            return []
+        lens = [len(c) for c in chains]
+        L_max = max(lens)
+        if L_max == 0:
+            return [empty for _ in range(K)]
+        self.eval()
+        n_col = min(int(nx[0]), xf.shape[1]) + 1
+        step = self._block_rows(n_col, L_max)
+        out: list = [None] * K
+        for s in range(0, K, step):
+            rows = list(range(s, min(s + step, K)))
+            yc = torch.zeros(len(rows), L_max, dtype=torch.long, device=dev)
+            for r, k in enumerate(rows):
+                if lens[k]:
+                    yc[r, : lens[k]] = torch.as_tensor(chains[k], dtype=torch.long,
+                                                       device=dev)
+            coords = self._draw_coords_block(
+                xf, nx, yc, torch.as_tensor([lens[k] for k in rows], device=dev),
+                generator=generator)
+            for r, k in enumerate(rows):
+                out[k] = coords[r, : lens[k]] if lens[k] else empty
+        return out
+
+    def _draw_coords_block(self, xf, nx, yc, ny, *, generator=None):
+        """`(B, L, 4)` coordinates for a padded `(B, L)` cell block — the batched body of
+        `sample_coordinates`, step for step."""
+        B, L = yc.shape
+        dev = yc.device
+        stay, edge, p, log_mass, log_anch, nx0 = self._coord_lattice(xf, nx, yc)
+        cols = edit_dp.sample_alignment_batch(
+            stay, edge, torch.as_tensor([nx0], device=dev), ny, generator=generator)
+        q = self._gather_states(p, cols)
+        kk = torch.arange(B, device=dev)[:, None].expand(B, L)
+        tt = torch.arange(L, device=dev)[None, :].expand(B, L)
+        r = torch.exp((log_anch[kk, cols, tt] - log_mass[kk, cols, tt]).clamp(max=0.0))
+        take = torch.rand(B, L, device=dev, generator=generator) < r
+        u_lo, u_hi, v_lo, v_hi = self._cell_bounds(yc)
+        u_a = trunc_normal_sample(q.mu_u, q.sig_u, u_lo, u_hi, generator=generator)
+        v_a = trunc_normal_sample(q.mu_v, q.sig_v, v_lo, v_hi, generator=generator)
+        z_a = self._draw_lnz(q.mu_z, q.sig_z, u_a, (B, L), generator=generator)
+        psi_a = vonmises_sample(q.mu_psi, q.kappa, generator=generator)
+        du = trunc_normal_sample(q.f_du_m, q.f_du_s, -self.half_u, self.half_u,
+                                 generator=generator)
+        dv = trunc_normal_sample(q.f_dv_m, q.f_dv_s, -self.half_v, self.half_v,
+                                 generator=generator)
+        u_f = self.cell_cx[yc] + du
+        z_f = self._draw_lnz(q.f_lz_m, q.f_lz_s, u_f, (B, L), generator=generator)
+        psi_f = vonmises_sample(q.f_psi_m, q.f_kappa, generator=generator)
+        return torch.stack([
+            torch.where(take, u_a, u_f),
+            torch.where(take, v_a, self.cell_cy[yc] + dv),
+            torch.where(take, z_a, z_f),
+            wrap_to_pi(torch.where(take, psi_a, psi_f)),
+        ], dim=-1)
+
     @torch.inference_mode()
     def sample_coordinates(self, xf, nx, cells, *, generator=None):
         """`(L, 4)` coordinates drawn from `q(coords | cells, x)` — the one genuinely new
@@ -654,20 +894,11 @@ class EditTransducer(PosteriorModel):
         if not cells:
             return torch.zeros(0, 4, device=dev)
         self.eval()
-        L, nx0 = len(cells), int(nx[0])
-        S, e, anchor, anchor_ok = self._encode(xf, nx)
-        S, anchor, anchor_ok = S[:, : nx0 + 1], anchor[:, : nx0 + 1], anchor_ok[:, : nx0 + 1]
-        log_stay, log_emit = self._op_logprobs(S, e)
+        L = len(cells)
         yc = torch.tensor([cells], dtype=torch.long, device=dev)
-        C = self._prefix_states(yc, e)[:, :L] if self.prefix_conditioning else None
-        p = self._emit_params(
-            self._emit_input(S, e, C), anchor[:, :, None, :], anchor_ok[:, :, None]
-        )
-        cell_t = yc[:, None, :]                                   # (1, 1, L)
-        log_mass, log_anch = self._log_cell_mass(p, cell_t)       # (1, n_col, L)
-        n_col = log_stay.shape[1]
-        stay = log_stay[:, :, None].expand(1, n_col, L + 1)
-        edge = log_emit[:, :, None] + log_mass
+        # the SAME deterministic body the batched path uses, so the two cannot drift; it
+        # consumes no RNG, so this path's draws below are unchanged by the refactor
+        stay, edge, p, log_mass, log_anch, nx0 = self._coord_lattice(xf, nx, yc)
         cols = edit_dp.sample_alignment(stay[0], edge[0], nx0, L, generator=generator)
 
         i_idx = torch.tensor(cols, dtype=torch.long, device=dev)
@@ -683,36 +914,51 @@ class EditTransducer(PosteriorModel):
         # to the cell's edges instead of the geometry's
         u_a = trunc_normal_sample(q.mu_u, q.sig_u, u_lo, u_hi, generator=generator)
         v_a = trunc_normal_sample(q.mu_v, q.sig_v, v_lo, v_hi, generator=generator)
-        z_a = q.mu_z + q.sig_z * torch.randn(L, device=dev, generator=generator)
+        z_a = self._draw_lnz(q.mu_z, q.sig_z, u_a, (L,), generator=generator)
         psi_a = vonmises_sample(q.mu_psi, q.kappa, generator=generator)
         du = trunc_normal_sample(q.f_du_m, q.f_du_s, -self.half_u, self.half_u,
                                  generator=generator)
         dv = trunc_normal_sample(q.f_dv_m, q.f_dv_s, -self.half_v, self.half_v,
                                  generator=generator)
-        z_f = q.f_lz_m + q.f_lz_s * torch.randn(L, device=dev, generator=generator)
+        u_f = self.cell_cx[cell] + du
+        z_f = self._draw_lnz(q.f_lz_m, q.f_lz_s, u_f, (L,), generator=generator)
         psi_f = vonmises_sample(q.f_psi_m, q.f_kappa, generator=generator)
-        u = torch.where(take, u_a, self.cell_cx[cell] + du)
+        u = torch.where(take, u_a, u_f)
         v = torch.where(take, v_a, self.cell_cy[cell] + dv)
         lz = torch.where(take, z_a, z_f)
         psi = wrap_to_pi(torch.where(take, psi_a, psi_f))
         return torch.stack([u, v, lz, psi], dim=-1)
 
     # ------------------------------------------------------------ point estimate
+    def _mode_lnz(self, mu, u):
+        """The modal `ln z` of a component whose `ln z` factor is centred on `mu`: `mu`
+        itself in `legacy`, and `mu` CLAMPED into `lnz_bounds(u)` in `physical` — the mode
+        of a truncated normal is its untruncated mode when that lies inside the interval
+        and the nearer endpoint otherwise. Without the clamp the decode could return a
+        point estimate the very support audit it is scored by would flag."""
+        bounds = self.lnz_bounds(u)
+        if bounds is None:
+            return mu
+        lo, hi = bounds
+        return mu.clamp(min=lo, max=hi)
+
     def _emission_mode(self, p: _EmitParams):
         """The modal emission at each lattice state: whichever component's own mode
         carries the larger MIXTURE density, with its cell and that density."""
         cell_a = self._cells_from_coords(p.mu_u, p.mu_v)
-        f_a = self._log_f_emit(p, cell_a, p.mu_u, p.mu_v, p.mu_z, p.mu_psi)
+        z_a = self._mode_lnz(p.mu_z, p.mu_u)
+        f_a = self._log_f_emit(p, cell_a, p.mu_u, p.mu_v, z_a, p.mu_psi)
         cell_f = p.cell_lp.argmax(dim=-1)
         u_f = self.cell_cx[cell_f] + p.f_du_m
         v_f = self.cell_cy[cell_f] + p.f_dv_m
-        f_f = self._log_f_emit(p, cell_f, u_f, v_f, p.f_lz_m, p.f_psi_m)
+        z_f = self._mode_lnz(p.f_lz_m, u_f)
+        f_f = self._log_f_emit(p, cell_f, u_f, v_f, z_f, p.f_psi_m)
         take = f_a >= f_f
         coords = torch.stack(
             [
                 torch.where(take, p.mu_u, u_f),
                 torch.where(take, p.mu_v, v_f),
-                torch.where(take, p.mu_z, p.f_lz_m),
+                torch.where(take, z_a, z_f),
                 wrap_to_pi(torch.where(take, p.mu_psi, p.f_psi_m)),
             ],
             dim=-1,
