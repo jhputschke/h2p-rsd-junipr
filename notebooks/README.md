@@ -127,8 +127,16 @@ the docs:
   [`docs/PLAN_prod_test_speedup.md`](../docs/PLAN_prod_test_speedup.md): **one** shared
   sampling pass feeding §3/§4/§5/§8 instead of five independent ones, one batched
   `sample_coordinates_many` call per jet instead of one per draw (2 528 → 22 ms/jet), a
-  batched `length_pmf` (13 min → 3 s, and bit-identical — the notebook asserts it against
-  the batch-1 path), and a measured thread cap. Plus one thing that was not a decode
+  batched `length_pmf` (13 min → 3 s — the notebook asserts it against the batch-1 path
+  rather than claiming it, to a float32 bound that depends on the backend: bit-identical
+  on Linux/x86 cpu, ~2 ulp on Apple Silicon, ~5e-7 on cuda), and a measured thread cap.
+  That batching is an identity only a checkpoint **with** a multiplicity head has; without
+  one, §6's `length_pmf` is a 500-draw sample per jet, and that section alone is ~53 min on
+  cpu against 3.1 min on cuda — which is what §0's `DEVICE` is for
+  ([`docs/PLAN_notebook_speedup_cuda.md`](../docs/PLAN_notebook_speedup_cuda.md); `"auto"`
+  there resolves cuda-or-cpu and **deliberately never mps**, unlike `select_device()`).
+  Measured same-arm, the whole notebook is **9.41 min → 1.32 min** on cuda with no section
+  slower, so §0's cost table now carries both columns. Plus one thing that was not a decode
   problem at all and turned out to be the largest cost in the notebook: §2b/§2c wrote
   `MatchedLundDataset(chunk, …)[k]` inside a comprehension over `k`, rebuilding the whole
   256-jet dataset once per jet — O(B²), 7.5 ms/jet against 0.036, ~60 min across the five

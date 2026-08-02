@@ -247,6 +247,13 @@ def cmd_eval(argv) -> int:
     metrics = {
         "model": str(cfg_eval.model.name), "encoder": str(cfg_eval.encoder.name),
         "checkpoint": str(ckpt) if ckpt else None,
+        # `select_device()` above picks cuda > mps > cpu with nothing to override it, so
+        # WHICH backend produced these numbers is decided by the caller's environment
+        # (`CUDA_VISIBLE_DEVICES=""` is the only lever, and it is what
+        # scripts/eval_prod_test_v1.sh --device cpu sets). Backends are a different RNG
+        # stream *and* different float kernels, so two runs are comparable only once both
+        # name the same one — same reason lund_closure_report.py records it.
+        "device": str(device),
         "data": {
             "source": str(OmegaConf.select(cfg_eval, "data.source")),
             "path": str(OmegaConf.select(cfg_eval, "data.path")),
