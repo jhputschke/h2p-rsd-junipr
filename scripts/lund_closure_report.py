@@ -1,6 +1,6 @@
 """The Lund distribution closure as a script: PDF figures + a Markdown report.
 
-Same analysis as [`notebooks/lund_distribution_closure_prod_test_v0.ipynb`](../notebooks/lund_distribution_closure_prod_test_v0.ipynb)
+Same analysis as [`notebooks/lund_distribution_closure_prod_test_v1.ipynb`](../notebooks/lund_distribution_closure_prod_test_v1.ipynb)
 — which is `lund_distribution_closure_v2.ipynb` pointed at the held-out file with the
 five production-test constants read from the run's own artifact — with the output
 inverted: every panel goes to a **PDF** under `<out>/figures/`, and the prose, the
@@ -9,8 +9,9 @@ each figure by number and by path. Nothing is left as cell output, so the whole 
 survives a kernel restart, a `git pull` and an nbstripout smudge.
 
 Default mode is the production test: the checkpoint, the held-out file, the FROZEN
-empty-tree `tau` and the fitted `(temperature, tilt)` come from
-`runs/prod_test_v0/*/prod_test_v0/prod_test_v0_metrics.json`, so they cannot disagree
+empty-tree `tau` and the fitted `(temperature, tilt)` come from the newest
+`runs/prod_test_v*/*/prod_test_v*/prod_test_v*_metrics.json` (v1's or v0's — the report
+records which), so they cannot disagree
 with the section-6 fit that produced them — including the scale check that a `tau`
 fitted on the raw head is not applied to a recalibrated one. `--no-prod-metrics` runs
 the plain v2 configuration instead (rate-matched tau, checkpoint's own T/tilt), which
@@ -169,8 +170,8 @@ def parse_args(argv=None):
     )
     g = p.add_argument_group("what to run on")
     g.add_argument("--prod-metrics", default=None, metavar="PATH",
-                   help="prod_test_v0_metrics.json to take the five production settings "
-                        "from (default: newest under runs/prod_test_v0/)")
+                   help="prod_test_v*_metrics.json to take the five production settings "
+                        "from (default: newest under runs/prod_test_v*/)")
     g.add_argument("--no-prod-metrics", action="store_true",
                    help="ignore the artifact and use the v2 defaults: tau rate-matched on "
                         "THIS sample (circular) and the checkpoint's own (T, tilt)")
@@ -231,6 +232,8 @@ def parse_args(argv=None):
 
 
 def newest(pattern: str):
+    """Newest match of `pattern` under the repo root. `Path.glob` handles `**` natively,
+    so a pattern may span an unknown number of intermediate directories."""
     found = sorted(REPO.glob(pattern), key=lambda q: q.stat().st_mtime)
     return found[-1] if found else None
 
@@ -251,12 +254,20 @@ def resolve_settings(a):
         if mp is not None and not mp.is_absolute():
             mp = REPO / mp
         if mp is None:
-            mp = newest("runs/prod_test_v0/*/prod_test_v0/prod_test_v0_metrics.json")
+            # `**` because the run root's DEPTH is not fixed. A single-arm run writes
+            # runs/prod_test_v0/<stamp>/prod_test_v0/..., but a GRID gives each arm its own
+            # root (scripts/run_prod_test_v1.sh: run_root=<root>/<arm>), which adds a level
+            # and made the old fixed-depth pattern miss every v1 arm. It did not fail —
+            # it silently fell back to the newest v0 artifact, so the report would have
+            # assessed the v0 checkpoint while its caller believed it was assessing v1.
+            # Newest still wins, and the path is recorded in the report, so which regime
+            # produced it is never a guess.
+            mp = newest("runs/prod_test_v*/**/prod_test_v*/prod_test_v*_metrics.json")
         if mp is None:
             raise SystemExit(
-                "no prod_test_v0_metrics.json under runs/prod_test_v0/. This script takes "
+                "no prod_test_v*_metrics.json under runs/. This script takes "
                 "its checkpoint, its test file, the frozen empty-tree tau and the fitted "
-                "length recalibration from that artifact — run notebooks/prod_test_v0.ipynb "
+                "length recalibration from that artifact — run notebooks/prod_test_v1.ipynb "
                 "first, or pass --prod-metrics / --no-prod-metrics."
             )
         prod = json.loads(Path(mp).read_text())
@@ -272,8 +283,8 @@ def resolve_settings(a):
             }
         except KeyError as e:
             raise SystemExit(
-                f"{mp} has no {e} — it is not a prod_test_v0 metrics file, or predates "
-                f"the section-6 recalibration. Re-run notebooks/prod_test_v0.ipynb."
+                f"{mp} has no {e} — it is not a prod_test metrics file, or predates "
+                f"the section-6 recalibration. Re-run notebooks/prod_test_v1.ipynb."
             ) from None
     s = {
         # repo-relative when it can be, so the report and the metrics JSON name the same
@@ -309,8 +320,8 @@ def resolve_settings(a):
         under = prod["empty_tree"]["tau"].get("fitted_under")
         if under is None:
             raise SystemExit(
-                "this artifact records no scale for its tau (a prod_test_v0 predating the "
-                "fix). Re-run notebooks/prod_test_v0.ipynb: a tau without its scale cannot "
+                "this artifact records no scale for its tau (a prod_test run predating the "
+                "fix). Re-run notebooks/prod_test_v1.ipynb: a tau without its scale cannot "
                 "be applied."
             )
         if not (abs(float(under["length_temperature"]) - s["length_temperature"]) < 1e-9
@@ -1406,16 +1417,26 @@ def build_report(a, s, R, figs, tables, cmdline):
             "solved.")
 
     # --- support --------------------------------------------------------------
+    _lnz_support = str(getattr(m["model"], "lnz_support", "legacy"))
     P("## 3. Support and validity — what the model can and cannot produce")
-    P("Three numbers decide how much of any distance below is even the model's fault. "
+    P("These numbers decide how much of any distance below is even the model's fault, "
+      "and they are **scored** against a hard zero (gate G2 of "
+      "`docs/PLAN_prod_test_v1.md`): a non-zero rate is a bug, not a finding. "
       "`Geometry.to_cell` **clips** rather than drops, so truth outside the geometry's "
       "ranges was piled into edge cells during training and the model can never emit "
       "there at all — whatever fraction of truth lies outside is an irreducible floor on "
       "every distance, which is why section 6 scores on the fiducial window. The groomer "
-      "enforces $z > z_\\mathrm{cut}(\\Delta R/R_0)^\\beta$, so truth and plain RSD "
-      "violate it exactly zero times; the coordinate head models $\\ln z$ with an "
-      "*unbounded* normal and has no idea the boundary exists, so a non-zero number in "
-      "that column is a real physics failure, not a plotting artefact.")
+      "enforces $z > z_\\mathrm{cut}(\\Delta R/R_0)^\\beta$ and $z \\le 1/2$ holds by "
+      "construction, so truth and plain RSD violate both exactly zero times.")
+    P("This checkpoint was trained with `model.lnz_support = " + f"`{_lnz_support}`" + "`. "
+      + ("The $\\ln z$ head is an *unbounded* normal and has no idea either boundary "
+         "exists, so a non-zero number in those columns is a real physics failure, not a "
+         "plotting artefact."
+         if _lnz_support != "physical" else
+         "The $\\ln z$ head is a truncated normal on "
+         "$(\\ln z_\\mathrm{cut} - \\beta\\,\\ln(1/\\Delta R),\\ \\ln \\tfrac12]$, so "
+         "those columns are zero **by construction** and a non-zero number is a bug in "
+         "the bound, not a miscalibration."))
     P(tables["support"])
     P(f"Fiducial window: $\\ln(1/\\Delta R) \\in [{U_LO}, {U_HI}]$, "
       f"$\\ln k_t \\in [{V_LO}, {V_HI}]$"
@@ -1800,27 +1821,48 @@ def main(argv=None):
     V_LO, V_HI = geom.ln_kt_range
 
     def support_row(v, w):
+        # WP-D.1 of docs/PLAN_prod_test_v1.md: these are SCORED, with a hard-zero
+        # target. Every boundary below is a property of the generator the training data
+        # came from, so the truth series must read exactly 0 — it is the control, and a
+        # nonzero value there means the bounds are wrong, not the model.
         if not len(v):
-            return dict(out_of_window=np.nan, sd_violation=np.nan,
-                        ktfloor_violation=np.nan)
+            return dict(out_of_window=np.nan, sd_violation=np.nan, z_above_half=np.nan,
+                        ktfloor_violation=np.nan, max_rate=np.nan, passes=False)
         tot = w.sum()
         oow = ((v[:, 0] < U_LO) | (v[:, 0] > U_HI) | (v[:, 1] < V_LO) | (v[:, 1] > V_HI))
         kt = v[:, 1] < V_LO
         if d["sd_known"]:
             sd = v[:, 2] <= (math.log(d["z_cut"]) - d["beta"] * v[:, 0])
             sd_f = float(w[sd].sum() / tot)
+            # z = min(pT1,pT2)/(pT1+pT2) <= 1/2 by construction — the OTHER half of the
+            # ln z leak, which v0 never measured.
+            hi = v[:, 2] > math.log(0.5)
+            hi_f = float(w[hi].sum() / tot)
         else:
-            sd_f = float("nan")
-        return dict(out_of_window=float(w[oow].sum() / tot), sd_violation=sd_f,
-                    ktfloor_violation=float(w[kt].sum() / tot))
+            sd_f = hi_f = float("nan")
+        row = dict(out_of_window=float(w[oow].sum() / tot), sd_violation=sd_f,
+                   z_above_half=hi_f, ktfloor_violation=float(w[kt].sum() / tot))
+        finite = [x for x in row.values() if x == x]
+        row["max_rate"] = float(max(finite)) if finite else float("nan")
+        row["passes"] = bool(finite and max(finite) == 0.0)   # hard zero, not a tolerance
+        return row
 
     SUPPORT = {x: support_row(POOL[x]["v"], POOL[x]["w"]) for x in SERIES}
+    SUPPORT["_target"] = {"rate": 0.0, "gate": "G2",
+                          "note": "a nonzero rate is a bug, not a finding"}
+    SUPPORT["_pass"] = {x: bool(SUPPORT[x]["passes"]) for x in SERIES}
     R["SUPPORT"] = SUPPORT
     tables["support"] = md_table(
-        ["series", "out of window", "soft-drop violation", "$k_t$-floor violation"],
+        ["series", "out of window", "soft-drop violation", "$z > 1/2$",
+         "$k_t$-floor violation", "verdict (target 0)"],
         [[f"`{x}`", pct(SUPPORT[x]["out_of_window"], 3),
-          pct(SUPPORT[x]["sd_violation"], 3), pct(SUPPORT[x]["ktfloor_violation"], 3)]
+          pct(SUPPORT[x]["sd_violation"], 3), pct(SUPPORT[x]["z_above_half"], 3),
+          pct(SUPPORT[x]["ktfloor_violation"], 3),
+          "**PASS**" if SUPPORT[x]["passes"] else "**FAIL**"]
          for x in SERIES])
+    _bad = [x for x in SERIES if not SUPPORT[x]["passes"]]
+    print(f"\nsupport audit (target: hard zero) : "
+          + ("all series PASS" if not _bad else f"FAIL for {', '.join(_bad)}"))
 
     # --- figures --------------------------------------------------------------
     out_dir = Path(a.out) if a.out else (m["ckpt"].resolve().parent / "lund_closure_report")
@@ -2008,6 +2050,11 @@ def main(argv=None):
             "checkpoint": str(m["ckpt"]),
             "aux_features": list(m["aux"]),
             "continuous_coords": bool(cont),
+            # The support audit below is only readable beside this: the same zero means
+            # "the head cannot leave the interval" under `physical` and "it happened not
+            # to" under `legacy` (docs/PLAN_prod_test_v1.md WP-A/WP-D.1).
+            "lnz_support": str(getattr(m["model"], "lnz_support", "legacy")),
+            "kappa_min_mode": float(getattr(m["model"], "kappa_min_mode", 0.0)),
             "selection": {"require_truth_splitting": bool(a.require_truth_splitting),
                           "population": ("len(x)>0 and len(y)>0 (v1, truth-selected)"
                                          if a.require_truth_splitting

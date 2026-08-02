@@ -1,12 +1,22 @@
 # PLAN_prod_test_speedup — why the prod-test notebooks cost more than the training they assess
 
-*Status: **PROPOSED.** Diagnosis is measured (2026-07-31, this box); no code changed yet.*
+*Status: **IMPLEMENTED, 2026-08-01.** Diagnosis measured 2026-07-31 (this box, under
+load); the implementation and its re-measurement are in
+[What was implemented](#what-was-implemented-2026-08-01) at the foot of this document.
+Two of the plan's conclusions did not survive re-measurement on an **idle** box, and a
+**~60 min cost this document dismissed** turned out to be the largest one in the
+notebook; all three are recorded there rather than quietly dropped.*
 
 Covers both notebooks of the production test: [Part A](#part-a--prod_test_v0ipynb) is
 `prod_test_v0.ipynb` (~109 min → ~10 min), [Part B](#part-b--lund_distribution_closure_prod_test_v0ipynb)
 is `lund_distribution_closure_prod_test_v0.ipynb` (~19 → ~8 min). They share one cause —
 batch-1 CPU decode — but their dominant costs are **different stages**, and only one of
 the Part A fixes moves Part B.
+
+The Part A changes ship as a **new notebook**,
+[`notebooks/prod_test_v1.ipynb`](../notebooks/prod_test_v1.ipynb); `prod_test_v0.ipynb`
+stays as the record of how the committed v0 artifact was produced. Part B ships as a
+second generated variant, `lund_distribution_closure_prod_test_v1.ipynb`.
 
 ## Context
 
@@ -59,6 +69,12 @@ Four multiplicative causes, all measured:
 `coordinate_pits` 0.25 s per 5000-jet chunk, and the whole §2b/§2c batched NLL work
 (5 × 97,018 jets) at **0.4 min** — which is the proof that the batched path is fine and
 only the single-jet path is not.
+
+> **Correction (2026-08-01).** That last claim is the one thing in this diagnosis that
+> was wrong, and it was wrong by ~60 minutes: 0.4 min is what §2b/§2c cost with the
+> dataset built once per chunk, which is what the timing above measured — but *not* what
+> the notebook does. See
+> [the batched sections were O(B²)](#the-batched-sections-were-ob2-and-that-was-the-biggest-cost-of-all).
 
 Target: **~109 min → ~10 min.** Changes that move reported numbers within Monte-Carlo
 noise are accepted (decision recorded 2026-07-31); the run will not be bit-comparable to
@@ -264,3 +280,167 @@ Recorded so it is not lost; each is a separate piece of work.
 8. **End to end:** run both notebooks top to bottom on an **idle** box (the four trainings
    and the pytest currently eat ~11 of 20 cores) and record the wall-clock per section
    against the tables above.
+
+## What was implemented (2026-08-01)
+
+Everything above, on the same box with **nothing else running** — which is itself a
+finding: two of the plan's conclusions are artifacts of the load it was measured under,
+and both are corrected below rather than deleted, because the loaded numbers are the ones
+that apply when this notebook is run the way it usually is.
+
+### Code
+
+| where | change |
+|---|---|
+| [`models/base.py`](../src/h2p_rsd_junipr/models/base.py) | `sample_coordinates_many(xf, nx, draws) -> list`, defaulting to a loop over the per-draw hook, so `cfm` / `cinn` / `diffusion` are bit-identical to today |
+| [`models/ar_junipr.py`](../src/h2p_rsd_junipr/models/ar_junipr.py) | overrides it: encode + `xattn_kv` once, pad to `(K, L_max)`, one `_coord_params` call, one call to each sampler. `_coord_params_padded` is the shared body `coord_head_params` now also uses, so the two paths cannot drift |
+| [`eval/closure.py`](../src/h2p_rsd_junipr/eval/closure.py) | `run_closure(..., draws_by_jet=None)`; the continuous branch calls the batched hook |
+| [`eval/calibration.py`](../src/h2p_rsd_junipr/eval/calibration.py) | `run_calibration(..., draws_by_jet=None)` |
+| [`scripts/leading_estimators.py`](../scripts/leading_estimators.py) | `collect(..., draws_by_jet=None)`; the batched hook |
+| [`scripts/make_prod_closure_nb.py`](../scripts/make_prod_closure_nb.py) | emits **two** variants (`v0`, `v1`) from one v2 source |
+| [`notebooks/prod_test_v1.ipynb`](../notebooks/prod_test_v1.ipynb) | new: steps 1–5 of Part A, plus the O(B²) fix below |
+| [`notebooks/lund_distribution_closure_v2.ipynb`](../notebooks/lund_distribution_closure_v2.ipynb) | §0 re-costed, `TORCH_THREADS` knob, batched `q(0|x)` |
+
+New tests: `tests/test_batched_coordinates.py`, `tests/test_shared_draws.py`, plus
+`test_length_pmf_batches_bit_identically` in `tests/test_multiplicity_head.py`,
+`test_no_dataset_is_rebuilt_once_per_item` in `tests/test_notebooks.py`, and both
+variants parameterised through `tests/test_prod_closure_nb.py`.
+
+### Re-measured, idle box, `ar_junipr_v4` + `lundnet`, K = 200
+
+| stage | v0 path | v1 path |
+|---|---|---|
+| `sample_batch(K=200)`, 4 threads | 49 ms/jet | *(unchanged; now drawn once)* |
+| one jet's K coordinate draws | **2 528 ms/jet** | **22 ms/jet** |
+| `run_closure(continuous=True)`, given draws | — | 67 ms/jet |
+| `run_closure(cell)`, given draws | — | 38 ms/jet |
+| `length_pmf` per jet | 6.6 ms/jet | 0.06 ms/jet |
+| §8 support pool per jet | — | 22 ms/jet |
+
+Projected at the notebook's own tiers: one shared sampling pass 1.6 min, §5-continuous
+0.3 min (12.9 min on the v0 path), §5-cell 1.3 min, §6 2.5 s (4.4 min at batch 1), §8 7 s.
+
+### The batched sections were O(B²), and that was the biggest cost of all
+
+Not a decode problem, not in the plan, and larger than everything the plan targeted. Both
+batched helpers of `prod_test_v0.ipynb` — `nll_terms_over` (§2b) and `per_jet_nll_of`
+(§2c) — built their chunk like this:
+
+```python
+b = collate([MatchedLundDataset(chunk, geom, AUX)[k] for k in range(len(chunk))])
+```
+
+The constructor is *inside* the comprehension, so the whole 256-jet dataset is rebuilt
+once per `k`: **B datasets of B jets**. Measured on this box, per jet through that helper:
+
+| | ms/jet |
+|---|---|
+| as written (dataset rebuilt per item) | **7.49** |
+| dataset hoisted out of the comprehension | **0.036** |
+| — of which the `nll_terms` forward itself | 0.24 (CPU) / 0.10 (GPU) |
+
+At `POP_BATCH = 256` that is a 256× multiplier on the dataset build, and across the
+ablation's five arms over all 97,018 jets it is **~60 min** — more than the continuous
+closure and the four re-sampling passes put together. The first end-to-end v1 run was
+still in §2c at 45 minutes, which is what exposed it.
+
+This is exactly the failure mode the diagnosis above could not see: it timed
+`nll_terms` at batch 256 (0.041 ms/jet) and `MatchedLundDataset.__init__` (34 µs/jet)
+*separately*, both correct, and concluded that "the batched path is fine". The batched
+path is fine. The loop wrapping it was not, and the only way to catch that is to time the
+notebook's own code rather than the primitives it calls.
+
+Fixed by hoisting the dataset (`ds_chunk = ...`) in §2b and §2c of **both** notebooks.
+v0 is otherwise frozen, but this one is applied there too: the dataset is deterministic
+and no RNG is involved, so building it once instead of B times cannot change a number —
+it is the one edit that costs a reader nothing and saves them an hour.
+`tests/test_notebooks.py::test_no_dataset_is_rebuilt_once_per_item` walks every
+notebook's AST for the shape so it cannot come back.
+
+### Where the plan was wrong, measured
+
+* **Step 1's magnitude.** "~2× everywhere" holds under the load it was measured under, not
+  on an idle box. Idle, capping to 4 threads costs `run_closure` (38 vs 30 ms/jet) while
+  buying `sample_batch` (49 vs 77) — **net ~10%** for `prod_test_v1`, whose cost is the
+  sampler. The cap is kept, with those numbers in the cell-2 comment.
+* **Part B's step 1 reverses sign.** `lund_distribution_closure_v2`'s largest stage is
+  `map_estimate`'s beam search, which *likes* 20 threads (45.5 ms/jet vs 83.1 at 4), so
+  idle the cap makes that notebook **~10% slower** (8.9 vs 8.1 min at `N_JETS=2000`), not
+  2× faster. It therefore ships as `TORCH_THREADS = None` — an off-by-default knob with
+  both measurements beside it — instead of a hard cap. Same knob, opposite answer in two
+  notebooks: it depends on which stage dominates.
+* **The backend switch is free for the tree, not for the risk.** `energyflow` picked a
+  bit-identical MBR tree on **100%** of 200 held-out jets (the plan quotes 99.3%), and is
+  3.5× on the MBR stage / 1.55× on the whole pass. But EnergyFlow reports the distance on
+  its R-normalised scale, so `mbr_risk_mean` comes out **1/R = 1/8.485** of `pot`'s — a
+  constant factor, which is exactly why the selection is unaffected. `dist_closure_metrics.json`
+  already records `mbr_backend` beside the risk. This is also why the **v0** variant keeps
+  `pot`: its committed artifact records a POT-scale risk.
+
+### Verification, as run
+
+1. **Thread cap** — measured per stage rather than by re-running §3; see above. And no
+   number changes with it: `run_calibration` on 300 held-out jets at K=200 returns
+   **bit-identical** `coverage_68` and `sbc_chi2` at 4 and at 20 threads, over five seeds.
+   One caveat found by the artifact diff below: a *teacher-forced* mean can differ in its
+   last digits, because a multi-threaded reduction adds in a different order. Two of the
+   389 numeric keys did — both `pit_mean`s, at a relative **7 × 10⁻¹¹**.
+2. **Batched coordinates** — `tests/test_batched_coordinates.py`: per-row shapes, cells
+   land in their own cell, marginals agree with the loop to within 5 standard errors over
+   2 000 draws, `None` per row for `ar_junipr_v1`, and the contract default is bit-identical.
+3. **Batched `length_pmf`** — bit-identical, asserted twice: in
+   `tests/test_multiplicity_head.py` and in the notebook itself on 500 jets.
+4. **Shared draws** — `tests/test_shared_draws.py` proves nothing re-samples (the helpers
+   run with `sample_batch` monkeypatched to raise) and that handing over the same draws
+   reproduces the cell-level metrics exactly; `prod_test_v1` §9 prints its headline numbers
+   beside the v0 artifact's whenever one is on disk.
+
+   The band to read those against had to be measured, since none was on record: over **17
+   independent draw streams** on the same 247 scored jets, `coverage_68` is
+   **0.53 ± 0.03** (range 0.490–0.579) and `sbc_chi2_uniform` is **27 ± 5** (range
+   20.1–35.3).
+
+   In the event the band was not needed, which is the more interesting result. Comparing
+   the two artifacts key by key — **389 numeric keys, 345 bit-identical**, 2 differing at
+   7 × 10⁻¹¹ (thread-order, above) and 32 being the coordinate rows — the v1 run came back
+   **bit-identical on every cell-level number** — `dlund_identity` / `_mode` / `_medoid`, `coverage_68` (0.5381),
+   `sbc_chi2` (107.0), `mult_bias_posterior`, `posterior_cells_emitted` (271),
+   `tarp_max_dev` (0.0367), all at Δ = 0.0000. The reason is that v0 called
+   `seed_everything(SEED)` before each of its four sampling passes and walked the same
+   tier in the same order, so the four passes were drawing **the same draws**: sharing
+   them is an exact refactor, and v0 was paying three times over for a coincidence
+   nobody had checked. Only the two sections that interleave coordinate draws moved —
+   `dlund_posterior_geomedian_cont` +0.88% and `collect()`'s cell medoid ratio −0.19%,
+   with the small-sample rows built on them (the `*_oracle`s, §8's `sd_violation` on
+   300 jets × 20 draws) moving up to ~6% — which is `sample_coordinates_many` reordering
+   the RNG, exactly as advertised. The headline `nll.total_per_jet`,
+   `aux_ablation.delta_nat_per_jet`, `empty_tree.tau.value` and the fitted `(T, tilt)` are
+   all identical to the last bit.
+5. `python -m pytest tests/` green (476 passed, 1 skipped); every new argument is optional
+   and `h2p-rsd-junipr eval` is untouched — re-run in full on the production-test
+   checkpoint (97k jets, `pit_coords`/`stratify_regions`/`tarp`/`closure_continuous` all
+   on). Its draw-free rows come back identical to the run recorded in
+   `runs/prod_test_v0/eval_cli.log`; the draw-dependent ones move inside the band above,
+   as they must — the continuous closure no longer consumes the RNG the same way, so
+   everything downstream of it sees a different stream. And with an identical stream the
+   two versions agree bit-for-bit: `run_calibration` at a fixed seed returns the same
+   numbers before and after the change, which is what says the plumbing is plumbing.
+6. **Part B backend switch** — 200 jets, K=120, 16 candidates: identical tree 100%,
+   identical multiplicity 100%, MBR 98.0 → 22.0 ms/jet.
+7. **Part B regeneration** — both variants regenerated; `tests/test_prod_closure_nb.py`
+   pins each to v2 outside the title and parameter cells.
+8. **End to end** — `prod_test_v1.ipynb` executed top to bottom on the idle box:
+   **5.90 min**, no errors, `ACCEPTANCE: PASS`, artifact written to
+   `<ckpt>/prod_test_v1/`. Per cell, the six that carry the run:
+
+   | cell | s |
+   |---|---|
+   | §1 the one shared sampling pass | 85.8 |
+   | §2c aux ablation, 5 arms × 97k jets | 81.0 |
+   | §5 `run_closure` cell tier, 2000 jets | 74.8 |
+   | §4 TARP, 300 jets | 22.6 |
+   | §2b held-out NLL, 97k jets | 20.0 |
+   | §5 `run_closure` continuous, 300 jets | 17.4 |
+
+   Everything else is under 18 s, including the whole of §6 (the `(T, tilt)` fit is now
+   the largest thing in it at 17 s, which it never was before). The target was ~10 min.

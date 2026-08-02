@@ -1,4 +1,5 @@
-"""Dataset statistics and the multiplicity-support guard (docs/PLAN_UPDATES.md WP4).
+"""Dataset statistics, the multiplicity-support guard (docs/PLAN_UPDATES.md WP4), and
+the `ln z` grooming-record guard (docs/PLAN_prod_test_v1.md WP-A).
 
 A categorical multiplicity head (`ar_junipr_v3`, `cinn`, `diffusion`, `cfm`) has a
 FINITE support `N = 0..model.max_emissions`. The v2 continue/stop head had none: it
@@ -14,6 +15,8 @@ and `eval` after the datamodule is set up.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -107,3 +110,82 @@ def check_multiplicity_support(jets, cfg, *, strict=True, verbose=True) -> dict:
     elif verbose and over:
         print(f"[data] multiplicity support OK: {msg.split('.')[0]}.")
     return stats
+
+
+# ---------------------------------------------------------------------------
+# WP-A: the ln z support declared by the model vs the one the file was groomed to
+# ---------------------------------------------------------------------------
+def check_lnz_support(jets, cfg, *, strict=True, verbose=True) -> dict:
+    """Guard `model.lnz_support='physical'` against the data actually loaded.
+
+    `(lnz_zcut, lnz_beta)` are config fields because `build_model` sees only the config
+    — but they are properties of the FILE, and a mismatch is silent and total: the head
+    normalizes over an interval the truth does not live on, so every `ln z` likelihood,
+    PIT and draw is wrong while the loss curve looks ordinary. So the declared pair is
+    checked against the jets' own grooming record, and the truth `ln z` values are
+    checked against the resulting interval.
+
+    Returns the audit dict; `strict=False` downgrades the error to a warning (`eval`,
+    where the model is already trained). A no-op in `legacy` mode and for data carrying
+    no grooming record (synthetic), which is reported rather than assumed."""
+    out: dict = {"support": str(OmegaConf.select(cfg, "model.lnz_support") or "legacy")}
+    if out["support"] != "physical" or not jets:
+        return out
+    z_cut = float(OmegaConf.select(cfg, "model.lnz_zcut") or 0.1)
+    beta = float(OmegaConf.select(cfg, "model.lnz_beta") or 0.0)
+    out.update(z_cut=z_cut, beta=beta)
+
+    def _record(key):
+        vals = np.array([j[key] for j in jets if key in j and j[key] == j[key]], dtype=float)
+        return vals
+
+    file_zcut, file_beta = _record("z_cut"), _record("beta")
+    if file_zcut.size == 0 or file_beta.size == 0:
+        out["checked"] = False
+        if verbose:
+            print("[data] NOTE: model.lnz_support='physical' but the loaded jets carry no "
+                  "grooming record (synthetic data?), so the declared "
+                  f"(z_cut={z_cut:g}, beta={beta:g}) could not be verified against them.")
+        return out
+    out["checked"] = True
+    out["file_z_cut"] = [float(v) for v in np.unique(file_zcut)]
+    out["file_beta"] = [float(v) for v in np.unique(file_beta)]
+
+    problems = []
+    if not np.allclose(file_zcut, z_cut) or not np.allclose(file_beta, beta):
+        problems.append(
+            f"model.lnz_zcut/lnz_beta = ({z_cut:g}, {beta:g}) but the file was groomed with "
+            f"z_cut in {out['file_z_cut']}, beta in {out['file_beta']}"
+        )
+    # ...and the interval those numbers imply must actually contain the truth. This
+    # catches a convention error (a sign on beta, an R != 1) that matching scalars cannot.
+    lnz = np.concatenate([j["y"][2] for j in jets if len(j["y"][2])]) if jets else np.zeros(0)
+    if lnz.size:
+        u = np.concatenate([j["y"][0] for j in jets if len(j["y"][0])])
+        lo = math.log(z_cut) - beta * u
+        hi = math.log(0.5)
+        n_below = int((lnz < lo - 1e-6).sum())
+        n_above = int((lnz > hi + 1e-6).sum())
+        out.update(n_emissions=int(lnz.size), n_below_lo=n_below, n_above_hi=n_above,
+                   frac_outside=float((n_below + n_above) / lnz.size))
+        if n_below or n_above:
+            problems.append(
+                f"{n_below + n_above}/{lnz.size} truth emissions fall OUTSIDE "
+                f"(ln z_cut - beta*ln(1/DeltaR), ln 1/2] = "
+                f"({math.log(z_cut):.4f} - {beta:g}*u, {hi:.4f}] "
+                f"({n_below} below, {n_above} above)"
+            )
+    out["ok"] = not problems
+    if problems:
+        msg = ("[data] ln z support mismatch: " + "; ".join(problems)
+               + ". The physical `ln z` head normalizes over that interval, so a mismatch "
+                 "silently mis-normalizes every ln z likelihood, PIT and draw. Fix the "
+                 "model.lnz_zcut/lnz_beta pair, or train with model.lnz_support=legacy.")
+        if strict:
+            raise ValueError(msg)
+        print("[data] WARNING: " + msg[len("[data] "):])
+    elif verbose:
+        print(f"[data] ln z support OK: physical, z_cut={z_cut:g}, beta={beta:g}"
+              + (f", all {out['n_emissions']} truth emissions inside "
+                 f"[{math.log(z_cut):.4f}, {math.log(0.5):.4f}]" if lnz.size else ""))
+    return out

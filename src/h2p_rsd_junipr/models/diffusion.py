@@ -179,7 +179,8 @@ class Diffusion(PosteriorModel):
         return torch.cat([e.expand(len(cells), -1), self.cell_emb(cells)], dim=-1)
 
     @torch.inference_mode()
-    def sample_coordinates(self, xf, nx, cells):
+    def sample_coordinates(self, xf, nx, cells, *, generator=None):
+        # `generator` is accepted for the contract and not threaded: the reverse process draws from the global stream.
         """A draw per cell from the reverse process — `_x0` verbatim, which already
         starts from pure noise and injects noise at every step but the last, so it is
         a genuine ancestral sample rather than a mode."""

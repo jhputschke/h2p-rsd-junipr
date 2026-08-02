@@ -84,6 +84,26 @@ class ARJunipr(PosteriorModel):
         self.use_cross_attention = bool(getattr(m, "use_cross_attention", False))
         self.half_u = geometry.half_u
         self.half_v = geometry.half_v
+        # bounded-support ln z head (docs/PLAN_prod_test_v1.md WP-A); getattr-tolerant so
+        # pre-WP-A checkpoint configs rebuild as the unbounded Normal they were trained as.
+        self.lnz_support = str(getattr(m, "lnz_support", "legacy"))
+        if self.lnz_support not in ("legacy", "physical"):
+            raise ValueError(
+                f"model.lnz_support must be 'legacy' or 'physical', got {self.lnz_support!r}"
+            )
+        self.lnz_physical = self.lnz_support == "physical"
+        self.lnz_zcut = float(getattr(m, "lnz_zcut", 0.1))
+        self.lnz_beta = float(getattr(m, "lnz_beta", 0.0))
+        if self.lnz_physical and not (0.0 < self.lnz_zcut < 0.5):
+            raise ValueError(
+                f"model.lnz_support='physical' needs 0 < model.lnz_zcut < 0.5 (the soft-drop "
+                f"lower bound must sit below the kinematic z <= 1/2), got {self.lnz_zcut!r}"
+            )
+        # ln z_cut and ln(1/2) as plain floats; the bounds themselves are cell-conditional
+        # and built on the fly from `cell_cx` (see `lnz_bounds`), so NO buffer is added and
+        # the `legacy` state_dict stays byte-identical.
+        self._ln_zcut = math.log(self.lnz_zcut) if self.lnz_physical else float("-inf")
+        self._ln_half = math.log(0.5)
 
         emb = int(cfg.encoder.emb_dim)  # shared emb dim (encoder x_feat <-> decoder y_embed)
         self.emb_dim = emb
@@ -219,13 +239,53 @@ class ARJunipr(PosteriorModel):
         mu = torch.atan2(b, a)
         return du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig, mu, kappa
 
+    # -- WP-A: the physical ln z support -------------------------------------
+    def lnz_bounds(self, cx):
+        """`(lo, hi)` of the `ln z` support for nodes in the cells whose centres are
+        `cx`, or `None` in `legacy` mode.
+
+        Soft Drop keeps a splitting iff `z > z_cut (DeltaR/R)^beta` (Larkoski et al.,
+        arXiv:1402.2657; RSD: Dreyer et al., arXiv:1804.03657), i.e. — with this repo's
+        `u = ln(1/DeltaR)` convention and `R = 1` — `ln z > ln z_cut - beta*u`; and
+        `z = min(pT1,pT2)/(pT1+pT2) <= 1/2` by construction. So
+
+            ln z  in  ( ln z_cut - beta*u ,  ln(1/2) ].
+
+        The bound is made **cell-conditional**, not node-conditional: it is evaluated at
+        the `u` in the cell that makes it LOOSEST,
+
+            lo = min_{|u - cx| <= half_u} (ln z_cut - beta*u)
+               = ln z_cut - beta*cx - |beta|*half_u,
+
+        so every truth in the cell lies inside it. That is what keeps the coordinate
+        likelihood a product of independent-given-cell factors: a bound that read the
+        node's own drawn `u` would couple `ln z` to `du`, which this factorization
+        cannot express (the per-node joint flow of `PLAN_UPDATES.md` WP1 is where that
+        coupling belongs — plan §12's trigger).
+
+        At the fielded `beta = 0` the two coincide exactly and the bound is the constant
+        `(ln z_cut, ln 1/2]`; for `beta != 0` the residual slack is `|beta|*half_u`, and
+        the WP-D support audit measures what leaks through it rather than assuming."""
+        if not self.lnz_physical:
+            return None
+        lo = self._ln_zcut - self.lnz_beta * cx - abs(self.lnz_beta) * self.half_u
+        # `hi` is materialised as a tensor rather than left a float: torch.clamp takes
+        # two Tensors or two Numbers, never one of each, and every caller here clamps
+        # against the pair.
+        return lo, torch.full_like(lo, self._ln_half)
+
     def _coord_logprob(self, params, u, v, lnz, psi, cx, cy):
         du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig, mu, kappa = params
         du = (u - cx).clamp(-self.half_u, self.half_u)
         dv = (v - cy).clamp(-self.half_v, self.half_v)
         ll = trunc_normal_logpdf(du, du_mean, du_sig, -self.half_u, self.half_u)
         ll = ll + trunc_normal_logpdf(dv, dv_mean, dv_sig, -self.half_v, self.half_v)
-        ll = ll + gauss_logpdf(lnz, lnz_mean, lnz_sig)
+        bounds = self.lnz_bounds(cx)
+        if bounds is None:
+            ll = ll + gauss_logpdf(lnz, lnz_mean, lnz_sig)
+        else:
+            lo, hi = bounds
+            ll = ll + trunc_normal_logpdf(lnz.clamp(min=lo, max=hi), lnz_mean, lnz_sig, lo, hi)
         ll = ll + vonmises_logpdf(psi, mu, kappa)
         return ll
 
@@ -324,11 +384,19 @@ class ARJunipr(PosteriorModel):
         cx, cy = self.cell_cx[yc], self.cell_cy[yc]
         du = (yraw[..., 0] - cx).clamp(-self.half_u, self.half_u)
         dv = (yraw[..., 1] - cy).clamp(-self.half_v, self.half_v)
+        bounds = self.lnz_bounds(cx)
+        if bounds is None:
+            lnz_pit = gauss_cdf(yraw[..., 2], lnz_mean, lnz_sig)
+        else:  # the SAME truncated normal the likelihood normalizes by, as for du/dv
+            lo, hi = bounds
+            lnz_pit = trunc_normal_cdf(
+                torch.clamp(yraw[..., 2], min=lo, max=hi), lnz_mean, lnz_sig, lo, hi
+            )
         u = torch.stack(
             [
                 trunc_normal_cdf(du, du_mean, du_sig, -self.half_u, self.half_u),
                 trunc_normal_cdf(dv, dv_mean, dv_sig, -self.half_v, self.half_v),
-                gauss_cdf(yraw[..., 2], lnz_mean, lnz_sig),
+                lnz_pit,
                 vonmises_cdf(yraw[..., 3], mu, kappa),
             ],
             dim=-1,
@@ -354,8 +422,16 @@ class ARJunipr(PosteriorModel):
         return p_cont, logp_split, h
 
     def _step_batched(self, tok: torch.Tensor, e: torch.Tensor, h, kv=None):
+        """The SAMPLING step. `decode.continue_temperature` is applied here and only
+        here, which is what makes it a decode-layer object: `_step` (beam search),
+        `nll_terms` and `describe_sequence` read `cont_head` directly, so the trained
+        likelihood and the MAP are untouched by it. The default 1.0 skips the branch
+        entirely rather than dividing by one, so the off path is bit-identical."""
         hv, h = self._step_core(tok, e, h, kv)
-        p_cont = torch.sigmoid(self.cont_head(hv)).squeeze(-1)
+        cont_logit = self.cont_head(hv)
+        if self.continue_temperature != 1.0:
+            cont_logit = cont_logit / self.continue_temperature
+        p_cont = torch.sigmoid(cont_logit).squeeze(-1)
         split_logits = self.split_head(hv)
         return p_cont, split_logits, h
 
@@ -452,7 +528,11 @@ class ARJunipr(PosteriorModel):
 
         v1 (`continuous_coords=False`) has no coordinate head, so it returns None and
         callers fall back to cell centres. Reproducibility is the global torch RNG
-        (`train.trainer.seed_everything`) unless a `generator` is supplied."""
+        (`train.trainer.seed_everything`) unless a `generator` is supplied.
+
+        One jet's K draws go through `sample_coordinates_many` instead: this call
+        re-runs `encode()` and `xattn_kv()` every time, which is ~57% of it at 20
+        threads and produces the same tensor K times."""
         if not self.continuous_coords:
             return None
         dev = xf.device
@@ -462,12 +542,88 @@ class ARJunipr(PosteriorModel):
         yc = torch.tensor([int(c) for c in cells], dtype=torch.long, device=dev)
         du = trunc_normal_sample(du_m, du_s, -self.half_u, self.half_u, generator=generator)
         dv = trunc_normal_sample(dv_m, dv_s, -self.half_v, self.half_v, generator=generator)
-        lnz = lnz_m + lnz_s * torch.randn(lnz_m.shape, device=dev, dtype=lnz_m.dtype,
-                                          generator=generator)
+        lnz = self._sample_lnz(lnz_m, lnz_s, self.cell_cx[yc], generator=generator)
         psi = vonmises_sample(mu, kappa, generator=generator)
         return torch.stack(
             [self.cell_cx[yc] + du, self.cell_cy[yc] + dv, lnz, psi], dim=-1
         )
+
+    @torch.inference_mode()
+    def sample_coordinates_many(self, xf, nx, draws, *, generator=None):
+        """One jet's K draws' coordinates in ONE forward pass — the batched sibling of
+        `sample_coordinates`, returning a `(L_k, 4)` tensor per draw.
+
+        Same three densities, same teacher-forced replay; the only difference is that
+        `encode()` and `xattn_kv()` run once instead of K times and the whole
+        `(K, L_max)` block of cells goes through `_decode_states` / `_coord_params` /
+        the samplers as one batch. Rows are padded to `L_max` with cell 0 and sliced
+        back afterwards, so a padded position costs one wasted sample and reaches no
+        caller.
+
+        **This reorders RNG consumption** relative to the per-draw loop: the draws are
+        from the same conditional and agree in distribution, but they are not the same
+        numbers, so anything downstream shifts within Monte-Carlo noise. v1
+        (`continuous_coords=False`) returns a list of None, which is what preserves
+        every caller's `c is None -> no coordinate density` degradation path."""
+        if not self.continuous_coords:
+            return [None] * len(draws)
+        dev = xf.device
+        lens = [len(d) for d in draws]
+        K = len(lens)
+        if K == 0:
+            return []
+        empty = torch.zeros(0, 4, device=dev)
+        L_max = max(lens)
+        if L_max == 0:                       # every draw is the empty tree
+            return [empty for _ in range(K)]
+        self.eval()
+        yc = torch.zeros(K, L_max, dtype=torch.long, device=dev)
+        for k, d in enumerate(draws):
+            if lens[k]:
+                yc[k, : lens[k]] = torch.as_tensor([int(c) for c in d],
+                                                   dtype=torch.long, device=dev)
+        du_m, dv_m, du_s, dv_s, lnz_m, lnz_s, mu, kappa = self._coord_params_padded(xf, nx, yc)
+        du = trunc_normal_sample(du_m, du_s, -self.half_u, self.half_u, generator=generator)
+        dv = trunc_normal_sample(dv_m, dv_s, -self.half_v, self.half_v, generator=generator)
+        lnz = self._sample_lnz(lnz_m, lnz_s, self.cell_cx[yc], generator=generator)
+        psi = vonmises_sample(mu, kappa, generator=generator)
+        coords = torch.stack(
+            [self.cell_cx[yc] + du, self.cell_cy[yc] + dv, lnz, psi], dim=-1
+        )
+        return [coords[k, : lens[k]] if lens[k] else empty for k in range(K)]
+
+    def _sample_lnz(self, lnz_m, lnz_s, cx, *, generator=None):
+        """One `ln z` draw per element: the unbounded Normal in `legacy` mode, the
+        cell-conditional truncated normal in `physical` mode.
+
+        The two samplers are paired with the two densities in `_coord_logprob` here, in
+        one place, so a draw can never come from a distribution the likelihood does not
+        normalize — which is exactly the failure `physical` mode exists to remove (v0's
+        0.88% soft-drop violations came from sampling a Normal whose support the
+        grooming forbids)."""
+        bounds = self.lnz_bounds(cx)
+        if bounds is None:
+            return lnz_m + lnz_s * torch.randn(
+                lnz_m.shape, device=lnz_m.device, dtype=lnz_m.dtype, generator=generator
+            )
+        lo, hi = bounds
+        return trunc_normal_sample(lnz_m, lnz_s, lo, hi, generator=generator)
+
+    def _coord_params_padded(self, xf, nx, yc: torch.Tensor):
+        """The eight `_coord_params` tensors, each `(B, L)`, for a `(B, L)` block of
+        cell chains teacher-forced on ONE jet's conditioning.
+
+        The body `coord_head_params` (B = 1) and `sample_coordinates_many` (B = K)
+        share: encode once, decode the block, concatenate the cell embedding, read the
+        heads. Factored rather than duplicated so the batched path cannot drift from
+        the single-draw one."""
+        B, L = yc.shape
+        e = self.encode(xf, nx)
+        if e.shape[0] != B:  # one jet's context, broadcast over the block's rows
+            e = e.expand(B, -1)
+        out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
+        eh = torch.cat([out, e.unsqueeze(1).expand(-1, L + 1, -1)], dim=-1)[:, :L, :]
+        return self._coord_params(torch.cat([eh, self.y_embed(yc)], dim=-1))
 
     @torch.inference_mode()
     def coord_head_params(self, xf, nx, cells):
@@ -484,20 +640,32 @@ class ARJunipr(PosteriorModel):
         if not cells:
             return tuple(torch.zeros(0, device=dev) for _ in range(8))
         self.eval()
-        L = len(cells)
-        e = self.encode(xf, nx)
         yc = torch.tensor([cells], dtype=torch.long, device=dev)
-        out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
-        eh = torch.cat([out, e.unsqueeze(1).expand(-1, L + 1, -1)], dim=-1)[:, :L, :]
-        params = self._coord_params(torch.cat([eh, self.y_embed(yc)], dim=-1))
-        return tuple(p.squeeze(0) for p in params)
+        return tuple(p.squeeze(0) for p in self._coord_params_padded(xf, nx, yc))
 
     @torch.inference_mode()
-    def describe_sequence(self, xf, nx, cells) -> LundPointEstimate:
-        """Attach continuous coordinates (head modes for v2; cell centres for v1)
-        and the per-node + total log-density to a primary cell sequence. The total
-        equals -per_jet_nll for (x, y_hat) when y_hat's continuous targets are
-        these modes — the full joint log-density of the returned config."""
+    def describe_sequence(self, xf, nx, cells, coords=None, *, generator=None
+                          ) -> LundPointEstimate:
+        """Attach continuous coordinates and the per-node + total log-density to a
+        primary cell sequence. The total is the full joint log-density **of the returned
+        configuration** — that identity is the contract, and it is what forces the
+        log-density to be re-evaluated whenever a coordinate is not the head's mode.
+
+        Three coordinate sources (docs/PLAN_prod_test_v1.md WP-C):
+
+        * `coords` given — an `(L, 4)` table the caller already drew. This is the MBR
+          medoid path: the medoid IS a posterior sample, so its own coordinates are
+          carried verbatim and `psi_identified` is `None` (mode identifiability is not
+          a question about a draw).
+        * head modes (`coords=None`, the staged MAP), **except** where the von Mises
+          `kappa` falls below `decode.kappa_min_mode`. There the mode is the direction
+          of a near-zero resultant — arbitrary — so a DRAW is substituted and the node
+          is flagged `psi_identified=False`. v0 is the case in point: median
+          kappa = 0.022 (peak/trough 1.04) yet MAP/MBR reported a psi resultant
+          |R| = 0.69 against a truth of 0.045, a 17.5x pooled row that inflated both
+          decode gmeans.
+        * cell centres, for v1 (`continuous_coords=False`), which has no coordinate head.
+        """
         self.eval()
         dev = xf.device
         L = len(cells)
@@ -522,17 +690,47 @@ class ARJunipr(PosteriorModel):
             chosen = split_lp.gather(-1, yc[0].unsqueeze(-1)).squeeze(-1)
             cx, cy = self.cell_cx[yc], self.cell_cy[yc]
 
+            kappa_col = [None] * L
+            psi_flag: list = [None] * L
             if self.continuous_coords:
                 cell_emb = self.y_embed(yc)
                 params = self._coord_params(torch.cat([eh_t, cell_emb], dim=-1))
-                du_mean, dv_mean, _, _, lnz_mean, _, mu, _ = params
-                u_mode, v_mode = cx + du_mean, cy + dv_mean
-                coord_per = self._coord_logprob(params, u_mode, v_mode, lnz_mean, mu, cx, cy).squeeze(0)
+                du_mean, dv_mean, _, _, lnz_mean, _, mu, kappa = params
+                kappa_col = [float(kappa[0, t]) for t in range(L)]
+                if coords is not None:
+                    c4 = torch.as_tensor(coords, dtype=cx.dtype, device=dev).reshape(1, L, 4)
+                    u_mode, v_mode = c4[..., 0], c4[..., 1]
+                    lnz_mean, mu = c4[..., 2], c4[..., 3]
+                    src = "sample"                       # psi_flag stays None throughout
+                else:
+                    u_mode, v_mode = cx + du_mean, cy + dv_mean
+                    # The mode of a TRUNCATED normal is its untruncated mean clamped into
+                    # the support, so `physical` mode moves the reported ln z inside the
+                    # grooming boundary by construction, not by a downstream repair.
+                    bounds = self.lnz_bounds(cx)
+                    lnz_mean = (lnz_mean if bounds is None
+                                else torch.clamp(lnz_mean, min=bounds[0], max=bounds[1]))
+                    src = "mode"
+                    # --- WP-C.2: the psi mode is reported only where it is identified ---
+                    weak = kappa < self.kappa_min_mode
+                    if bool(weak.any()):
+                        g = self.decode_generator(dev) if generator is None else generator
+                        drawn = vonmises_sample(mu, kappa, generator=g)
+                        mu = torch.where(weak, drawn, mu)
+                        psi_flag = [(not bool(weak[0, t])) for t in range(L)]
+                    else:
+                        psi_flag = [True] * L
+                # Re-evaluated at whatever is actually reported, so `logprob` remains the
+                # joint density of the returned configuration in all three branches.
+                coord_per = self._coord_logprob(
+                    params, u_mode, v_mode, lnz_mean, mu, cx, cy
+                ).squeeze(0)
             else:
                 u_mode, v_mode = cx, cy
                 lnz_mean = torch.zeros_like(cx)
                 mu = torch.zeros_like(cx)
                 coord_per = torch.zeros(L, device=dev)
+                src = "cell_center"
 
             for t, c in enumerate(cells):
                 c = int(c)
@@ -546,16 +744,37 @@ class ARJunipr(PosteriorModel):
                         ln_invDelta=u, ln_kt=v, ln_z=lz, psi=ps,
                         kt=math.exp(v), delta_R=math.exp(-u), z=math.exp(lz),
                         logp_split=ls, logp_coord=lk, logp_cont=lc,
+                        kappa=kappa_col[t], psi_identified=psi_flag[t],
                     )
                 )
+        else:
+            src = "sample" if coords is not None else ("mode" if self.continuous_coords
+                                                       else "cell_center")
         total += length_logp
-        return LundPointEstimate(nodes=nodes, logprob=total, multiplicity=L)
+        return LundPointEstimate(nodes=nodes, logprob=total, multiplicity=L,
+                                 coords_source=src)
 
-    def describe_cells(self, xf, nx, cells) -> LundPointEstimate:
-        """MBR winner -> LundPointEstimate. AR attaches the head-mode continuous
-        coordinates and the exact joint log-density (its staged decode), richer than
-        the base cell-centre fallback."""
-        return self.describe_sequence(xf, nx, cells)
+    def describe_cells(self, xf, nx, cells, coords=None, *, generator=None
+                       ) -> LundPointEstimate:
+        """One posterior DRAW (the MBR medoid) -> LundPointEstimate, carrying its own
+        sampled coordinates.
+
+        This used to re-attach the head modes, which forfeited the one property that
+        makes the medoid worth having: it is a genuine posterior sample, and a sample
+        with its modes pasted back on is neither a sample nor the MAP. v0 measured the
+        cost — a psi resultant |R| = 0.69 against a truth of 0.045, from a head whose
+        median kappa is 0.022 — and `PLAN_prod_test_v1.md` WP-C.1 is the repair.
+
+        `coords` given (the caller already drew them alongside the cells) is used
+        verbatim; otherwise one draw is taken here. `map_estimate` is unaffected: it
+        goes through `describe_sequence` with `coords=None`, which is still the staged
+        mode decode."""
+        cells = [int(c) for c in cells]
+        if coords is None and cells and self.continuous_coords:
+            # the decode stream, not the global one — see `PosteriorModel.decode_generator`
+            g = self.decode_generator(xf.device) if generator is None else generator
+            coords = self.sample_coordinates(xf, nx, cells, generator=g)
+        return self.describe_sequence(xf, nx, cells, coords, generator=generator)
 
     @torch.inference_mode()
     def length_pmf(self, xf, nx, mults=None, n_samples: int = 500):

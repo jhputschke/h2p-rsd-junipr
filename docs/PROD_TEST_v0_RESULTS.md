@@ -364,3 +364,46 @@ the multiplicity rather than the tree shape.
    a now-uncontaminated footing.
 
 All three are ~1 h each at this scale and are independent, so they can share one grid.
+
+---
+
+## Addendum (production test v1) — three of these numbers were the measurement
+
+**Nothing above is revised.** Every number in §1–§11 stands as the record of what the v0
+suite reported. This addendum records what the *upgraded* suite says about the **same
+checkpoint**, with no retraining, as required by
+[`PLAN_prod_test_v1.md`](PLAN_prod_test_v1.md) §13.4. Measured on 2 000 held-out jets from
+`data/jet_aux_asym_test.root` (decode-tier rows on 300); artifacts `eval_metrics_calib.json`
+and `eval_metrics_decode.json` beside the checkpoint. Full account:
+[`PROD_TEST_v1_RESULTS.md`](PROD_TEST_v1_RESULTS.md) §1 and §4.
+
+**§9's central reading is inverted.** It said *"TARP passing while SBC-on-N fails localises
+the residue to the multiplicity rather than the tree shape."* Both statistics were quoted
+against nulls they do not have:
+
+| | §9 | with a null recomputed at this run's size |
+|---|---|---|
+| SBC-on-N | χ² 107 vs χ²(9) 16.90 ⇒ fails | **88th percentile of its own null** ⇒ consistent with calibrated. `N` takes 7 values here, so a mid-rank statistic cannot be uniform on [0,1] for any model; χ²(9) is the null for a *continuous* rank |
+| TARP | 0.037 vs 0.079 at n = 300 ⇒ passes | **0.046 vs 0.027 at n = 2 000 ⇒ fails**, `ECP(0.68) = 0.635`, over-confident. `1.36/√n` is asymptotic; at n = 300 the band could not resolve a 5% deviation |
+| ⟨N⟩ 1.15 vs 1.40 (§9.2) | posterior under-produces | **ratio 0.977** on the full population. §9's number paired each kept jet's bias with a *different* jet's truth, and conditioned on `N_true ≥ 1`, which biases it low by construction |
+
+**The residue is in the tree shape, not the multiplicity.**
+
+**§8's support number was the smaller half.** The 0.88% soft-drop violation is confirmed
+(0.833% here), but the *upper* wall was never checked: `z ≤ ½` holds by construction, and
+**3.943%** of sampled emissions violate it. Truth and identity remain at exactly zero.
+
+**§6's ψ row was the decode rule, not the model.** Against the uniform floor `√π/2√n` that
+`|R|` requires, the repaired decode — MBR carrying the medoid's own sampled coordinates —
+gives `|R| = 0.036` on 325 nodes against a floor of 0.049 (Rayleigh p = 0.66), versus a
+truth of 0.078 on 427 (floor 0.043). The 17.5× row came from attaching the *mode* of a von
+Mises whose median κ is 0.022.
+
+**What survives unchanged.** The acceptance criterion: medoid/identity **0.929** and
+off-grid geo-median/identity **0.927**, agreeing in sign; repaired MBR/identity **0.943**.
+The `ln z` PIT still fails (KS 0.073 vs a 0.026 critical value at this n) — and the region ×
+coordinate cross localises it to `wide_soft`, the quadrant holding 94% of the emissions, at
+2.9× its critical value, which is what a *support* error looks like rather than a
+conditioning failure. `narrow_soft` (§9.3) shows **no** coordinate PIT failure at all
+(worst cell 0.64× its critical value), so its coverage deficit is not attributable to a
+miscalibrated coordinate there.

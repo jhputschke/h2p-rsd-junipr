@@ -227,7 +227,7 @@ class CINN(PosteriorModel):
         return torch.cat([e.expand(len(cells), -1), self.cell_emb(cells)], dim=-1)
 
     @torch.inference_mode()
-    def sample_coordinates(self, xf, nx, cells):
+    def sample_coordinates(self, xf, nx, cells, *, generator=None):
         """A draw from the flow per cell — `flow.inverse` of a standard-normal base
         point, which is the same map `map_estimate` evaluates at z = 0 for the mode.
         The flow's support is the whole of R^4, so nothing needs clamping here."""
@@ -238,7 +238,8 @@ class CINN(PosteriorModel):
         self.eval()
         ctx = self._coord_ctx(self.encode(xf, nx),
                               torch.tensor(cells, dtype=torch.long, device=dev))
-        return self.flow.inverse(torch.randn(len(cells), 4, device=dev), ctx)
+        base = torch.randn(len(cells), 4, device=dev, generator=generator)
+        return self.flow.inverse(base, ctx)
 
     @torch.inference_mode()
     def length_pmf(self, xf, nx, mults=None, n_samples: int = 500) -> np.ndarray:

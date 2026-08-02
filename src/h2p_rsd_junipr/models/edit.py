@@ -837,9 +837,18 @@ class EditTransducer(PosteriorModel):
         return LundPointEstimate(nodes=nodes, logprob=total, multiplicity=L)
 
     @torch.inference_mode()
-    def describe_cells(self, xf, nx, cells) -> LundPointEstimate:
+    def describe_cells(self, xf, nx, cells, coords=None, *, generator=None
+                       ) -> LundPointEstimate:
         """MBR winner -> `LundPointEstimate`: a genuine draw from `q(coords | cells, x)`
-        plus this family's exact joint log-density of it."""
+        plus this family's exact joint log-density of it.
+
+        `coords` — the `(L, 4)` table the caller already drew alongside the cells — is
+        carried verbatim rather than redrawn, which is what keeps the medoid's kinematics
+        the ones it was actually selected on (§11 of docs/README_PHYSICS.md). Redrawing
+        here would score a tree the risk minimisation never saw."""
         cells = [int(c) for c in cells]
-        coords = self.sample_coordinates(xf, nx, cells)
+        if coords is None:
+            coords = self.sample_coordinates(xf, nx, cells, generator=generator)
+        elif cells:
+            coords = torch.as_tensor(coords, device=xf.device).reshape(len(cells), 4)
         return self._describe(xf, nx, cells, coords)

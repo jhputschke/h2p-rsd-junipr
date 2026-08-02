@@ -92,11 +92,57 @@ def main() -> int:
     assert torch.allclose(new.log_prob(batch), -nll_new, atol=1e-6)
     print("[parity] log_prob == -per_jet_nll: True")
 
+    ok = check_decode_switches_are_noops(old, new, ds_new) and ok
+
     if not ok:
         print("PARITY FAILED")
         return 1
-    print("PARITY PASSED — refactor reproduces the v2 likelihood bit-for-bit.")
+    print("PARITY PASSED — refactor reproduces the v2 likelihood and decode bit-for-bit.")
     return 0
+
+
+def check_decode_switches_are_noops(old, new, ds) -> bool:
+    """Every decode switch added since the refactor, at its no-op setting, must leave the
+    POINT ESTIMATE and the SAMPLER exactly as the reference script produced them.
+
+    `per_jet_nll` above cannot see any of this: `continue_temperature` is sampling-only
+    and the psi identifiability gate touches only the reported mode, so a likelihood
+    comparison would pass with either of them silently live. This is the pinned reference
+    path docs/PLAN_prod_test_v1.md §10 asks for — `lnz_support="legacy"`,
+    `continue_temperature=1.0`, and the kappa gate at its no-op bound 0.0."""
+    new.lnz_support, new.lnz_physical = "legacy", False
+    new.continue_temperature = 1.0
+    new.kappa_min_mode = 0.0                       # the no-op bound: report the mode always
+    ok = True
+
+    for i in (0, 1, 2):
+        xf = ds[i]["xf"].unsqueeze(0)
+        nx = torch.tensor([ds[i]["nx"]])
+        # the MAP: same cells, same coordinates, same joint log-density
+        a = old.map_tree(xf, nx, beam_width=8, topk_cells=6, max_emissions=25)
+        b = new.map_estimate(xf, nx, beam_width=8, topk_cells=6, max_emissions=25,
+                             min_emissions=0, length_penalty=0.0)
+        same = ([n.cell for n in a.nodes] == [n.cell for n in b.nodes]
+                and abs(a.logprob - b.logprob) < 1e-5
+                and all(abs(p.psi - q.psi) < 1e-6 and abs(p.ln_z - q.ln_z) < 1e-6
+                        for p, q in zip(a.nodes, b.nodes)))
+        ok = ok and same
+        if not same:
+            print(f"[parity] MAP differs on jet {i}: "
+                  f"{[n.cell for n in a.nodes]} vs {[n.cell for n in b.nodes]}, "
+                  f"logprob {a.logprob:.6f} vs {b.logprob:.6f}")
+        # the sampler: same draws off the same seed
+        torch.manual_seed(123)
+        da = old.sample_batch(xf, nx, 64, max_emissions=25)
+        torch.manual_seed(123)
+        db = new.sample(xf, nx, 64, max_emissions=25)
+        ok = ok and da == db
+        if da != db:
+            print(f"[parity] sampler differs on jet {i}")
+    print(f"[parity] decode switches at their no-op settings "
+          f"(lnz_support=legacy, continue_temperature=1.0, kappa_min_mode=0.0): "
+          f"MAP + sampler bit-identical to the reference: {ok}")
+    return ok
 
 
 if __name__ == "__main__":
