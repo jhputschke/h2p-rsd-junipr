@@ -586,6 +586,23 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt \
   probability at matched depth teacher-forced versus on-policy, which is the exposure-bias
   probe proper.
 
+A third, from [`docs/PLAN_ModeMassAudit.md`](PLAN_ModeMassAudit.md), likewise off by default:
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt experiment.mode_audit=true \
+    experiment.closure_jets=2000 audit.k=32
+```
+
+- **`mode_audit`** — writes `mode_audit.json` beside the checkpoint: per jet, the exactly
+  enumerated top-`k` **skeletons** (multiplicity + ordered cell sequence) in descending mass
+  order, with the mass accounting that makes every summary a bound. It answers *does a
+  dominant parton skeleton exist* (`M₁`, `F(m) = frac(M₁ ≥ m)` with Wilson intervals) and,
+  separately, *is it the true one* (the truth skeleton's exact mass and rank). It is a
+  read of the posterior — no MAP, MBR, floor or NLL moves — so it carries no pass/fail
+  gate; the search knobs are the `audit` block of `docs/CONFIGURATION.md` §8a. The per-jet
+  view, the mode-skeleton point estimate and the residual tables are
+  [`notebooks/per_jets_estimation_mode_mass.ipynb`](../notebooks/per_jets_estimation_mode_mass.ipynb).
+
 `eval` writes `eval_metrics.json` and the figures
 (`calibration_pit_coords.png`, `calibration_tarp.png`, `calibration_by_region.png`, and
 `calibration_pit_by_region.png` when both `pit_coords` and `stratify_regions` are on)

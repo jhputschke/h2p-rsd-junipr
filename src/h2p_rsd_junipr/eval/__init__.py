@@ -15,6 +15,7 @@ from .closure import (
     print_point_estimate,
     run_closure,
 )
+from .mode_audit import audit_jet, jet_strata, run_mode_audit, summarise_mode_audit
 from .report import plot_calibration, save_metrics
 from .support import run_support_audit
 from .systematics import generator_spread
@@ -32,6 +33,10 @@ __all__ = [
     "run_tarp",
     "tarp_null_band",
     "run_support_audit",
+    "run_mode_audit",
+    "summarise_mode_audit",
+    "audit_jet",
+    "jet_strata",
     "cell_region",
     "plot_calibration",
     "save_metrics",

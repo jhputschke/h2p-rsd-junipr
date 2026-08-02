@@ -255,6 +255,46 @@ Two consequences are built into the code:
   $q_\phi(N\mid x)$ marginal — a **decoding-layer** correction that leaves the likelihood (and
   thus any likelihood-ratio analysis) intact, unlike minimum-risk / sequence fine-tuning.
   It is most effective with a calibrated head (`ar_junipr_v3`, cINN, diffusion).
+- **Is there a dominant configuration at all? — the mode-mass audit.** Everything above
+  argues about which *summary* of the posterior to report. The prior question is whether
+  the posterior has a summary worth reporting: does $q_\phi(y\mid x)$ concentrate on one
+  discrete configuration, with a quotable probability? That is measurable **exactly**
+  (`inference/mode_audit.py`, `eval/mode_audit.py`, `experiment.mode_audit=true`,
+  [`PLAN_ModeMassAudit.md`](PLAN_ModeMassAudit.md)), and two facts make it so.
+
+  First, dominance is only well posed for the **skeleton** $S=(N, c_0\dots c_{N-1})$ — the
+  multiplicity plus the *ordered* cell sequence. The continuous coordinates never
+  concentrate below the non-perturbative width $\sigma_0+\Lambda_{\rm eff}/k_t$ (§2.2), so
+  "the most probable $y$" as a point in $\mathbb R^{4N}$ is not a physical claim; what can
+  be dominant is the *structure*. And because each per-node coordinate factor is a proper
+  density **given the cell**, it integrates to 1 and the marginal collapses analytically:
+  $q_\phi(S\mid x)=\big[\prod_t P_{\rm cont}P_{\rm split}(c_t)\big]P_{\rm cont}(\text{stop})$,
+  computable from the discrete heads alone.
+
+  Second, prefix mass equals subtree mass — the remaining factors are normalized — so a
+  best-first search on the prefix tree pops completed skeletons in **exact descending mass
+  order** (Dijkstra; the monotone-score framing is Meister, Vieira & Cotterell, *TACL*
+  **8** (2020) 795, arXiv:2007.03909, and the exact-enumeration-of-modes precedent is
+  Stahlberg & Byrne, arXiv:1908.10090). Since the total mass is 1 and every pruned branch
+  is accounted in closed form, $M_1>\tfrac12$ is a **certificate** of dominance rather than
+  evidence for it.
+
+  Two things follow that the write-up must not blur. **Dominance and correctness are
+  logically independent**: a model can put 90% of its mass on one skeleton that is not the
+  truth, or be diffuse and centred on it, so $F(m)=\mathrm{frac}(M_1\ge m)$ and
+  $\mathrm{frac}(S_{\rm truth}=S_{\rm top1})$ are reported in separate tables and only ever
+  crossed explicitly. And the **empty skeleton is a first-class row** with mass
+  $P_{\rm cont}(\text{stop}\mid h_0,e)$ — the same $q(0\mid x)$ of the empty-tree analysis
+  — so a "dominant mode" that is the empty tree is a different physical statement from a
+  dominant *splitting*, and the two are separated everywhere. The audit is descriptive: it
+  adopts and rejects nothing, and **MBR remains the headline estimator whatever it finds**
+  (Kumar & Byrne, HLT-NAACL 2004; Eikema & Aziz, arXiv:2005.10283). A majority skeleton,
+  where one exists, is an *additional* quotable — "this jet's parton structure is $S_1$
+  with probability $M_1$" — not a replacement for a decision rule fitted to a loss.
+  Measured per jet in `notebooks/per_jets_estimation_mode_mass.ipynb`, stratified in the
+  variables that control the smearing (leading $\ln k_t$, distance to the soft-drop
+  boundary, distance to the $k_t$ floor), all three read off $x$ so an analysis can make
+  the same cut on data.
 - **A direct conditional MLE.** A simpler MAP-on-a-tractable-likelihood precedent is
   the Ginkgo / Quantum-Trellis line (arXiv:2105.10512, arXiv:2112.12795); here the
   likelihood is the learned $q_\phi$.

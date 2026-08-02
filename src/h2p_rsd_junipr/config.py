@@ -360,6 +360,46 @@ class ExperimentConfig:
     #                                    the run's own (n_jets, alpha grid). 0 keeps the
     #                                    analytic 1.36/sqrt(n) floor alone.
     tarp_stratify: bool = False        # WP-D.2: TARP additionally per Lund quadrant
+    mode_audit: bool = False           # docs/PLAN_ModeMassAudit.md: exact top-k skeleton
+    #                                    enumeration with dominance certificates
+    #                                    (eval/mode_audit.py -> mode_audit.json). A pure
+    #                                    inference-layer READ of the posterior: it adopts
+    #                                    and rejects nothing, so it carries no pass/fail
+    #                                    gate. Search parameters live in the `audit` block.
+
+
+@dataclass
+class AuditConfig:
+    """Mode-mass audit (docs/PLAN_ModeMassAudit.md WP-3). Read ONLY through
+    `audit_params()`, never as `cfg.audit.<field>`, so a checkpoint snapshot predating
+    the block evaluates on these defaults rather than crashing.
+
+    Every field here is a property of the SEARCH, not of the estimator: the audit reads
+    the posterior and never writes to the decode stack, so nothing in this block can
+    move a MAP, an MBR or an NLL. It is switched on by `experiment.mode_audit=true`."""
+
+    k: int = 64                 # completions enumerated per jet, in exact descending order
+    budget: int = 20_000        # expansion cap; a jet that hits it is `certified: false`
+    prune_rel: float = 1e-6     # drop children below prune_rel x the best completion mass
+    #                             found so far (x 1 before the first completion, i.e. an
+    #                             absolute floor). Pruned mass is accumulated EXACTLY, so
+    #                             this costs certification on a flat head, never correctness.
+    topk_children: int = 0      # cell children per expansion, 0 == every cell. A cap
+    #                             costs CERTIFICATION, not correctness (the dropped tail
+    #                             is accounted in closed form from the same softmax), and
+    #                             on the fielded 30x30 geometry it is a bad trade:
+    #                             measured at k=32, capping at 64 children takes the
+    #                             certified fraction from 97% to 20% and saves 28% of the
+    #                             runtime. Cap only when frontier memory binds.
+    max_frontier: int = 20_000  # heap cap; the lowest-mass entries are evicted into the
+    #                             pruned accounting rather than silently dropped
+    eps_n: float = 1e-4         # q(N|x) floor for the per-N searches of the n_head /
+    #                             factorized families (pre-registered; its dropped mass
+    #                             likewise goes to the pruned total)
+    thresholds: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.7])
+    #                             the pre-registered F(m) = frac(M_1 >= m) grid (§7.1)
+    n_jets: int = 0             # 0 -> experiment.closure_jets, so the audit reports on the
+    #                             same population as the rest of the eval suite
 
 
 @dataclass
@@ -372,6 +412,7 @@ class Config:
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     decode: DecodeConfig = field(default_factory=DecodeConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+    audit: AuditConfig = field(default_factory=AuditConfig)
     run_name: str = "${model.name}_${encoder.name}"
     run_root: str = "runs"
 
@@ -604,6 +645,19 @@ _EXPERIMENT_DEFAULTS: dict = {
     "support_audit": False,
     "tarp_null_reps": 0,
     "tarp_stratify": False,
+    "mode_audit": False,
+}
+
+# Audit defaults, kept in sync with AuditConfig — same contract as _DECODE_DEFAULTS.
+_AUDIT_DEFAULTS: dict = {
+    "k": 64,
+    "budget": 20_000,
+    "prune_rel": 1e-6,
+    "topk_children": 0,
+    "max_frontier": 20_000,
+    "eps_n": 1e-4,
+    "thresholds": [0.3, 0.5, 0.7],
+    "n_jets": 0,
 }
 
 
@@ -626,6 +680,22 @@ def experiment_params(cfg) -> dict:
     supported way to read the calibration-suite switches, so a pre-WP2 checkpoint
     snapshot evaluates with them off rather than crashing."""
     return _tolerant_group(cfg, "experiment", _EXPERIMENT_DEFAULTS)
+
+
+def audit_params(cfg=None) -> dict:
+    """Resolved `audit` kwargs (see `_tolerant_group`) — the ONLY supported way to read
+    the mode-mass audit's search parameters, so a checkpoint snapshot written before the
+    block existed audits on the defaults instead of raising on a missing node.
+
+    `thresholds` comes back as a plain list of floats: it is pre-registered (§7 of
+    docs/PLAN_ModeMassAudit.md) and lands verbatim in the artifact, where a ListConfig
+    would serialise as a repr rather than as numbers. `cfg=None` returns the defaults,
+    which is what a caller with no config in hand (a notebook, a test) wants — and it
+    keeps the defaults defined in exactly one place."""
+    out = dict(_AUDIT_DEFAULTS) if cfg is None else _tolerant_group(cfg, "audit",
+                                                                    _AUDIT_DEFAULTS)
+    out["thresholds"] = [float(t) for t in out["thresholds"]]
+    return out
 
 
 def decode_params(cfg) -> dict:

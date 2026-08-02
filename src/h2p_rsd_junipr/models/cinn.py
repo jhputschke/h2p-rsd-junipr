@@ -250,6 +250,27 @@ class CINN(PosteriorModel):
                          dim=-1).squeeze(0).cpu().numpy()
 
     @torch.inference_mode()
+    def skeleton_search_spec(self, xf, nx):
+        """`q(N|e) prod_t P(c_t|e)` — the cells are conditionally independent given the
+        jet, so the skeleton posterior is a product of a length categorical and one
+        fixed cell categorical (docs/PLAN_ModeMassAudit.md §5).
+
+        That makes the top-k a lazy k-best over sorted categoricals (the Huang & Chiang,
+        IWPT 2005 idiom) with no stepping at all; the shared best-first machinery
+        realises exactly that when the step is constant, so this family gets exactness
+        for free rather than through a second code path."""
+        from ..inference.mode_audit import SkeletonSearchSpec
+
+        self.eval()
+        e = self.encode(xf, nx)
+        return SkeletonSearchSpec(
+            kind="factorized", e=e,
+            log_qn=F.log_softmax(self.recalibrated_n_logits(self.n_head(e)), dim=-1).squeeze(0),
+            log_cells=F.log_softmax(self.cell_head(e), dim=-1).squeeze(0),
+            max_emissions=self.max_emissions, family="cinn",
+        )
+
+    @torch.inference_mode()
     def map_estimate(self, xf, nx, **kw) -> LundPointEstimate:
         self.eval()
         dev = xf.device

@@ -300,6 +300,24 @@ def cmd_eval(argv) -> int:
         metrics["exposure"] = run_exposure(
             model, val_ds, device, n_jets=exp["closure_jets"], K=exp["n_closure_samples"],
         )
+    mode_audit = None
+    if exp["mode_audit"]:
+        from .config import audit_params
+        from .eval.mode_audit import run_mode_audit
+
+        aud = audit_params(cfg)  # the audit block is eval-suite config, like `experiment`
+        mode_audit = run_mode_audit(
+            model, val_ds, dm_jets, geometry, device,
+            n_jets=(aud["n_jets"] or exp["closure_jets"]), K=exp["n_closure_samples"],
+            audit=aud,
+        )
+        # Provenance, so the artifact can be read on its own — and so the cross-family
+        # delta of the plan's §7.5 compares two runs rather than two file names.
+        mode_audit["run"] = {
+            "model": metrics["model"], "encoder": metrics["encoder"],
+            "checkpoint": metrics["checkpoint"], "device": metrics["device"],
+            "data": metrics["data"], "decode": metrics["decode"],
+        }
     print_point_estimate(model, val_ds, dm_jets, geometry, device, decode=decode)
 
     if ckpt:  # artifacts land beside the checkpoint, next to the training curves
@@ -308,6 +326,12 @@ def cmd_eval(argv) -> int:
         figs = plot_calibration(metrics["calibration"], out_dir)
         print(f"\n[eval] wrote {out_dir/'eval_metrics.json'}"
               + (f" and {len(figs)} figure(s)" if figs else ""))
+        if mode_audit is not None:
+            # Its own file: the per-jet records are one row per jet and would swamp
+            # eval_metrics.json, which every other consumer diffs.
+            save_metrics(mode_audit, out_dir / "mode_audit.json")
+            print(f"[eval] wrote {out_dir/'mode_audit.json'} "
+                  f"({mode_audit['n_jets']} per-jet records)")
     return 0
 
 

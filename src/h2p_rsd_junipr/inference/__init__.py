@@ -7,6 +7,14 @@ from .mbr import (
     mbr_kwargs_from_decode,
     mbr_select,
 )
+from .mode_audit import (
+    SkeletonEnumeration,
+    SkeletonSearchSpec,
+    entropy_from_draws,
+    enumerate_skeletons,
+    skeleton_log_prob,
+    skeleton_log_probs,
+)
 from .point_estimate import LundNode, LundPointEstimate, beam_search_cells
 from .sampling import ancestral_sample_cells
 
@@ -24,4 +32,10 @@ __all__ = [
     "lund_emd_matrix",
     "mbr_select",
     "mbr_kwargs_from_decode",
+    "SkeletonEnumeration",
+    "SkeletonSearchSpec",
+    "enumerate_skeletons",
+    "skeleton_log_prob",
+    "skeleton_log_probs",
+    "entropy_from_draws",
 ]

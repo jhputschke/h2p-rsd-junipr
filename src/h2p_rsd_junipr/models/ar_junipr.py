@@ -512,6 +512,41 @@ class ARJunipr(PosteriorModel):
             tok = torch.tensor([[c]], dtype=torch.long, device=dev)
         return cells
 
+    # -- contract: exact skeleton enumeration (docs/PLAN_ModeMassAudit.md WP-2) ----
+    @torch.inference_mode()
+    def skeleton_search_spec(self, xf, nx):
+        """The AR family's two skeleton factorizations, as one spec.
+
+        Without the multiplicity head the length is the per-step continue/stop product,
+        so the search is the plan's WP-1 verbatim on the SAME `_step` that
+        `beam_search_cells` consumes — the audit adds no model code and touches no
+        coordinate head. With it (`v3`/`v1_nhead`, where the G8 winner lives) the
+        factorization is `q(N|x) prod_t P_split(c_t | h_t, e; N)`, so a fixed-length
+        search runs per N off `_step_cells` and the merge happens on one heap.
+
+        `continue_temperature` is deliberately NOT applied: it is a SAMPLING knob
+        (`_step_batched`), and the audit enumerates the posterior the likelihood
+        defines, exactly as the beam-search MAP does."""
+        from ..inference.mode_audit import SkeletonSearchSpec
+
+        self.eval()
+        e = self.encode(xf, nx)
+        kv = self.xattn_kv(xf, nx)
+        h0 = self._init_hidden(e)
+        if self.use_multiplicity_head:
+            return SkeletonSearchSpec(
+                kind="nhead", e=e, h0=h0, start_token=self.start_token,
+                step_cells=self._bind(self._step_cells, kv),
+                log_qn=F.log_softmax(self.recalibrated_n_logits(self.n_head(e)),
+                                     dim=-1).squeeze(0),
+                max_emissions=self.max_emissions, family="ar_junipr_nhead",
+            )
+        return SkeletonSearchSpec(
+            kind="ar", e=e, h0=h0, start_token=self.start_token,
+            step=self._bind(self._step, kv),
+            max_emissions=self.max_emissions, family="ar_junipr",
+        )
+
     @torch.inference_mode()
     def sample_coordinates(self, xf, nx, cells, *, generator=None):
         """A genuine DRAW from every coordinate head, teacher-forced on `cells`:

@@ -25,6 +25,7 @@ minimum-Bayes-risk (MBR) point estimate. For the physics behind these choices se
 - [6. `trainer` — the training loop](#6-trainer--the-training-loop)
 - [7. `decode` — inference / MAP / posterior knobs](#7-decode--inference--map--posterior-knobs)
 - [8. `experiment` — evaluation suite](#8-experiment--evaluation-suite)
+- [8a. `audit` — the mode-mass audit's search](#8a-audit--the-mode-mass-audits-search)
 - [9. Top-level fields](#9-top-level-fields)
 - [10. Inference knobs in depth — the MAP floor, mincut & quantile floor](#10-inference-knobs-in-depth--the-map-floor-mincut--quantile-floor)
 - [11. Defined-but-not-wired fields](#11-defined-but-not-wired-fields)
@@ -1027,8 +1028,62 @@ Controls the §8 closure / calibration / systematic run (`h2p-rsd-junipr eval`).
 | `support_audit` | `False` | window / soft-drop / `z>½` / `k_t`-floor violation rates of the sampled posterior, **scored** against a hard zero (gate G2) |
 | `tarp_null_reps` | `0` | Monte-Carlo reps for the TARP null band at this run's own `(n_jets, α grid)`; `0` keeps only the asymptotic `1.36/√n` floor |
 | `tarp_stratify` | `False` | TARP additionally per Lund quadrant |
+| `mode_audit` | `False` | exact top-k **skeleton** enumeration with dominance certificates → `mode_audit.json` (§8a) |
 
 Trade cost vs. precision with `closure_jets` and `n_closure_samples`.
+
+## 8a. `audit` — the mode-mass audit's search
+
+Read only when `experiment.mode_audit=true`. It answers *does the posterior concentrate on
+a single discrete parton configuration, and when it does, is that the true one* — as
+**certificates** rather than estimates, because the skeleton marginal is exact (the
+coordinate factors integrate to 1 given the cell) and the best-first search over the prefix
+tree pops completions in exact descending mass order. See
+[`PLAN_ModeMassAudit.md`](PLAN_ModeMassAudit.md) and the physics reading in
+[`README_PHYSICS.md`](README_PHYSICS.md).
+
+| Field | Default | Meaning |
+|---|---|---|
+| `k` | `64` | completions enumerated per jet, in exact descending mass order |
+| `budget` | `20000` | expansion cap per jet; a jet that hits it before `k` completions is `certified: false` and its rate is itself reported |
+| `prune_rel` | `1e-6` | drop a child below `prune_rel ×` the best completion mass found so far (× 1 before the first completion, i.e. an absolute floor). Pruned mass is accumulated **exactly**, so this costs certification, never correctness |
+| `topk_children` | `0` | cell children per expansion; `0` = every cell. A cap is a bad trade on the fielded 30×30 geometry — measured at `k=32`, capping at 64 took the certified fraction from 97% to 20% and saved 28% of the runtime. Cap only when frontier memory binds |
+| `max_frontier` | `20000` | heap cap; the lowest-mass entries are evicted into the pruned accounting rather than dropped |
+| `eps_n` | `1e-4` | `q(N|x)` floor for the per-`N` searches of the `n_head` / `factorized` families; the dropped mass goes to the pruned total |
+| `thresholds` | `[0.3, 0.5, 0.7]` | the pre-registered `F(m) = frac(M_1 ≥ m)` grid |
+| `n_jets` | `0` | jets audited; `0` → `experiment.closure_jets`, so the audit reports on the same population as the rest of the suite |
+
+```bash
+h2p-rsd-junipr eval runs/.../best.ckpt experiment.mode_audit=true \
+    experiment.closure_jets=2000 audit.k=32
+```
+
+Three things about this block that are **not** conventions:
+
+- **It never writes to the estimator stack.** The audit reads the posterior; no MAP, MBR,
+  floor or NLL moves because of it, and `min_emissions` deliberately does **not** apply —
+  the enumeration is unconstrained and the empty skeleton is a first-class row, for the
+  same reason a sampling floor would distort SBC/PIT.
+- **`M₁ > ½` needs no certificate.** The total mass is 1 by construction, so nothing can
+  exceed a half-mass mode whatever the search pruned. Below ½ the reported `M₁` is a
+  **lower** bound on the true top-1 mass, so every `F(m)` is a lower bound too — never an
+  over-claim.
+- **Two validity checks, not gates.** The artifact reports the per-jet mass-accounting
+  defect (`Σᵢ Mᵢ + frontier + pruned − 1`, float-exact) and the enumerated `M(N=0)` against
+  the model's own `q(0|x)` reached through a different code path. A nonzero defect means
+  the *search* is wrong; it says nothing about the model.
+- **The empty class is never pooled away.** "The posterior is sure there is *nothing*
+  there" and "the posterior is sure *which* splitting is there" are different physical
+  claims, so `by_class` reports `F(m)` and the truth-rank fractions separately for
+  `top1_is_empty` / `top1_is_a_splitting` (an inference-time cut) and
+  `truth_is_empty` / `truth_is_a_splitting` (a decomposition that uses the answer, and is
+  labelled as one). The pooled `overall` block is a mixture of the two.
+
+The audit is family-agnostic through `PosteriorModel.skeleton_search_spec()`: `ar_junipr_*`
+map to `ar` (per-step continue/stop) or `nhead` (explicit `q(N|x)`, fixed-length search per
+`N` merged on one heap), `cinn`/`diffusion` to `factorized` (cells independent given `x`).
+A family with no adapter raises **by name** rather than reporting a beam-search
+approximation as if it were exact.
 
 ### The three references that are not what they look like
 
