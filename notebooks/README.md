@@ -64,6 +64,25 @@ the docs:
   toggle (`pot` default, `energyflow` optional) runs the demo without `energyflow`
   installed. See `scripts/probe_map_collapse.py` for the floor/training sweep.
 
+- **per_jets_estimation.ipynb** — the follow-up to `inference_demo.ipynb` §5 on the
+  **current** coordinates (30×30 cells, `lnz_support="physical"`) and the **extended**
+  model (`ar_junipr_v4` + cross-attention + the nine groomed aux columns), pinned by
+  default to the `v1_contstop_s0` winner and its held-out file, read from the
+  `prod_test_v1` artifact. Two things: **`showcase_jet(i)`**, one call that runs the full
+  per-jet inference and shows the posterior cloud on the Lund plane, the length belief,
+  the MAP / MBR / plain-RSD / truth ladders each over a per-splitting residual strip, the
+  aux vector the encoder saw, and the printed tree tables; and the **difference
+  distribution** `Δ = estimate − truth` per splitting, for `ln(1/ΔR)`, `ln kt` and `ln z`,
+  once over all splittings and once over the first two. The alignment is the **splitting
+  index** — the only correspondence the data offers, since there is no per-node `x↔y`
+  matching — so a residual exists only where both sides have a node at `t`; §5 prints the
+  pairing rate per series and the notebook carries two pairings, **own depth** (what each
+  estimator produced; the population the figures plot) and **common depth** (row-matched,
+  the only rows on which the RMS ratio to plain RSD is a comparison, with a jet-level
+  bootstrap CI). ψ is deliberately excluded — its von Mises κ is below
+  `decode.kappa_min_mode` for most splittings. ~2 min for 2000 jets at `K=200` with the
+  `energyflow` MBR backend; writes `per_jet_residuals.json` beside the checkpoint.
+
 - **lund_distribution_closure.ipynb** — the **population** counterpart to
   `inference_demo.ipynb`. Where `eval/closure.py` and `eval/calibration.py` ask per-jet
   questions, this asks whether the predicted *ensemble* of primary-Lund splittings looks
