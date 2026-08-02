@@ -124,14 +124,14 @@ else:
     # name rather than against whichever artifact happened to be written most recently
     # anywhere. Without it the choice rests on mtime alone, so re-running a different
     # notebook would silently repoint this one at another checkpoint.
-    _own = _find_artifacts("{RUNROOT}/**/{TAG}/{TAG}_metrics.json")
-    _any = _find_artifacts("runs/prod_test_v*/**/{TAG}/{TAG}_metrics.json")
+    _own = _find_artifacts("{OWNGLOB}/{TAG}/{TAG}_metrics.json")
+    _any = _find_artifacts("{ANYGLOB}/{TAG}/{TAG}_metrics.json")
     _found = _own or _any
     if not _found:
         raise FileNotFoundError(
             "no {TAG}_metrics.json under runs/. This notebook takes its checkpoint, its "
             "test file, the frozen empty-tree tau and the fitted length recalibration "
-            "from that artifact — run notebooks/{NB} first, or set PROD_METRICS_PATH."
+            "from that artifact — run notebooks/{NB} first, or set PROD_METRICS_PATH.{ARMNOTE}"
         )
     _mp = _found[-1]
     if _own:
@@ -244,6 +244,13 @@ if _ART_LNZ is not None:
 
 # Per-variant: which extra substitutions apply, and the one paragraph of the title cell
 # that says what is different about it.
+# `metrics_tag` / `source_nb` / `run_root` / `arm` default to the tag's own convention
+# (`prod_test_<tag>` everywhere), which is what v0 and v1 use — so they render exactly as
+# before. `edit` overrides them because the production-test-edit run has NO notebook of its
+# own: it reuses `notebooks/prod_test_v1.ipynb` pointed at a different run root, so its
+# artifact is still named `prod_test_v1_metrics.json` while living under
+# `runs/prod_test_edit/`. Deriving the artifact name from the variant name would send this
+# notebook looking for a `prod_test_edit_metrics.json` that nothing writes.
 VARIANTS = {
     "v0": {
         "subs": [],
@@ -259,19 +266,62 @@ VARIANTS = {
             " B). Falls back to `pot`; the artifact records which ran |\n"
         ),
     },
+    # docs/PLAN_prod_test_edit.md — the §7 grid of the edit transducer.
+    "edit": {
+        "subs": [MBR_SUB],
+        "backend_row": (
+            "| `MBR_BACKEND` | `energyflow` where installed — same EMD, same chosen tree,"
+            " faster ([`docs/PLAN_prod_test_speedup.md`](../docs/PLAN_prod_test_speedup.md)"
+            " Part B). Falls back to `pot` |\n"
+        ),
+        "metrics_tag": "prod_test_v1",       # the edit run reuses prod_test_v1.ipynb
+        "source_nb": "prod_test_v1.ipynb",
+        "run_root": "runs/prod_test_edit",
+        # PINNED to the arm gate E8 selected. Without this the artifact search takes the
+        # NEWEST under the run root, which would silently follow whichever arm was deep-
+        # passed most recently — and this run deep-passed `e_v1_s0` first.
+        "arm": "e_v2_s0",
+        # stay inside the edit run root: a fallback to runs/prod_test_v1/ would be an
+        # ar_junipr checkpoint wearing this notebook's title
+        "any_glob": "runs/prod_test_edit/**",
+        "arm_note": (
+            "**Pinned to `e_v2_s0`**, the arm gate E8 selected: `edit_v2` clears `edit_v1`"
+            " on both of E8's deciding metrics (held-out NLL 4.4376 [4.4287, 4.4426] vs"
+            " 4.8667 [4.8525, 4.8944]; TARP 0.0717 [0.0660, 0.0775] vs 0.1185 [0.1130,"
+            " 0.1215]), with coverage a tie. Both stages still LOSE the head-to-head"
+            " against `v1_contstop` — see"
+            " [`docs/PROD_TEST_edit_RESULTS.md`](../docs/PROD_TEST_edit_RESULTS.md) §7."
+        ),
+    },
 }
+
+
+def vget(tag: str, key: str, default: str) -> str:
+    return VARIANTS[tag].get(key) or default
+
+
+# Which plan each variant belongs to, for the title line. v0/v1 are two notebook
+# versions of the SAME v0 assessment (see this module's first paragraph); `edit` is a
+# different plan entirely.
+PLAN_DOC = {"v0": "docs/PLAN_prod_test_v0.md", "v1": "docs/PLAN_prod_test_v0.md",
+            "edit": "docs/PLAN_prod_test_edit.md"}
 
 
 def header(tag: str) -> str:
     v = VARIANTS[tag]
+    metrics_tag = vget(tag, "metrics_tag", f"prod_test_{tag}")
+    source_nb = vget(tag, "source_nb", f"prod_test_{tag}.ipynb")
+    plan = PLAN_DOC.get(tag, "docs/PLAN_prod_test_v0.md")
+    arm_note = v.get("arm_note")
     return (
         f"# Lund distribution closure — production test {tag}\n"
         "\n"
         "[`lund_distribution_closure_v2.ipynb`](lund_distribution_closure_v2.ipynb),"
         " run against the **held-out** file of\n"
-        "[`docs/PLAN_prod_test_v0.md`](../docs/PLAN_prod_test_v0.md) with every"
+        f"[`{plan}`](../{plan}) with every"
         " setting already applied.\n"
-        "\n"
+        + (f"\n{arm_note}\n" if arm_note else "")
+        + "\n"
         "**Generated** by [`scripts/make_prod_closure_nb.py`](../scripts/make_prod_closure_nb.py);"
         " every cell below\n"
         "section 0 is byte-identical to v2. Edit v2 (or the generator) and regenerate"
@@ -281,7 +331,7 @@ def header(tag: str) -> str:
         "closure populations drifted apart before.\n"
         "\n"
         "These settings differ from v2's defaults, and the first five are read from"
-        f" `prod_test_{tag}_metrics.json`\n"
+        f" `{metrics_tag}_metrics.json`\n"
         "rather than pasted in, so they cannot disagree with the fit that produced"
         " them:\n"
         "\n"
@@ -299,7 +349,7 @@ def header(tag: str) -> str:
         " requires — whenever the head needs correcting at all |\n"
         + v["backend_row"] +
         "\n"
-        f"Run [`notebooks/prod_test_{tag}.ipynb`](prod_test_{tag}.ipynb) first; this reads"
+        f"Run [`notebooks/{source_nb}`]({source_nb}) first; this reads"
         " its artifact.\n"
     )
 
@@ -322,10 +372,22 @@ def build(tag: str) -> dict:
                 f"for:\n  {old}\nUpdate scripts/make_prod_closure_nb.py to match."
             )
         body = body.replace(old, new)
-    fill = {"{TAG}": f"prod_test_{tag}", "{NB}": f"prod_test_{tag}.ipynb",
+    metrics_tag = vget(tag, "metrics_tag", f"prod_test_{tag}")
+    run_root = vget(tag, "run_root", f"runs/prod_test_{tag}")
+    arm = VARIANTS[tag].get("arm")
+    fill = {"{TAG}": metrics_tag,
+            "{NB}": vget(tag, "source_nb", f"prod_test_{tag}.ipynb"),
             # the tag's own run root. NOT "runs/prod_test_{TAG}" -- {TAG} is
             # already `prod_test_<tag>`, so that spells prod_test_prod_test_v1.
-            "{RUNROOT}": f"runs/prod_test_{tag}"}
+            "{RUNROOT}": run_root,
+            # `<root>/**` normally, `<root>/<arm>/**` when the variant pins one arm.
+            "{OWNGLOB}": f"{run_root}/{arm}/**" if arm else f"{run_root}/**",
+            # The fallback when the preferred glob finds nothing. It must NOT cross into
+            # another run root for a variant that pins one: `runs/prod_test_v*` does not
+            # match `runs/prod_test_edit`, so the default would send a missing-artifact
+            # edit run to an ar_junipr checkpoint — a wrong-FAMILY fallback, silently.
+            "{ANYGLOB}": vget(tag, "any_glob", "runs/prod_test_v*/**"),
+            "{ARMNOTE}": (f" Pinned to arm {arm!r}." if arm else "")}
     text = PRELUDE + body.rstrip("\n") + "\n" + EPILOGUE
     for k, v in fill.items():
         text = text.replace(k, v)

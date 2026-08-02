@@ -5,13 +5,22 @@ re-evaluated per WP-F.1, and gates E1–E9 applied. Results:
 [`PROD_TEST_edit_RESULTS.md`](PROD_TEST_edit_RESULTS.md), with machine-produced numbers in
 [`PROD_TEST_edit_TABLES.md`](PROD_TEST_edit_TABLES.md).
 
-**Outcome in one line: the edit factorization loses** — E4 (TARP, the deciding gate), E5
-(coverage) and E6 (NLL) all fail unanimously across three seeds, with bands that do not
-overlap the reference's, at a *smaller* parameter budget. **E7 passes**, so the family's
-falsifiable physics claim survives: Λ_eff = 0.631 GeV at R² = 0.949, read off the arm never
-told the functional form. The mechanism explains the loss — `frac_anchored ≈ 0.19`, so the
-anchoring term reaches a fifth of the emissions and an ordinary insertion head does the rest.
-Two deviations from §12 are recorded in the results document's §0, not here.
+**Outcome in one line: on the gates this plan pre-registered, the edit factorization loses**
+— E4 (TARP, the deciding gate), E5 (coverage) and E6 (NLL) all fail unanimously across three
+seeds, with bands that do not overlap the reference's, at a *smaller* parameter budget, for
+BOTH stages. **E7 passes**, so the family's falsifiable physics claim survives: Λ_eff = 0.631
+GeV at R² = 0.949, read off the arm never told the functional form. `frac_anchored ≈ 0.19`,
+so the anchoring term reaches a fifth of the emissions and an ordinary insertion head does
+the rest.
+
+Two findings the plan did not anticipate, both in the results document: a **distribution
+closure** (not a §12 step) on which `edit_v2` is competitive with the reference and better on
+two of three metrics, so "worse at everything" is false; and the **decode-side multiplicity
+collapse this family was built to remove structurally is worse here than in the arm that
+still has the mechanism** (MBR mean 1.04–1.07 vs 1.370, truth 1.435), which relocates that
+defect away from the continue/stop head. Five deviations from §12 are recorded in the results
+document's §0, not here — including that the deep pass was repeated on `e_v2_s0`, since §12.8
+named `e_v1_s0` before E8 had selected the other stage.
 
 What landed in the tree:
 

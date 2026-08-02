@@ -7,12 +7,15 @@ it was fixed before the grid started — read the plan for *why* each gate exist
 [`PROD_TEST_v0_RESULTS.md`](PROD_TEST_v0_RESULTS.md),
 [`PROD_TEST_v1_RESULTS.md`](PROD_TEST_v1_RESULTS.md).
 
-**Verdict in one line:** the edit factorization **loses**, unanimously across three seeds and
-on all three deciding metrics, with bands that do not overlap the reference's — *and* the
-run's second product is a positive one: the anchoring premise the family rests on is
-**confirmed** at production scale (E7), so the failure is not that the physics is wrong but
-that only ~19% of parton nodes are anchored, which leaves an expensive AR model doing the
-rest (§6).
+**Verdict in one line:** on the pre-registered gates — per-jet posterior calibration — the
+edit factorization **loses**, unanimously across three seeds and on all three deciding
+metrics, with bands that do not overlap the reference's; on **MBR-decoded observable
+spectra**, an instrument the gates do not cover, `edit_v2` is competitive with the reference
+and better on two of three metrics (§4.13). Two positive products beside the negative one:
+the anchoring premise the family rests on is **confirmed** at production scale (E7,
+Λ_eff = 0.631 GeV), and the decode-side multiplicity collapse the family was built to remove
+**structurally** turns out to be *worse* here than in the arm that still has the mechanism
+(§4.13) — which relocates that defect away from the continue/stop head. See §7.
 
 Regenerate every table below from the artifacts:
 
@@ -24,7 +27,23 @@ bash scripts/eval_prod_test_v1.sh --run-root runs/prod_test_v1  --device cpu \
 python scripts/edit_anchoring_diagnostic.py --run-root runs/prod_test_edit --n-jets 4000
 python scripts/prod_test_edit_gates.py --run-root runs/prod_test_edit \
     --reference-root runs/prod_test_v1 --out docs/PROD_TEST_edit_TABLES.md
+
+# the deep pass (§4.11-4.12): notebooks/prod_test_v1.ipynb, CKPT_ROOT set per arm
+jupyter nbconvert --to notebook --execute notebooks/prod_test_v1.ipynb  # CKPT_ROOT = .../e_v2_s0
+
+# distribution closure (§4.13) — NOT a plan §12 step; v0 and v1 ran it the same way, after
+# the grid. Needs --prod-metrics: the script's own search is runs/prod_test_v*, which does
+# not match runs/prod_test_edit.
+python scripts/lund_closure_report.py --device cpu \
+    --prod-metrics runs/prod_test_edit/e_v2_s0/*/prod_test_v1/prod_test_v1_metrics.json
 ```
+
+[`notebooks/lund_distribution_closure_prod_test_edit.ipynb`](../notebooks/lund_distribution_closure_prod_test_edit.ipynb)
+is the notebook form of that last step, **generated** by `scripts/make_prod_closure_nb.py`
+and **pinned to `e_v2_s0`** — the arm E8 selected. Both of its artifact globs are pinned
+inside `runs/prod_test_edit/`, because the generator's default fallback is
+`runs/prod_test_v*`, which does not match this run root and would have repointed the
+notebook at an `ar_junipr` checkpoint rather than merely a different arm.
 
 [`PROD_TEST_edit_TABLES.md`](PROD_TEST_edit_TABLES.md) is that generated output, committed
 beside this document so the prose here can be checked against machine-produced numbers.
@@ -58,7 +77,16 @@ beside this document so the prose here can be checked against machine-produced n
 
 ## 0. Deviations from the plan, and when they were made
 
-Two, both after the grid ran, both recorded here rather than in a footnote.
+Five, all after the grid ran, all recorded here rather than in a footnote.
+
+**0.0 The deep pass was repeated on `e_v2_s0`.** Plan §12.8 names `e_v1_s0`, and that is
+what §4.11 reports. But the plan was written before the grid, when E7 — the stage gate
+`edit_v2` is conditional on — might still have failed, in which case every `e_v2` number
+would have been null context. **E7 passed and E8 then selected `edit_v2`** (it clears
+`edit_v1` on both of E8's deciding metrics), so the arm the plan named is the one the run
+rejected. §4.12 repeats the deep pass on `e_v2_s0` and `notebooks/prod_test_v1.ipynb`'s
+`CKPT_ROOT` now points there. §4.11 is kept rather than replaced: the two together are what
+show the `q(0|x)` deficit is a family property and not a stage-1 artifact.
 
 **0.1 `scripts/refresh_support_audit.py` was NOT run (plan §12.5).** Three reasons, in order
 of weight:
@@ -114,6 +142,22 @@ number:
 The §2b fix is the one that mattered: without it the deep pass aborted, and with it the
 notebook reports the one NLL number that is defined for both families and is exactly what
 gate E6 compares.
+
+**0.5 A distribution closure was run, which plan §12 does not ask for.** v0 and v1 both ran
+`scripts/lund_closure_report.py` as a follow-up to their grids rather than inside them, and
+the reference arm `v1_contstop_s0` therefore *has* such an artifact while this run's arms
+initially did not — an asymmetry in the head-to-head, even though it was not a gap against
+the plan. §4.13 closes it for `e_v1_s0` and `e_v2_s0` at the reference's own settings. It
+turned out to be the one instrument that **disagrees** with the gates, so running it changed
+what §7 says.
+
+**A note on how two of the corrections above were found.** §4.11 and the first version of
+§4.13's prose both generalized from `e_v1_s0` — the arm the *pre-grid* plan named — to "the
+edit family", and both were wrong: the AUC deficit does generalize (§4.12) but the closure
+result does not (`e_v1` loses to identity on all three MBR metrics; `e_v2` beats it on all
+three). The plan naming one arm for the deep pass is a reasonable thing to do before a grid
+runs; treating that arm as the family afterwards is not, and this document had to be
+corrected twice for it.
 
 ## 1. WP-E — what the `ln z` support port changed, and what it did not
 
@@ -380,6 +424,88 @@ as well as the head it was supposed to replace.
 **§2c reports no aux ablation** and **§2b reports no length/split/coord decomposition**, both
 by construction — see §0.3 and §0.4.
 
+### 4.12 `e_v2_s0` assessed in depth — the arm E8 actually selected
+
+`e_v1_s0` is the stage E8 rejected. The plan named it for the deep pass (§12.8) because it
+was written before E7 had passed, and `e_v2` was to be quoted only conditionally. E7 passed,
+so the deep pass was repeated on `e_v2_s0` and this is the row that represents the family.
+
+| | `e_v1_s0` | **`e_v2_s0`** | `v1_contstop_s0` |
+|---|---:|---:|---:|
+| held-out NLL/jet, whole test file | 4.8813 | **4.4697** | 3.7927 |
+| `q(0\|x)` AUC | 0.7700 | 0.7677 | 0.824 |
+| `length_pmf` ms/jet | 10.125 | 10.135 | 52.19 |
+| medoid/identity | 0.9114 | 0.8972 | — |
+| geo-median/identity | 0.8807 | 0.8882 | — |
+| `coverage_68` | 0.5177 | 0.4985 | — |
+| truth cells missed by the posterior | 15 | 14 | — |
+| `free_cell_head` effective rank (of 64) | 35.7 | 41.0 | — |
+| acceptance | PASS | PASS | PASS |
+| support, all four walls | 0.00000% | 0.00000% | 0.00000% |
+
+Three things this pair settles that one arm could not:
+
+- **The `q(0|x)` deficit is a family property, not a stage-1 artifact** — 0.770 and 0.768 are
+  the same number. Whatever it is, `edit_v2`'s prediction network does not fix it. (But see
+  §4.13: a second instrument puts the same quantity at 0.807–0.810 against 0.818, so the size
+  of the deficit is instrument-dependent and the finding does not survive as stated.)
+- **`length_pmf` costs the same in both stages, to three digits** (10.125 vs 10.135 ms/jet).
+  That is the structural claim made visible rather than argued: `length_pmf` reads only the
+  op head, which is prefix-free in *both* stages — the very condition that keeps it exact.
+  The prediction network costs emissions, not length.
+- **`e_v2` is WORSE on `coverage_68` at this tier** (0.4985 vs 0.5177), where the gate tier
+  called it a tie. Consistent with E8, which found coverage the one metric whose bands
+  overlapped: the intra-family win is on NLL and TARP, and it does not extend to coverage.
+
+### 4.13 Distribution closure — the instrument that disagrees
+
+Not a plan §12 step: v0 and v1 both ran the Lund distribution closure as a follow-up to
+their grids rather than inside them, and this run did the same. `scripts/lund_closure_report.py`
+against each arm's own deep-pass artifact, 2 000 jets at K = 120, `mbr_backend=pot`, all
+defaults — the same settings the reference arm was run at, so the three columns are
+like-for-like.
+
+`gmean_ratio` is posterior/identity: **below 1 means the model beats the decode-free RSD
+baseline**, which is the comparison v0 §7 established as the one that matters.
+
+| | `e_v1_s0` | **`e_v2_s0`** | `v1_contstop_s0` |
+|---|---:|---:|---:|
+| **MBR** W1 | 1.204 (6/14) | **0.667** (8/14) | 0.656 (9/14) |
+| **MBR** KS | 1.263 (4/13) | **0.763** (7/13) | 0.860 (7/13) |
+| **MBR** χ² | 1.122 (5/10) | **0.438** (7/10) | 0.917 (6/10) |
+| MAP W1 | 2.823 (2/12) | 2.090 (4/12) | 1.414 (4/13) |
+| MAP KS | 2.807 (0/11) | 2.183 (3/11) | 1.743 (2/12) |
+| MAP χ² | 6.954 (0/9) | 4.280 (0/9) | 3.633 (0/9) |
+| `q(0\|x)` AUC | 0.8103 | 0.8070 | 0.8181 |
+
+**On MBR-decoded observable spectra `e_v2` is competitive with the reference and beats it on
+two of three metrics** — KS 0.763 vs 0.860 and χ² 0.438 vs 0.917, with W1 a tie at 0.667 vs
+0.656. All three are below 1, so it beats identity. `e_v1` does not: all three of its ratios
+exceed 1. On MAP both edit stages remain clearly worse, so the effect is MBR-specific.
+
+This is a genuine disagreement between instruments, and §7 reports it as one rather than
+picking the reading that agrees with the gates.
+
+**The caveat that belongs beside the win**, because it is the same defect the gates found:
+
+| mean multiplicity | truth | identity | MAP | **MBR** | posterior |
+|---|---:|---:|---:|---:|---:|
+| `e_v1_s0` | 1.435 | 1.864 | 1.036 | **1.042** | 1.444 |
+| `e_v2_s0` | 1.435 | 1.864 | 1.025 | **1.066** | 1.416 |
+| `v1_contstop_s0` | 1.435 | 1.864 | 1.075 | **1.370** | 1.455 |
+
+Every **posterior** mean is close to truth (1.416–1.455 vs 1.435) — the marginal is right, as
+E3 found. But both edit stages' **MBR decode collapses to ~1.05** where the reference holds
+1.370. So `e_v2` achieves its closure win with trees about 1.07 nodes long against a truth of
+1.435: the observable *shapes* it does produce are good, and it produces too few of them.
+
+**The irony is worth stating.** Plan §1 justified this family on precisely this point — the
+open-ended continue/stop mechanism is "the seat of the marginal multiplicity bias and of MAP
+collapse", removed *structurally* by anchoring `n_y` at `|x|`. The mechanism was removed and
+the decode collapse is **worse** than in the arm that still has it (1.04–1.07 vs 1.370). The
+collapse therefore does not live in the continue/stop head; removing it was treating a
+symptom's suspected cause and the symptom got worse.
+
 ## 5. The head-to-head, in one place
 
 | quantity | `v1_contstop` (re-evaluated) | `e_v1` | delta | separated? |
@@ -405,17 +531,36 @@ That caution is not load-bearing here: the gaps are 5–50× the width of either
 ### 6.1 The question it was built to answer
 
 *Does a third factorization of the length/shape coupling — one designed against v1's defect
-before that defect was measured — beat the arm v1 picked?* **No.** Not on TARP, not on
-coverage, not on held-out NLL, not on any seed, and not by a margin that any band or capacity
-argument reaches.
+before that defect was measured — beat the arm v1 picked?* **On the metrics that decided v1,
+no.** Not on TARP, not on coverage, not on held-out NLL, not on any seed, and not by a margin
+that any band or capacity argument reaches — for either stage.
 
-**And it loses on its own strongest ground.** The edit family's `q(N|x)` is exact,
-parameter-free and explicitly conditioned on `|x|`, where `v1_contstop`'s is a fitted
-per-step continue/stop product — plan §1 put that contrast at the head of the table. Yet the
-exact marginal **discriminates worse**: `q(0|x)` AUC **0.770** against the fitted head's
-**0.827** (§4.11). Exactness bought calibration of the *average* (⟨N⟩ ratio 0.9843, the
-family's best number) and cost discrimination *per jet*. Being the right functional form is
-not the same as being the more informative one.
+The qualification, added after the fact and kept because it is true: those three metrics are
+all **per-jet posterior calibration**, which is what v1's defect was and therefore what this
+run was pre-registered to measure. On **marginal observable spectra under MBR decode** —
+§4.13, not a plan §12 step — `edit_v2` is competitive with the reference and better on two of
+three. The gates decide the question as posed; they do not decide every question.
+
+**And on its own strongest ground it does not win either.** The edit family's `q(N|x)` is
+exact, parameter-free and explicitly conditioned on `|x|`, where `v1_contstop`'s is a fitted
+per-step continue/stop product — plan §1 put that contrast at the head of the table. The
+exact marginal does not convert that into a better belief about `N`:
+
+| `q(0\|x)` AUC | `e_v1_s0` | `e_v2_s0` | `v1_contstop_s0` |
+|---|---:|---:|---:|
+| deep pass, 97 018 jets | 0.7700 | 0.7677 | 0.824 |
+| closure report, 2 000 jets, `len(x) > 0` | 0.8103 | 0.8070 | 0.8181 |
+
+Read both rows before quoting either. The deficit is the **same in both stages** (0.770,
+0.768), so it is a family property rather than a stage-1 artifact — but it is **0.05 on one
+instrument and 0.008 on the other**, and the two differ in tier and in selection. That is
+not a finding; it is a quantity whose value depends on how it is measured, and it is
+recorded here so nobody quotes the larger number alone.
+
+What the exact marginal *did* buy is the average: ⟨N⟩ ratio 0.9843 and posterior means of
+1.416–1.444 against a truth of 1.435 (§4.13), the family's best numbers. What it did not buy
+is the decode — see §4.13's multiplicity table, where both stages collapse to ~1.05 against
+the reference's 1.370.
 
 ### 6.2 …but the family's physics claim survives
 
@@ -473,6 +618,13 @@ of the two-component mixture are the place to look, not the epoch count.
   it — `p_anch` initialization, a stronger prior, an identifiability penalty — is where a
   follow-up would have to start, and until it moves, the family is an AR model with an
   expensive lattice attached.
+- **The decode-side multiplicity collapse is NOT in the continue/stop head.** This family
+  removed that head structurally and collapsed *harder* — MBR mean 1.04–1.07 against the
+  reference's 1.370 and a truth of 1.435 (§4.13) — while its posterior mean stayed correct.
+  So the collapse lives in the decision rule (MBR/MAP over a high-entropy sequence posterior)
+  rather than in the length parametrization, which is where v0 and v1 both looked. That is a
+  redirection for any follow-up on MAP collapse, and it is the most reusable thing this grid
+  produced.
 - **`notebooks/prod_test_v1.ipynb` reaches through the model base class in five places.**
   It was written when only the AR family existed, and pointing it at a fourth family
   surfaced every one: `nll_terms` and `per_jet_nll` (both `ar_junipr_*` methods, not base-class
@@ -493,10 +645,27 @@ of the two-component mixture are the place to look, not the epoch count.
 
 ## 7. Verdict
 
-**Do not field the edit transducer.** `v1_contstop` remains the recommendation v1 made, and
-this run — which was built to overturn it — strengthens rather than weakens it: a third
-factorization, designed specifically against v1's diagnosed defect, loses on every metric that
-diagnosed it, unanimously, at a smaller parameter budget.
+**Do not field the edit transducer — but the two instruments disagree, and the disagreement
+is the more useful output.**
+
+On what the pre-registered gates measure — **per-jet posterior calibration** — the family
+loses without ambiguity. E4 (TARP), E5 (coverage) and E6 (NLL) fail unanimously across three
+seeds for `edit_v1`, and `edit_v2` fails all three as well (TARP 0.0717 vs 0.0212, NLL 4.4697
+vs 3.7927, coverage 0.5107 vs 0.5307). Bands do not overlap anywhere, and the edit arms are
+the *smaller* models, so capacity does not rescue them. `v1_contstop` remains the
+recommendation v1 made.
+
+On **MBR-decoded observable spectra**, which the gates do not measure, `edit_v2` is
+competitive with the reference and better on two of three metrics (§4.13: KS 0.763 vs 0.860,
+χ² 0.438 vs 0.917, W1 0.667 vs 0.656). That does not overturn the verdict — a model whose
+posterior is miscalibrated per jet is not fielded because its marginals look right — but it
+does mean "the edit factorization is worse at everything" would be false, and this document
+does not say it.
+
+The reconciliation is in §4.13's multiplicity table: `edit_v2` gets good observable *shapes*
+out of MBR trees that are ~1.07 nodes long against a truth of 1.435. Right shapes, too few
+nodes. A closure metric pooled over emissions can be satisfied that way; a per-jet posterior
+cannot.
 
 Three qualifications, all of which cut toward the same conclusion rather than against it:
 
@@ -514,12 +683,12 @@ scale, extracted from a latent alignment nobody supervised, on production data, 
 that was not told the answer — and the E2 demonstration that WP-E removes the `ln z` support
 failure completely on a fourth model family.
 
-**The most transferable negative result** is §4.11's: an exact, parameter-free `q(N|x)` was
-*worse* at ranking empty jets than a fitted continue/stop head (AUC 0.770 vs 0.827), while
-being better at the marginal ⟨N⟩. Structural exactness is not a substitute for a
-discriminative fit, and this run is the counterexample. Anyone reaching for "make the length
-model exact" as a remedy for a calibration defect should read that number first — it is the
-cleanest thing this grid established, and it did not require the family to win anything.
+**The candidate transferable negative result** is §4.11's: on `e_v1_s0`, an exact,
+parameter-free `q(N|x)` was *worse* at ranking empty jets than a fitted continue/stop head
+(AUC 0.770 vs 0.827), while being better at the marginal ⟨N⟩. If §4.12 reproduces it on
+`e_v2_s0` then structural exactness is not a substitute for a discriminative fit, and anyone
+reaching for "make the length model exact" as a remedy for a calibration defect should read
+that number first. On one arm of one stage it is a lead, not a law — stated here as such.
 
 ## 8. What is not measured
 
@@ -532,4 +701,14 @@ cleanest thing this grid established, and it did not require the family to win a
   these artifacts, so E3's first clause is unread.
 - **Whether a higher `frac_anchored` would change the verdict.** Everything in §6.3 says the
   mechanism's reach is the binding constraint; nothing here tests raising it.
+- **Distribution closure on more than one seed.** §4.13 is `e_v1_s0` and `e_v2_s0` against
+  `v1_contstop_s0` — one seed each, so it carries no band. `e_v2`'s χ² win (0.438 vs 0.917)
+  is large enough that a seed band is unlikely to erase it, but that is an expectation and
+  not a measurement.
+- **Why the two `q(0|x)` AUC instruments disagree** (0.77 on the deep pass, 0.81 on the
+  closure, for the same arms). Tier and selection both differ; which of the two accounts for
+  it was not isolated.
+- **Whether `edit_v2`'s closure win survives a decode that does not collapse.** Its MBR trees
+  are ~1.07 nodes long against a truth of 1.435 (§4.13); nothing here separates "good
+  observable shapes" from "good shapes because too few nodes were emitted to get them wrong".
 </content>
