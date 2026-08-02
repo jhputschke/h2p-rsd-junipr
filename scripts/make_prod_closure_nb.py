@@ -229,7 +229,9 @@ if _ART_LNZ is not None:
     from omegaconf import OmegaConf as _OC
 
     from h2p_rsd_junipr.train.checkpoint import load_for_inference as _lfi
-    _ckpt_lnz = str(_OC.select(_OC.create(_lfi(str(_IN["CKPT_PATH"]),
+    # `_REPO /` like every other consumer of _IN: CKPT_PATH is repo-relative, and a
+    # notebook opened from notebooks/ has cwd there, not at the repo root.
+    _ckpt_lnz = str(_OC.select(_OC.create(_lfi(str(_REPO / _IN["CKPT_PATH"]),
                                                map_location="cpu")["config"]),
                                "model.lnz_support") or "legacy")
     assert _ckpt_lnz == str(_ART_LNZ), (
