@@ -9,6 +9,8 @@ forms the family is supposed to reduce to.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -146,6 +148,44 @@ def test_map_is_a_valid_tree_and_honours_its_floor(sel, batch):
     assert m.map_estimate(xf, nx, min_emissions=0).multiplicity >= 0
     # deterministic: the Viterbi surrogate has no RNG in it
     assert [n.cell for n in m.map_estimate(xf, nx).nodes] == [n.cell for n in pe.nodes]
+
+
+@pytest.mark.parametrize("sel", FAMILIES, ids=IDS)
+def test_the_decode_paths_respect_the_physical_ln_z_support(sel, batch):
+    """WP-E's contract on the two routines that produce a REPORTED tree.
+
+    `tests/test_edit_lnz_support.py` pins the density and the draw statistics; what is
+    checked here is that the family's own decode contract survives the port — the point
+    estimate and the constrained coordinate draw both land inside the grooming interval,
+    every drawn coordinate still discretises back to the cell it was conditioned on, and
+    `describe_cells` still scores exactly the tree it reports. A support fix that broke
+    any of those would be a different bug wearing the same fix."""
+    xf, nx, geom = _jet(batch)
+    m = build_model(load_config(sel + ["model.lnz_support=physical",
+                                       "model.lnz_zcut=0.1"]), geom).eval()
+    lo, hi = math.log(0.1), math.log(0.5)
+    torch.manual_seed(0)
+
+    pe = m.map_estimate(xf, nx, min_emissions=2)
+    assert pe.multiplicity >= 2
+    assert all(lo <= n.ln_z <= hi for n in pe.nodes), "MAP left the ln z support"
+
+    got = m.sample_coordinates(xf, nx, CHAIN)
+    assert got.shape == (len(CHAIN), 4) and torch.isfinite(got).all()
+    assert bool(((got[:, 2] >= lo) & (got[:, 2] <= hi)).all()), "a draw left the support"
+    assert [geom.to_cell(float(r[0]), float(r[1])) for r in got] == CHAIN
+
+    pe2 = m.describe_cells(xf, nx, CHAIN)
+    yraw = torch.tensor(
+        [[[n.ln_invDelta, n.ln_kt, n.ln_z, n.psi] for n in pe2.nodes]], dtype=torch.float32
+    )
+    with torch.inference_mode():
+        again = float(m.log_prob({
+            "xf": xf, "nx": nx, "yraw": yraw,
+            "yc": torch.tensor([CHAIN], dtype=torch.long),
+            "ny": torch.tensor([len(CHAIN)]),
+        })[0])
+    assert again == pytest.approx(pe2.logprob, rel=1e-4, abs=1e-3)
 
 
 @pytest.mark.parametrize("sel", FAMILIES, ids=IDS)

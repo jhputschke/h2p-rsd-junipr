@@ -41,6 +41,15 @@ learned kernel directly confrontable with the shape-function expectation
 (arXiv:1906.11843) instead of opaque, and regularizes the low-statistics tail.
 `model.physics_width=false` swaps in the free-MLP head as the ablation.
 
+**The `ln z` support** (`model.lnz_support`, docs/PLAN_prod_test_edit.md WP-E). The plane
+coordinates are truncated to the geometry range in both mixture components; `ln z` was
+the one coordinate left on an unbounded Normal while the grooming puts its truth on
+`(ln z_cut - beta*u, ln 1/2]`. `physical` puts the same truncated normal there, read at
+the node's OWN `u` — which this factorization supports and the AR families' does not
+(see `lnz_bounds`). `legacy` is the default and is bit-identical to the pre-WP-E path,
+so old checkpoints load unchanged; it is also the arm that ATTRIBUTES the v0 support
+failure. NLL is not comparable across the switch, in either direction.
+
 **Two stages**, selected by `model.prefix_conditioning`:
 
 * `edit_v1` (pair-HMM). Ops and emissions conditioned on `(i, s_i, e)` only — zero
@@ -149,6 +158,26 @@ class EditTransducer(PosteriorModel):
         self.half_u, self.half_v = geometry.half_u, geometry.half_v
         self.lo_u, self.hi_u = (float(t) for t in geometry.ln_invdelta_range)
         self.lo_v, self.hi_v = (float(t) for t in geometry.ln_kt_range)
+        # bounded-support ln z head (docs/PLAN_prod_test_edit.md WP-E); getattr-tolerant so
+        # pre-WP-E checkpoint configs rebuild as the unbounded Normal they were trained as.
+        self.lnz_support = str(getattr(m, "lnz_support", "legacy"))
+        if self.lnz_support not in ("legacy", "physical"):
+            raise ValueError(
+                f"model.lnz_support must be 'legacy' or 'physical', got {self.lnz_support!r}"
+            )
+        self.lnz_physical = self.lnz_support == "physical"
+        self.lnz_zcut = float(getattr(m, "lnz_zcut", 0.1))
+        self.lnz_beta = float(getattr(m, "lnz_beta", 0.0))
+        if self.lnz_physical and not (0.0 < self.lnz_zcut < 0.5):
+            raise ValueError(
+                f"model.lnz_support='physical' needs 0 < model.lnz_zcut < 0.5 (the soft-drop "
+                f"lower bound must sit below the kinematic z <= 1/2), got {self.lnz_zcut!r}"
+            )
+        # plain floats; the bound itself is built on the fly from the emitted `u`
+        # (see `lnz_bounds`), so NO buffer is added and the `legacy` state_dict is
+        # byte-identical.
+        self._ln_zcut = math.log(self.lnz_zcut) if self.lnz_physical else float("-inf")
+        self._ln_half = math.log(0.5)
 
         emb = int(cfg.encoder.emb_dim)
         self.emb_dim = emb
@@ -343,14 +372,62 @@ class EditTransducer(PosteriorModel):
             f_lz_m=free[4], f_lz_s=free[5], f_psi_m=free[6], f_kappa=free[7],
         )
 
+    # ------------------------------------- WP-E: the physical ln z support
+    def lnz_bounds(self, u):
+        """`(lo, hi)` of the `ln z` support at the EMITTED `u = ln(1/DeltaR)`, or `None`
+        in `legacy` mode.
+
+        Soft Drop keeps a splitting iff `z > z_cut (DeltaR/R)^beta` (Larkoski et al.,
+        arXiv:1402.2657; RSD: Dreyer et al., arXiv:1804.03657), i.e. — with this repo's
+        `u = ln(1/DeltaR)` convention and `R = 1` — `ln z > ln z_cut - beta*u`; and
+        `z = min(pT1,pT2)/(pT1+pT2) <= 1/2` by construction. So
+
+            ln z  in  ( ln z_cut - beta*u ,  ln(1/2) ].
+
+        Unlike `ARJunipr.lnz_bounds`, which has to loosen the bound to the whole CELL,
+        this family can evaluate it at the node's own `u`: the emission density here
+        factorizes as `f(u, v) . f(ln z | u) . f(psi)`, and a `u`-dependent `ln z` factor
+        is exactly what that supports. It is also the bound `data.stats.check_lnz_support`
+        verifies the truth against, so the head normalizes over precisely the interval the
+        guard checked. At the fielded `beta = 0` the bound is the constant `(ln z_cut,
+        ln 1/2]` and the two families' conventions coincide.
+
+        `hi` is materialised as a tensor rather than left a float: `torch.clamp` takes two
+        Tensors or two Numbers, never one of each, and every caller clamps against the
+        pair."""
+        if not self.lnz_physical:
+            return None
+        lo = self._ln_zcut - self.lnz_beta * u
+        return lo, torch.full_like(lo, self._ln_half)
+
+    def _log_lnz(self, lz, mu, sig, u):
+        """The `ln z` log-density factor of either mixture component: the unbounded
+        Normal in `legacy`, the same Normal truncated to `lnz_bounds(u)` in `physical`."""
+        bounds = self.lnz_bounds(u)
+        if bounds is None:
+            return gauss_logpdf(lz, mu, sig)
+        lo, hi = bounds
+        return trunc_normal_logpdf(lz.clamp(min=lo, max=hi), mu, sig, lo, hi)
+
+    def _draw_lnz(self, mu, sig, u, shape, *, generator=None):
+        """One `ln z` draw per element, from the density `_log_lnz` describes — same
+        branch, same bounds, so sampler and likelihood cannot drift apart."""
+        bounds = self.lnz_bounds(u)
+        if bounds is None:
+            return mu + sig * torch.randn(shape, device=mu.device, dtype=mu.dtype,
+                                          generator=generator)
+        lo, hi = bounds
+        return trunc_normal_sample(mu, sig, lo, hi, generator=generator)
+
     # --------------------------------------------------------------- densities
     def _log_f_anch(self, p: _EmitParams, u, v, lz, psi):
         """The smeared (kept-node) component: a truncated normal on each plane
         coordinate — truncated to the GEOMETRY range, so the density is normalized on
-        exactly the support the geometry defines — a normal on ln z, a von Mises on psi."""
+        exactly the support the geometry defines — a normal on ln z (truncated to the
+        grooming interval under `lnz_support=physical`), a von Mises on psi."""
         ll = trunc_normal_logpdf(u, p.mu_u, p.sig_u, self.lo_u, self.hi_u)
         ll = ll + trunc_normal_logpdf(v, p.mu_v, p.sig_v, self.lo_v, self.hi_v)
-        ll = ll + gauss_logpdf(lz, p.mu_z, p.sig_z)
+        ll = ll + self._log_lnz(lz, p.mu_z, p.sig_z, u)
         return ll + vonmises_logpdf(psi, p.mu_psi, p.kappa)
 
     def _gather_cell_lp(self, cell_lp, cell):
@@ -371,7 +448,9 @@ class EditTransducer(PosteriorModel):
         ll = self._gather_cell_lp(p.cell_lp, cell)
         ll = ll + trunc_normal_logpdf(du, p.f_du_m, p.f_du_s, -self.half_u, self.half_u)
         ll = ll + trunc_normal_logpdf(dv, p.f_dv_m, p.f_dv_s, -self.half_v, self.half_v)
-        ll = ll + gauss_logpdf(lz, p.f_lz_m, p.f_lz_s)
+        # the bound is read at the emitted `u`, not the cell centre: the free component's
+        # own `u` is `cx + du`, and both are already in hand here.
+        ll = ll + self._log_lnz(lz, p.f_lz_m, p.f_lz_s, u)
         return ll + vonmises_logpdf(psi, p.f_psi_m, p.f_kappa)
 
     def _log_f_emit(self, p: _EmitParams, cell, u, v, lz, psi):
@@ -531,7 +610,7 @@ class EditTransducer(PosteriorModel):
         take = torch.rand(shape, device=dev, generator=generator) < p.log_p_anch.exp()
         u_a = trunc_normal_sample(p.mu_u, p.sig_u, self.lo_u, self.hi_u, generator=generator)
         v_a = trunc_normal_sample(p.mu_v, p.sig_v, self.lo_v, self.hi_v, generator=generator)
-        z_a = p.mu_z + p.sig_z * torch.randn(shape, device=dev, generator=generator)
+        z_a = self._draw_lnz(p.mu_z, p.sig_z, u_a, shape, generator=generator)
         psi_a = vonmises_sample(p.mu_psi, p.kappa, generator=generator)
 
         probs = p.cell_lp.exp().reshape(-1, self.n_cells)
@@ -542,7 +621,7 @@ class EditTransducer(PosteriorModel):
                                  generator=generator)
         u_f = self.cell_cx[cell_f] + du
         v_f = self.cell_cy[cell_f] + dv
-        z_f = p.f_lz_m + p.f_lz_s * torch.randn(shape, device=dev, generator=generator)
+        z_f = self._draw_lnz(p.f_lz_m, p.f_lz_s, u_f, shape, generator=generator)
         psi_f = vonmises_sample(p.f_psi_m, p.f_kappa, generator=generator)
 
         u = torch.where(take, u_a, u_f)
@@ -618,7 +697,16 @@ class EditTransducer(PosteriorModel):
     def _log_cell_mass(self, p: _EmitParams, cell):
         """`(log mixture mass in `cell`, log anchored share)` — the emission likelihood
         with the coordinates integrated over the cell, which is what the CONSTRAINED
-        lattice runs on."""
+        lattice runs on.
+
+        **Untouched by WP-E, and that is a fact rather than an oversight.** A cell is a
+        box in `(u, v)` only, so this integrates `u` and `v` and marginalises `ln z` and
+        `psi` — whose factors integrate to 1 and never appear below. The physical `ln z`
+        head makes that factor `f(ln z | u)`, and `int f(ln z | u) d ln z = 1` for EVERY
+        `u`, so the marginal is unchanged bound or no bound. Hence `sample_coordinates`'
+        constrained forward-backward, and every alignment it draws, are identical under
+        the two supports; only the `ln z` finally drawn inside the chosen component
+        differs. `tests/test_edit_lnz_support.py` asserts this rather than trusting it."""
         u_lo, u_hi, v_lo, v_hi = self._cell_bounds(cell)
         mu = (trunc_normal_cdf(u_hi, p.mu_u, p.sig_u, self.lo_u, self.hi_u)
               - trunc_normal_cdf(u_lo, p.mu_u, p.sig_u, self.lo_u, self.hi_u)).clamp(min=1e-12)
@@ -683,36 +771,51 @@ class EditTransducer(PosteriorModel):
         # to the cell's edges instead of the geometry's
         u_a = trunc_normal_sample(q.mu_u, q.sig_u, u_lo, u_hi, generator=generator)
         v_a = trunc_normal_sample(q.mu_v, q.sig_v, v_lo, v_hi, generator=generator)
-        z_a = q.mu_z + q.sig_z * torch.randn(L, device=dev, generator=generator)
+        z_a = self._draw_lnz(q.mu_z, q.sig_z, u_a, (L,), generator=generator)
         psi_a = vonmises_sample(q.mu_psi, q.kappa, generator=generator)
         du = trunc_normal_sample(q.f_du_m, q.f_du_s, -self.half_u, self.half_u,
                                  generator=generator)
         dv = trunc_normal_sample(q.f_dv_m, q.f_dv_s, -self.half_v, self.half_v,
                                  generator=generator)
-        z_f = q.f_lz_m + q.f_lz_s * torch.randn(L, device=dev, generator=generator)
+        u_f = self.cell_cx[cell] + du
+        z_f = self._draw_lnz(q.f_lz_m, q.f_lz_s, u_f, (L,), generator=generator)
         psi_f = vonmises_sample(q.f_psi_m, q.f_kappa, generator=generator)
-        u = torch.where(take, u_a, self.cell_cx[cell] + du)
+        u = torch.where(take, u_a, u_f)
         v = torch.where(take, v_a, self.cell_cy[cell] + dv)
         lz = torch.where(take, z_a, z_f)
         psi = wrap_to_pi(torch.where(take, psi_a, psi_f))
         return torch.stack([u, v, lz, psi], dim=-1)
 
     # ------------------------------------------------------------ point estimate
+    def _mode_lnz(self, mu, u):
+        """The modal `ln z` of a component whose `ln z` factor is centred on `mu`: `mu`
+        itself in `legacy`, and `mu` CLAMPED into `lnz_bounds(u)` in `physical` — the mode
+        of a truncated normal is its untruncated mode when that lies inside the interval
+        and the nearer endpoint otherwise. Without the clamp the decode could return a
+        point estimate the very support audit it is scored by would flag."""
+        bounds = self.lnz_bounds(u)
+        if bounds is None:
+            return mu
+        lo, hi = bounds
+        return mu.clamp(min=lo, max=hi)
+
     def _emission_mode(self, p: _EmitParams):
         """The modal emission at each lattice state: whichever component's own mode
         carries the larger MIXTURE density, with its cell and that density."""
         cell_a = self._cells_from_coords(p.mu_u, p.mu_v)
-        f_a = self._log_f_emit(p, cell_a, p.mu_u, p.mu_v, p.mu_z, p.mu_psi)
+        z_a = self._mode_lnz(p.mu_z, p.mu_u)
+        f_a = self._log_f_emit(p, cell_a, p.mu_u, p.mu_v, z_a, p.mu_psi)
         cell_f = p.cell_lp.argmax(dim=-1)
         u_f = self.cell_cx[cell_f] + p.f_du_m
         v_f = self.cell_cy[cell_f] + p.f_dv_m
-        f_f = self._log_f_emit(p, cell_f, u_f, v_f, p.f_lz_m, p.f_psi_m)
+        z_f = self._mode_lnz(p.f_lz_m, u_f)
+        f_f = self._log_f_emit(p, cell_f, u_f, v_f, z_f, p.f_psi_m)
         take = f_a >= f_f
         coords = torch.stack(
             [
                 torch.where(take, p.mu_u, u_f),
                 torch.where(take, p.mu_v, v_f),
-                torch.where(take, p.mu_z, p.f_lz_m),
+                torch.where(take, z_a, z_f),
                 wrap_to_pi(torch.where(take, p.mu_psi, p.f_psi_m)),
             ],
             dim=-1,

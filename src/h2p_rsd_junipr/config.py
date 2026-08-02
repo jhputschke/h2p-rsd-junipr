@@ -218,6 +218,17 @@ class EditTransducerConfig:
     #                                    feeds the emission heads, restoring recoil
     #                                    correlation). The OP head stays prefix-free either
     #                                    way — that is what keeps length_pmf exact.
+    # --- ln z support (docs/PLAN_prod_test_edit.md WP-E) -----------------------
+    # The SAME three fields, with the same names and semantics, as `ARJuniprConfig`:
+    # `data.stats.check_lnz_support` reads them through `OmegaConf.select` and is
+    # family-agnostic, so declaring them here buys its guard unchanged. Both mixture
+    # components put an unbounded Normal on `ln z` while `u`/`v` are already truncated to
+    # the geometry range, so `legacy` reproduces the v0 support failure by construction —
+    # and an edit NLL is only comparable with a `physical` AR arm when this is `physical`.
+    lnz_support: str = "legacy"         # legacy | physical
+    lnz_zcut: float = 0.1               # soft-drop z_cut; only read when lnz_support=physical
+    lnz_beta: float = 0.0               # soft-drop beta;  only read when lnz_support=physical
+    #                                     Both are properties of the FILE, not free knobs.
 
 
 @dataclass

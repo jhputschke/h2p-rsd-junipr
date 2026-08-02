@@ -1,6 +1,31 @@
 # PLAN — Production test edit: the edit transducer against the v1 winner
 
-**Status: planned, not run.** Companion to [`PLAN_prod_test_v0.md`](PLAN_prod_test_v0.md)
+**Status: RUN AND COMPLETE.** All 9 arms of the §7 grid trained and evaluated, the reference
+re-evaluated per WP-F.1, and gates E1–E9 applied. Results:
+[`PROD_TEST_edit_RESULTS.md`](PROD_TEST_edit_RESULTS.md), with machine-produced numbers in
+[`PROD_TEST_edit_TABLES.md`](PROD_TEST_edit_TABLES.md).
+
+**Outcome in one line: the edit factorization loses** — E4 (TARP, the deciding gate), E5
+(coverage) and E6 (NLL) all fail unanimously across three seeds, with bands that do not
+overlap the reference's, at a *smaller* parameter budget. **E7 passes**, so the family's
+falsifiable physics claim survives: Λ_eff = 0.631 GeV at R² = 0.949, read off the arm never
+told the functional form. The mechanism explains the loss — `frac_anchored ≈ 0.19`, so the
+anchoring term reaches a fifth of the emissions and an ordinary insertion head does the rest.
+Two deviations from §12 are recorded in the results document's §0, not here.
+
+What landed in the tree:
+
+| WP | where |
+|---|---|
+| **WP-E** the `ln z` support port | `config.py` `EditTransducerConfig`, `models/edit.py` (`lnz_bounds` / `_log_lnz` / `_draw_lnz` / `_mode_lnz`), `configs/model/edit_v{1,2}.yaml` |
+| **WP-F.1** reference re-eval | `scripts/eval_prod_test_v1.sh --run-root runs/prod_test_v1 --device cpu --only v1_contstop_s0,v1_contstop_s1` (no code change needed) |
+| **WP-F.2** gates | `scripts/prod_test_edit_gates.py` |
+| **WP-F.3** notebook | `notebooks/prod_test_v1.ipynb` §0/§6/§8 |
+| **WP-G** anchoring | `scripts/edit_anchoring_diagnostic.py` |
+| §7 grid | `presets/prod_test_edit.yaml`, `scripts/run_prod_test_edit.sh` |
+| §9 tests | `tests/test_edit_lnz_support.py`, `tests/test_nll_comparability.py`, extensions to `tests/test_edit_model.py` / `tests/test_models.py` |
+
+Companion to [`PLAN_prod_test_v0.md`](PLAN_prod_test_v0.md)
 and [`PLAN_prod_test_v1.md`](PLAN_prod_test_v1.md); as there, **this plan holds the design
 and the rationale, the results document will hold only numbers.** Every pass criterion
 below is fixed before the grid runs.

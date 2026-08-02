@@ -34,3 +34,15 @@ kappa_max: 50.0
 max_emissions: 25             # support of the exact structural q(N|x)
 physics_width: true           # sigma_0 + Lambda_eff/k_t; false == the free-MLP ablation
 prefix_conditioning: true     # the v2 switch
+
+# --- ln z support (docs/PLAN_prod_test_edit.md WP-E) ---
+# `legacy` is the unbounded Normal both mixture components shipped with; `physical` puts
+# the same truncated normal on ln z that the plane coordinates already use, over
+# (ln z_cut - beta*ln(1/DeltaR), ln 1/2] — the interval Soft Drop leaves. Unlike the AR
+# families the bound is read at the node's OWN u, which this factorization supports.
+# The pair below is a property of the DATA FILE and is verified against it before
+# training (data.stats.check_lnz_support), not a free knob. An edit NLL is comparable
+# with an AR one only when both sides declare the same value here.
+lnz_support: legacy   # legacy | physical
+lnz_zcut: 0.1
+lnz_beta: 0.0

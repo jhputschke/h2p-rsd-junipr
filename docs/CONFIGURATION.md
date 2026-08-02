@@ -510,6 +510,17 @@ every truth `ln z` lies inside the resulting interval. The second catches a conv
 > `physical` run are comparable only to other `physical` runs; the bridge to the older
 > record is a `legacy` arm trained on the same data. Never put a `physical` NLL and a
 > `legacy` NLL in the same column.
+>
+> **This extends across families, not just across arms.** The edit transducer carries the
+> same three fields (§4, `edit_v1` / `edit_v2` below), and the production-test-edit run
+> compares its held-out NLL directly with `ar_junipr_v4`'s continue/stop arm. Both are
+> `exact_likelihood = True` and both are densities on the same `(u, v, ln z, ψ)` space, so
+> the comparison is legitimate — but only once both sides declare the **same**
+> `lnz_support`. Otherwise the delta is the head, not the fit, and it is a large delta:
+> `v1_legacy_lnz` came in at 4.0703 against a `v1_base` band of 3.9036–3.9237 — ~0.15 nat,
+> on nothing but the head. [`tests/test_nll_comparability.py`](../tests/test_nll_comparability.py)
+> pins the cross-family claim; `scripts/prod_test_edit_gates.py` refuses to rank a
+> mismatched pair.
 
 **`ar_junipr_v3`** is the v2 backbone with `use_multiplicity_head=True`: it factorizes
 `q(y|x) = q(N|x)·q(y|N,x)` with a dedicated categorical multiplicity head (the same head cINN
@@ -657,6 +668,43 @@ anchors are the **per-node** states, not the pooled `e(x)`.
 | `max_emissions` | `25` | readout width of the exact `q(N\|x)` and the sampler's cap — **not** a likelihood support (see below) |
 | `physics_width` | `true` | `σ = σ₀ + Λ_eff·exp(−ln k_t)`; `false` = free-MLP ablation |
 | `prefix_conditioning` | `false` | `false` = `edit_v1`, `true` = `edit_v2` |
+| `lnz_support` | `"legacy"` | `legacy` = the unbounded Normal on `ln z` in **both** mixture components; `physical` = the truncated normal on the interval the grooming leaves. See below |
+| `lnz_zcut` | `0.1` | the file's soft-drop `z_cut`; read only when `lnz_support="physical"` |
+| `lnz_beta` | `0.0` | the file's soft-drop `β`; read only when `lnz_support="physical"` |
+
+#### `lnz_support` on this family — the same field, one bound tighter
+
+Same name, same semantics and the same `data.stats.check_lnz_support` guard as the AR
+families above ([`PLAN_prod_test_edit.md`](PLAN_prod_test_edit.md) WP-E). The plane
+coordinates were already truncated to the geometry range in *both* mixture components;
+`ln z` was the one left on an unbounded Normal, so `legacy` reproduces the v0 support
+failure by construction (~0.81% below the soft-drop wall, ~3.98% above `z = ½`).
+
+One difference from the AR implementation, and it is a tightening. The bound is read at
+the node's **own** `u`, `lo(u) = ln z_cut − β·u`, not at the loosest `u` in its cell.
+This factorization supports that: the emission density is `f(u, v)·f(ln z | u)·f(ψ)`, and
+a `u`-dependent `ln z` factor is exactly what such a product can express, whereas the AR
+coordinate head — a product of factors independent *given the cell* — cannot. So this is
+the exact Soft Drop boundary, the same expression the guard verifies the truth against,
+with no `|β|·half_u` slack to audit. At the fielded `β = 0` the two conventions coincide.
+
+`_log_cell_mass` is deliberately **unchanged** by the switch, and that is a fact rather
+than an oversight: a cell is a box in `(u, v)` only, and `∫ f(ln z | u) d ln z = 1` for
+every `u`. The constrained forward–backward behind `sample_coordinates` therefore draws
+bit-identical alignments under both supports; only the `ln z` inside the chosen component
+differs. `tests/test_edit_lnz_support.py` asserts this rather than trusting it.
+
+> ⚠️ **NLL is not comparable across the head change — in either direction, and across
+> families too.** A truncated `ln z` concentrates its mass on a 1.61-wide interval and
+> *gains* NLL against a Normal on ℝ for reasons that have nothing to do with fit quality.
+> That applies to `edit` vs `edit` and, in the cross-family A/B this field exists for
+> (`edit_v1` vs the AR continue/stop arm), to `edit` vs `ar_junipr_*`. Both families are
+> `exact_likelihood = True` and both normalize over the same `(u, v, ln z, ψ)` space, so
+> their NLL/jet **is** comparable — *provided both sides declare the same `lnz_support`*.
+> `tests/test_nll_comparability.py` is where that is asserted: it MC-integrates the two
+> emission densities over one common box and checks both give 1, and checks that a
+> `legacy` head does not. `scripts/prod_test_edit_gates.py` enforces it mechanically —
+> a mismatched pair prints `!` and refuses to rank.
 
 Three properties that follow from the factorization rather than from a knob:
 

@@ -16,6 +16,10 @@ MODELS = [
     ["model=diffusion", "encoder=lundnet"],
     ["model=cfm", "encoder=gru", "model.n_ode_steps=8"],   # 8 steps keeps the smoke fast
     ["model=edit_v1", "encoder=gru"],   # latent-alignment transducer (the anchored family)
+    # stage 2 satisfies the generic contract suite from day one rather than after it is
+    # fielded (docs/PLAN_prod_test_edit.md §9): the prefix network changes every decode
+    # path — sample, map_estimate, sample_coordinates — and `edit_v1` exercises none of it.
+    ["model=edit_v2", "encoder=gru"],
 ]
 
 
