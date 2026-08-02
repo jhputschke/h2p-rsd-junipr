@@ -484,6 +484,33 @@ Two deviations to record rather than bury:
   scored audit in §4.1 covers all four boundaries — but that table would not have caught
   the 3.94% a `legacy` arm shows.
 
+### 4.10 Figures
+
+`runs/` is gitignored, so these are copied into the tree by
+`python scripts/make_prod_test_v1_figures.py` — otherwise this section would render blank
+for everyone who did not produce the grid. All are drawn from the **2 000-jet calibration
+tier**, redrawn from the merged record rather than left over from the 300-jet decode pass.
+
+**The `ln z` support error, and its removal.** The same instrument on the same data, one
+`lnz_support` apart:
+
+| `v1_legacy_lnz_s0` (unbounded) | `v1_base_s0` (truncated) |
+|---|---|
+| ![](figures/prod_test_v1/v1_legacy_lnz_s0__calibration_pit_coords.png) | ![](figures/prod_test_v1/v1_base_s0__calibration_pit_coords.png) |
+
+**Where the residual `ln z` misfit lives.** Coloured by KS / its *own* 95% critical value,
+so >1 fails and the cell counts (which differ by ~50×) cannot mislead:
+
+![](figures/prod_test_v1/v1_base_s0__calibration_pit_by_region.png)
+
+**G7, and the family that passes it.** TARP against the null band recomputed at this run's
+own `(n, α grid)` — the base arm exceeds it, the continue/stop arm does not:
+
+| `v1_base_s0` — FAIL | `v1_contstop_s0` — PASS |
+|---|---|
+| ![](figures/prod_test_v1/v1_base_s0__calibration_tarp.png) | ![](figures/prod_test_v1/v1_contstop_s0__calibration_tarp.png) |
+
+
 ## 5. Retroactive pass on the v0 checkpoint
 
 The training-free items — the WP-C estimator repairs and the whole WP-D assessment block —
