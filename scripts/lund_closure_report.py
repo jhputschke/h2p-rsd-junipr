@@ -232,6 +232,8 @@ def parse_args(argv=None):
 
 
 def newest(pattern: str):
+    """Newest match of `pattern` under the repo root. `Path.glob` handles `**` natively,
+    so a pattern may span an unknown number of intermediate directories."""
     found = sorted(REPO.glob(pattern), key=lambda q: q.stat().st_mtime)
     return found[-1] if found else None
 
@@ -252,9 +254,15 @@ def resolve_settings(a):
         if mp is not None and not mp.is_absolute():
             mp = REPO / mp
         if mp is None:
-            # v* so a prod_test_v1 artifact is found too; newest wins, and the path is
-            # recorded in the report, so which regime produced it is never a guess.
-            mp = newest("runs/prod_test_v*/*/prod_test_v*/prod_test_v*_metrics.json")
+            # `**` because the run root's DEPTH is not fixed. A single-arm run writes
+            # runs/prod_test_v0/<stamp>/prod_test_v0/..., but a GRID gives each arm its own
+            # root (scripts/run_prod_test_v1.sh: run_root=<root>/<arm>), which adds a level
+            # and made the old fixed-depth pattern miss every v1 arm. It did not fail —
+            # it silently fell back to the newest v0 artifact, so the report would have
+            # assessed the v0 checkpoint while its caller believed it was assessing v1.
+            # Newest still wins, and the path is recorded in the report, so which regime
+            # produced it is never a guess.
+            mp = newest("runs/prod_test_v*/**/prod_test_v*/prod_test_v*_metrics.json")
         if mp is None:
             raise SystemExit(
                 "no prod_test_v*_metrics.json under runs/. This script takes "

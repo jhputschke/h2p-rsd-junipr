@@ -98,16 +98,35 @@ import importlib.util as _ilu
 import json as _json
 from pathlib import Path as _Path
 
-# None -> newest runs/prod_test_v*/*/{TAG}/{TAG}_metrics.json
+# None -> the newest {TAG}_metrics.json, preferring {RUNROOT}/ (see below).
 PROD_METRICS_PATH = None
 
 _REPO = _Path.cwd().parent if _Path.cwd().name == "notebooks" else _Path.cwd()
+
+
+def _find_artifacts(pattern):
+    return sorted(_REPO.glob(pattern), key=lambda q: q.stat().st_mtime)
+
+
 if PROD_METRICS_PATH:
     _mp = _Path(PROD_METRICS_PATH)
     _mp = _mp if _mp.is_absolute() else _REPO / _mp
 else:
-    _found = sorted(_REPO.glob("runs/prod_test_v*/*/{TAG}/{TAG}_metrics.json"),
-                    key=lambda q: q.stat().st_mtime)
+    # `**`, not `*`: the run root's DEPTH is not fixed. A single-arm run writes
+    # runs/prod_test_v0/<stamp>/prod_test_v0/..., but a GRID gives each arm its own root
+    # (scripts/run_prod_test_v1.sh: run_root=<root>/<arm>), which adds a level. The old
+    # fixed-depth pattern missed every grid arm — and did not fail, it silently resolved
+    # to whatever single-arm artifact happened to be newest, so this notebook would have
+    # reported on a DIFFERENT CHECKPOINT than its caller intended.
+    #
+    # And prefer this tag's OWN run root before falling back to any: {RUNROOT}/ wins,
+    # which is what makes this notebook usable against the production test of the same
+    # name rather than against whichever artifact happened to be written most recently
+    # anywhere. Without it the choice rests on mtime alone, so re-running a different
+    # notebook would silently repoint this one at another checkpoint.
+    _own = _find_artifacts("{RUNROOT}/**/{TAG}/{TAG}_metrics.json")
+    _any = _find_artifacts("runs/prod_test_v*/**/{TAG}/{TAG}_metrics.json")
+    _found = _own or _any
     if not _found:
         raise FileNotFoundError(
             "no {TAG}_metrics.json under runs/. This notebook takes its checkpoint, its "
@@ -115,6 +134,9 @@ else:
             "from that artifact — run notebooks/{NB} first, or set PROD_METRICS_PATH."
         )
     _mp = _found[-1]
+    if _own:
+        print(f"[{TAG}] using {RUNROOT}/ (this tag's own run root); "
+              f"{len(_any) - len(_own)} artifact(s) elsewhere were NOT used")
 
 _M = _json.loads(_mp.read_text())
 # Read the PRIMARY record of each value, not a summary block duplicating it: the tau and
@@ -298,7 +320,10 @@ def build(tag: str) -> dict:
                 f"for:\n  {old}\nUpdate scripts/make_prod_closure_nb.py to match."
             )
         body = body.replace(old, new)
-    fill = {"{TAG}": f"prod_test_{tag}", "{NB}": f"prod_test_{tag}.ipynb"}
+    fill = {"{TAG}": f"prod_test_{tag}", "{NB}": f"prod_test_{tag}.ipynb",
+            # the tag's own run root. NOT "runs/prod_test_{TAG}" -- {TAG} is
+            # already `prod_test_<tag>`, so that spells prod_test_prod_test_v1.
+            "{RUNROOT}": f"runs/prod_test_{tag}"}
     text = PRELUDE + body.rstrip("\n") + "\n" + EPILOGUE
     for k, v in fill.items():
         text = text.replace(k, v)
