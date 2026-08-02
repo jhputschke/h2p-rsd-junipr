@@ -445,6 +445,45 @@ it by construction — and the concern was that the A/B would be biased in its f
 deciding metrics say the opposite, which is the outcome a pre-registered rule exists to
 make reportable.
 
+### 4.9 The G8 winner, assessed in depth
+
+The two-pass CLI eval is a per-arm instrument; `notebooks/prod_test_v1.ipynb` is the deep
+one (NLL by term, occupancy, chunked PITs, the fitted `tau` and its `fitted_under`, the
+aux ablation, the closure report). It was pointed at `v1_contstop_s0` — the arm G8
+favours — on the full 97 018-jet test file. Artifact:
+`runs/prod_test_v1/v1_contstop_s0/<stamp>/prod_test_v1/prod_test_v1_metrics.json`.
+
+| | |
+|---|---|
+| acceptance | **PASS** — medoid/identity **0.901**, off-grid geo-median/identity **0.872** |
+| support (truth / identity / posterior) | 0.0% / 0.0% / **0.0%** on all columns |
+| NLL/jet (97 018 jets) | 3.8143 total; length 1.0023/jet; split+coord 1.9862/emission |
+| leading-cell 68% coverage | 0.541 [0.517, 0.565] |
+| `tau` | 0.33603, `fitted_under` (T, tilt) = (1.0649, −0.0724) — the scale it is applied on |
+| `q(0\|x)` AUC | 0.827 |
+
+Its acceptance ratios are **better than any `v1_base` seed** (0.901 / 0.872 against bands
+of [0.924, 0.937] and [0.925, 0.932]), which is consistent with §4.8 rather than new
+evidence for it — the same draws feed both.
+
+Two deviations to record rather than bury:
+
+- **`N_FIT` was cut 20 000 → 5 000 for this run** (the artifact says so itself:
+  `empty_tree.recalibration.fit_jets = 5000`). §6's speedup is the identity
+  `length_pmf = softmax(n_head(e))`, a pure batched op — and this family has no `n_head`,
+  so `length_pmf` reverts to one 500-draw sampling pass per jet. Measured on this box:
+  **52.19 ms/jet against 0.73**, a factor of 71, which at the notebook's default tier is
+  35 min for that section alone. The notebook took 21.7 min at the reduced tier. This is a
+  property of the family, not a regression: three of the four speedups in
+  `PLAN_prod_test_speedup.md` are family-agnostic and the fourth is not. Restoring it for
+  sampler-based families (reuse `mults=`, or batch `sample()` across jets rather than
+  across draws of one jet) is a follow-up, deliberately not made mid-run.
+- **The notebook's own §8 support table has three columns, not four.** `z > ½` was added
+  to `eval/support.py` and `scripts/lund_closure_report.py` by WP-D.1, not to the
+  notebook's §8. Its zeros here are still true — this arm is a `physical` head and the
+  scored audit in §4.1 covers all four boundaries — but that table would not have caught
+  the 3.94% a `legacy` arm shows.
+
 ## 5. Retroactive pass on the v0 checkpoint
 
 The training-free items — the WP-C estimator repairs and the whole WP-D assessment block —
