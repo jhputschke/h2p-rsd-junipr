@@ -245,14 +245,16 @@ so the objective and all closure observables are jet-level.
 | §5.2 conditional normalizing flow (cINN) | `models/cinn.py` | ✅ | functional baseline |
 | §5.3 conditional diffusion / bridge | `models/diffusion.py` | ❌ surrogate | cheap-sampler baseline |
 | §5.4 conditional flow matching (exact probability-flow-ODE likelihood) | `models/cfm.py` | ✅ | verified density, unvalidated posterior |
+| §5.5 edit transducer (latent alignment; v1 pair-HMM / v2 +prefix) | `models/edit.py`, `models/edit_dp.py` | ✅ | stage-1 premise checked, unvalidated posterior |
 
 Encoders (`gru`, `lundnet`, `deepsets`) are independently pluggable; any encoder
-pairs with any decoder family.
+pairs with any decoder family — except `edit`, which needs one exposing per-node states
+(`returns_sequence=true`; all three do).
 
 > **What the status column means.** Only `ar_junipr` is *verified* in the
 > [Verification](#verification-this-is-the-acceptance-test) sense — weight-level parity plus a
 > train+closure run — and it is the only family with trained runs on real data under
-> [`runs/`](runs/). The other three carry the full shared contract (calibration hooks, the
+> [`runs/`](runs/). The other four carry the full shared contract (calibration hooks, the
 > decode floors, aux conditioning, the empty-sequence and support guards), each parametrized
 > over every family in `tests/`, but none has a closure or calibration verdict on data beyond
 > the short demo in [`calibration_v2_walkthrough.ipynb`](notebooks/calibration_v2_walkthrough.ipynb).
@@ -277,8 +279,20 @@ pairs with any decoder family.
   support, with a sign-flipped control that fails by many σ ([`tests/test_cfm.py`](tests/test_cfm.py)).
   That is a correctness result, not a calibration one: nothing yet says the *posterior* it
   produces is trustworthy on data.
+- **`edit_v1` / `edit_v2`** are the only family that does not generate `y` from scratch.
+  The hadron tree *anchors* the parton tree: each parton node is a smeared copy of a
+  hadron node, an insertion, or a deleted hadron node, and which it is stays **latent** —
+  marginalized exactly by an `O(n_x·n_y)` lattice, never supervised, because node-level
+  parton↔hadron correspondence is not observable. Three things follow structurally rather
+  than by tuning: `Σ_y q(y|x) = 1` (it is the RNN-T lattice), an **exact `q(N|x)` with no
+  extra parameters**, and a multiplicity anchored at `|x|` — so the brevity bias the decode
+  floors exist to patch is removed rather than clamped. The smearing width is the
+  shape-function form `σ = σ₀ + Λ_eff/k_t`, which makes `Λ_eff` a *measured* quantity: on
+  `cpp/test_data/jets.root` the free-MLP ablation gives **1.29 GeV at R² = 1.000**, i.e.
+  the premise holds on that sample. Nothing has adjudicated v1 against v2 yet.
+  See [`docs/PLAN_EditTransducer.md`](docs/PLAN_EditTransducer.md).
 
-The post-review work packages behind the last three rows — and the calibration suite that
+The post-review work packages behind the §5.2–§5.4 rows — and the calibration suite that
 gates them — are in [`docs/PLAN_UPDATES.md`](docs/PLAN_UPDATES.md): WP1–WP4 are merged,
 WP5 (the systematics chain) is not started.
 
@@ -302,6 +316,9 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt \
   probability-flow ODE), so a base dimension is not one physical coordinate. The latent
   histograms are still a genuine per-dimension test — under a calibrated flow every base
   marginal is exactly `N(0,1)` — but they do not localize *which* kinematic is off.
+  `edit_v1`/`edit_v2` report nothing here: the exact prefix-conditional CDF falls out of
+  the same lattice as a responsibility-weighted mixture, but it has not been landed, so
+  the family sets `supports_coordinate_pit = False` rather than offering an approximation.
 - **region stratification** — every metric binned by the leading emission's Lund
   quadrant, so calibration that only holds *on average* over the plane cannot pass.
 - **TARP** expected coverage (Lemos et al., arXiv:2302.03026) on tree-valued posteriors

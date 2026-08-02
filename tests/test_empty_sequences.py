@@ -15,6 +15,8 @@ encoders, and the models that consume them.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -33,6 +35,8 @@ FAMILIES = [
     ["model=cinn"],
     ["model=cfm", "model.n_ode_steps=8"],
     ["model=diffusion"],
+    ["model=edit_v1"],
+    ["model=edit_v2"],
 ]
 
 
@@ -99,6 +103,37 @@ def test_every_family_scores_an_empty_PARTON_tree(sel):
              "yraw": torch.zeros(1, 0, 4)}
     with torch.inference_mode():
         assert torch.isfinite(model.log_prob(batch)).all()
+
+
+@pytest.mark.parametrize("sel", [["model=edit_v1"], ["model=edit_v2"]],
+                         ids=lambda s: s[0].split("=")[1])
+def test_the_edit_family_treats_both_limits_as_first_class(sel):
+    """The two empty cases are not edge cases for this family — they are named paths.
+
+    `nx == 0` is the pure-insertion limit: no anchor exists, so `p_anch` is forced to zero
+    and the model IS the free head. `ny == 0` is the delete-all path: ADVANCE past every
+    hadron node and STOP, which is a single lattice path with a closed-form probability.
+    The 16.0% of jets with an empty parton tree are represented natively, which is what
+    lets `length_pmf` hand `empty_gate` an exact `q(N=0|x)`."""
+    geom = Geometry()
+    model = build_model(load_config([*sel, "encoder=gru"]), geom).eval()
+    with torch.inference_mode():
+        # pure insertion: every emission is free, and the model still samples/decodes
+        xf0, nx0 = _empty_x()
+        assert not bool(model._encode(xf0, nx0)[3].any())    # no column carries an anchor
+        assert len(model.sample(xf0, nx0, 8)) == 8
+        # delete-all: one path, closed form, and strictly positive mass at N = 0
+        torch.manual_seed(0)
+        xf, nx = torch.randn(1, 5, N_NODE_FEAT), torch.tensor([5])
+        empty = {"xf": xf, "nx": nx, "yc": torch.zeros(1, 0, dtype=torch.long),
+                 "ny": torch.tensor([0]), "yraw": torch.zeros(1, 0, 4)}
+        got = float(model.log_prob(empty)[0])
+        S, e, _a, _o = model._encode(xf, nx)
+        want = float(model._op_logprobs(S, e)[0][0, :6].sum())
+        assert got == pytest.approx(want, rel=1e-6, abs=1e-5)
+        # ...and `length_pmf` agrees, up to its documented renormalization over
+        # n <= model.max_emissions (the mass past the cap exists and is not represented)
+        assert model.length_pmf(xf, nx)[0] == pytest.approx(math.exp(got), rel=1e-2)
 
 
 def test_cross_attention_row_with_no_hadron_nodes_is_finite():

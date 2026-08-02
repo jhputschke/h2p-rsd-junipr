@@ -3,6 +3,7 @@ from .base import PosteriorModel, build_model, register_model, registered_models
 from .cfm import CFM
 from .cinn import CINN
 from .diffusion import Diffusion
+from .edit import EditTransducer
 
 __all__ = [
     "PosteriorModel",
@@ -13,4 +14,5 @@ __all__ = [
     "CINN",
     "Diffusion",
     "CFM",
+    "EditTransducer",
 ]

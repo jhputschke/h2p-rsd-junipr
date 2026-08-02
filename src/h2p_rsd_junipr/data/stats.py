@@ -62,6 +62,13 @@ def model_support(cfg) -> int | None:
         OmegaConf.select(cfg, "model.use_multiplicity_head") or False
     ):
         return None                       # v1/v2: max_emissions is inert here
+    if name.startswith("edit"):
+        # Same story, different mechanism. The edit transducer's length model is the
+        # open-ended STOP/EMIT lattice, so a long truth is improbable, not mis-normalized:
+        # `model.max_emissions` there is the *readout* width of the exact structural
+        # q(N|x) and the sampler's cap, and it never touches `log_prob`. Firing the guard
+        # would refuse to train on data the likelihood handles correctly.
+        return None
     return int(max_em)
 
 

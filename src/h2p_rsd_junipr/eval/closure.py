@@ -163,6 +163,10 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     bit-comparable to one that re-sampled per section."""
     dec = dict(decode or {})
     want_mbr = str(dec.get("point_estimator", "map")) == "mbr"
+    # The edit family's emergent-alignment readout (docs/PLAN_EditTransducer.md). Gated on
+    # the model exposing it, so every other family's metric dict is untouched.
+    edit_summary = getattr(model, "edit_summary", None)
+    edit_acc: dict[str, list[float]] = {"frac_anchored": [], "delete_rate": [], "insert_rate": []}
     d_id, d_mode, d_medoid = [], [], []
     n_id_bias, n_mean_bias, n_median_bias = [], [], []
     d_mbr, n_mbr_bias = [], []
@@ -224,6 +228,18 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
             psi_n["point"] += int(hpsi.size)
             psi_unident += hat.n_psi_unidentified
             psi_nodes_scored += hat.multiplicity
+
+        if edit_summary is not None:
+            # over EVERY jet, like the empty-tree block above: a truth-empty jet is the
+            # delete-all path, which is precisely a deletion-rate measurement.
+            s = edit_summary({
+                "xf": xf, "nx": nx,
+                "yc": item["yc"].unsqueeze(0).to(device),
+                "ny": torch.tensor([ny_true], device=device),
+                "yraw": item["yraw"].unsqueeze(0).to(device),
+            })
+            for key, arr in s.items():
+                edit_acc[key].append(float(arr[0]))
 
         if ly is None or not lead:
             continue
@@ -322,6 +338,12 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         "mult_bias_posterior_median": float(np.mean(n_median_bias)),
         "coverage_68": float(np.mean(covered)),
     }
+    if edit_summary is not None:
+        # NaN where the rate is undefined for a jet (no parton nodes to anchor, or no
+        # hadron nodes to delete), so these are nanmeans over the jets that have one.
+        for key, vals in edit_acc.items():
+            finite = [v for v in vals if v == v]
+            metrics[key] = float(np.mean(finite)) if finite else float("nan")
     # Which row is the DECODE headline (docs/PLAN_prod_test_v1.md WP-C.3). The MAP is a
     # diagnostic: it is the argmax of a high-entropy sequence posterior, an estimator for
     # a loss nobody is measuring here (Stahlberg & Byrne, arXiv:1908.10090; Eikema & Aziz,
@@ -481,6 +503,15 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
             + ("; 0 == off, so predicted ~0 is the DECODE, not the fit)" if _tau <= 0
                else ")")
         )
+        if edit_summary is not None:
+            print(
+                f"  latent alignment (edit transducer; posterior over alignments, never"
+                f" supervised):\n"
+                f"      kept & smeared = {metrics['frac_anchored']:.3f}"
+                f"   inserted = {metrics['insert_rate']:.3f}"
+                f"   deleted = {metrics['delete_rate']:.3f}"
+                f"   (of n_y, n_y, n_x respectively; n_y = n_x - #del + #ins)"
+            )
         if want_mbr:
             print(
                 f"  MBR ({metrics['mbr_backend']}) vs true y :"

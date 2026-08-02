@@ -46,10 +46,23 @@ def _jets(lengths, z_cut=0.1, beta=0.0, kt_floor=1.0):
         (["model=diffusion"], 25),
         (["model=cfm"], 25),
         (["model=ar_junipr_v2", "model.use_multiplicity_head=true"], 25),
+        # the edit transducer's length model is the open-ended STOP/EMIT lattice, so its
+        # max_emissions is the exact-q(N|x) readout width, not a likelihood support
+        (["model=edit_v1"], None),
+        (["model=edit_v2"], None),
     ],
 )
 def test_model_support_is_gated_on_having_a_head(sel, expected):
     assert model_support(load_config(sel)) == expected
+
+
+def test_the_edit_family_is_never_refused_for_a_long_truth():
+    """`model.max_emissions` is inert in the edit family's likelihood — a 100-emission
+    truth is merely improbable there, exactly as it is for `ar_junipr_v2`. Firing the guard
+    would refuse to train on data the DP handles correctly."""
+    cfg = load_config(["model=edit_v1"])
+    stats = check_multiplicity_support(_jets([1, 2, 100] * 50), cfg)
+    assert stats["support"] is None and stats["tail_fraction"] == 0.0
 
 
 def test_v2_never_raises_however_long_the_truth():
