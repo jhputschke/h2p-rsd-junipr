@@ -82,15 +82,24 @@ the docs:
   the MAP / MBR / plain-RSD / truth ladders each over a per-splitting residual strip, the
   aux vector the encoder saw, and the printed tree tables; and the **difference
   distribution** `Δ = estimate − truth` per splitting, for `ln(1/ΔR)`, `ln kt` and `ln z`,
-  once over all splittings and once over the first two. The alignment is the **splitting
-  index** — the only correspondence the data offers, since there is no per-node `x↔y`
-  matching — so a residual exists only where both sides have a node at `t`; §5 prints the
-  pairing rate per series and the notebook carries two pairings, **own depth** (what each
-  estimator produced; the population the figures plot) and **common depth** (row-matched,
-  the only rows on which the RMS ratio to plain RSD is a comparison, with a jet-level
-  bootstrap CI). ψ is deliberately excluded — its von Mises κ is below
-  `decode.kappa_min_mode` for most splittings. ~2 min for 2000 jets at `K=200` with the
-  `energyflow` MBR backend; writes `per_jet_residuals.json` beside the checkpoint.
+  once over all splittings and once over the first two. There is no per-node `x↔y`
+  correspondence, so it carries **three pairings** and reports all of them rather than
+  picking one. Two align by **splitting index** — *own depth* (`min(n_truth, n_s)`, what
+  §6/§7 plot) and *common depth* (row-matched across series, the only rows on which §8's
+  RMS ratio to plain RSD is a comparison, with a jet-level bootstrap CI). The third (§9) is
+  **depth-free kinematic matching**: nodes paired one-to-one by proximity in the Lund plane
+  (`scipy.optimize.linear_sum_assignment`), which uncapped returns exactly the same pair
+  count as own depth — asserted live — so §9 vs §6 is a clean A/B on *which* nodes pair.
+  Wide under index and narrow under matching ⇒ right kinematics, wrong depth. Its own bias
+  runs the other way and is stated: the assignment minimises the distance it then reports,
+  so it flatters whichever series brought the most nodes (here plain RSD, at ~30% more than
+  truth), which is why §5 prints the unmatched-("spurious")-node rate beside every matched
+  RMS and `ln z` is kept out of the matching cost. ψ is excluded throughout — its von Mises
+  κ is below `decode.kappa_min_mode` for most splittings. ~2 min for 2000 jets at `K=200`
+  with the `energyflow` MBR backend; writes `per_jet_residuals.json` beside the checkpoint.
+  **Generated** by [`scripts/make_per_jets_nb.py`](../scripts/make_per_jets_nb.py) — the
+  notebook source is past what the notebook editor can open, so edit the generator and
+  re-run it, then re-execute.
 
 - **lund_distribution_closure.ipynb** — the **population** counterpart to
   `inference_demo.ipynb`. Where `eval/closure.py` and `eval/calibration.py` ask per-jet
