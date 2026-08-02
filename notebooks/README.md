@@ -68,7 +68,16 @@ the docs:
   **current** coordinates (30×30 cells, `lnz_support="physical"`) and the **extended**
   model (`ar_junipr_v4` + cross-attention + the nine groomed aux columns), pinned by
   default to the `v1_contstop_s0` winner and its held-out file, read from the
-  `prod_test_v1` artifact. Two things: **`showcase_jet(i)`**, one call that runs the full
+  `prod_test_v1` artifact. **One knob, `RUN`, repoints it at anything** — a run directory,
+  an arm root, a `best.ckpt` or an artifact JSON — and the checkpoint, the held-out file
+  and the frozen `tau` are found from there (`RUN =
+  "runs/prod_test_edit/e_v2_s0/<stamp>"` assesses the edit transducer instead). The
+  evaluation file is the one thing never derived from the checkpoint, which records only
+  what it *trained* on; §3 asserts the two differ. Everything below §0 is family-agnostic:
+  the shape-decode keys come off the loaded class, and the length belief is **probed**
+  (`length_pmf` fed two different `mults`) rather than inferred from a config field — so
+  `edit_v2` is correctly reported as having an exact `q(N|x)` where `v1_contstop` has a
+  K-sample sampler histogram. Two things: **`showcase_jet(i)`**, one call that runs the full
   per-jet inference and shows the posterior cloud on the Lund plane, the length belief,
   the MAP / MBR / plain-RSD / truth ladders each over a per-splitting residual strip, the
   aux vector the encoder saw, and the printed tree tables; and the **difference
