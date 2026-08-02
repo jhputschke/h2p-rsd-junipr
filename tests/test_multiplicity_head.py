@@ -78,15 +78,35 @@ def test_length_pmf_is_exact_softmax_head(batch):
     assert np.allclose(pmf, ref, atol=1e-6)
 
 
-def test_length_pmf_batches_bit_identically(batch):
+def test_length_pmf_batches_consistently(batch):
     """One padded batch through `n_head(encode(...))` must reproduce the per-jet
-    `length_pmf` EXACTLY, row for row.
+    `length_pmf` row for row, to float32 tolerance.
 
     This is the identity `notebooks/prod_test_v1.ipynb` §6 relies on to replace 40,000
-    batch-1 calls (13 min, docs/PLAN_prod_test_speedup.md §3) with a chunked pass. No
-    RNG is involved, so "within noise" would be the wrong claim here — anything other
-    than equality means the collated padding is reaching the encoder, which would also
-    silently corrupt the batched NLL the notebook quotes from the same helper."""
+    batch-1 calls (13 min, docs/PLAN_prod_test_speedup.md §3) with a chunked pass. No RNG
+    is involved, so what this pins is the COMPOSITION: the batched helper has to apply the
+    head, `recalibrated_n_logits` and the softmax in the same order `length_pmf` does.
+
+    How much of that composition is actually covered, measured rather than assumed: the
+    fixture leaves `length_temperature=1.0` / `length_tilt=0.0`, where
+    `recalibrated_n_logits` is the IDENTITY — deleting the call outright still passes here
+    (7.4e-9, unchanged). So this covers the head and the softmax, not the recalibration.
+    The notebook runs with those knobs live — cell 35 saves and restores them around its
+    own check — and with them on, dropping the call moves the pmf by 1.5e-01. If that step
+    becomes load-bearing, parameterise the knobs here; today it is untested.
+
+    NOT a padding check, despite what this claimed until now. `b["xf"][i:i + 1]` slices the
+    batch dimension only, so both sides hand the encoder the same padded width and the
+    comparison is structurally blind to a leak: measured with `encoder.mask_padding=False`,
+    i.e. the defect fully switched on, it moves by 4e-9 and the old `array_equal` would
+    have sailed straight through. That invariant is guarded properly — against the trimmed
+    `Mx == nx` single-jet path, and from both directions — in `tests/test_encoder_padding.py`.
+
+    Tolerance rather than equality, because batched float32 GEMM is not batch-size
+    invariant: a bare `nn.Linear` on (8, 9, 32) already differs from the same rows fed as
+    (1, 9, 32) by ~3e-7 on Apple Silicon (bit-identical on Linux/x86), which reaches the
+    pmf as ~2 ulp. `atol` matches `test_encoder_padding.py`, and still leaves ~200x
+    headroom to the 2e-4 a real leak produces on the comparison that can actually see one."""
     model, b, _ = _v3(batch)
     B = b["xf"].shape[0]
     per_jet = [model.length_pmf(b["xf"][i:i + 1], b["nx"][i:i + 1]) for i in range(B)]
@@ -95,7 +115,10 @@ def test_length_pmf_batches_bit_identically(batch):
         batched = torch.softmax(model.recalibrated_n_logits(model.n_head(e)), dim=-1).numpy()
     assert batched.shape == (B, model.max_emissions + 1)
     for i, p in enumerate(per_jet):
-        assert np.array_equal(batched[i], p), f"jet {i}: batched pmf differs from batch-1"
+        np.testing.assert_allclose(
+            batched[i], p, rtol=0, atol=1e-6,
+            err_msg=f"jet {i}: batched pmf differs from batch-1",
+        )
 
 
 def test_describe_matches_log_prob_of_modes(batch):

@@ -302,7 +302,7 @@ that apply when this notebook is run the way it usually is.
 | [`notebooks/lund_distribution_closure_v2.ipynb`](../notebooks/lund_distribution_closure_v2.ipynb) | §0 re-costed, `TORCH_THREADS` knob, batched `q(0|x)` |
 
 New tests: `tests/test_batched_coordinates.py`, `tests/test_shared_draws.py`, plus
-`test_length_pmf_batches_bit_identically` in `tests/test_multiplicity_head.py`,
+`test_length_pmf_batches_consistently` in `tests/test_multiplicity_head.py`,
 `test_no_dataset_is_rebuilt_once_per_item` in `tests/test_notebooks.py`, and both
 variants parameterised through `tests/test_prod_closure_nb.py`.
 
