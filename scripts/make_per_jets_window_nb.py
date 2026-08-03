@@ -1101,16 +1101,28 @@ fig.suptitle(f"ratio to the truth's own node-0 density, on {RB}x{RB} bins   "
              f"entries)", x=0.05, y=1.03, ha="left")
 plt.show()
 
+# A bin where truth has entries and the series has NONE is a real disagreement, and
+# log(0) is not a way to report it: averaging it in gives -inf and destroys the whole
+# statistic. It is counted separately instead, which is the same distinction the map
+# already makes between a saturated bin and a blank one.
 ok = (RT > 0) & (RTN >= N_MIN)
 _names = ["q_bar: the mean POSTERIOR (exact)", f"window centroid, r={R_STAR:g}",
           "plain RSD, node 0"]
-print(f"{'plane':<34}{'total':>10}{'mean |log ratio to truth|':>28}{'bins':>7}")
-for lab, P, _n in zip(_names, (RQ, RW, RR), (RTN, RWN, RRN)):
-    lr = np.abs(np.log(P[ok] / RT[ok])) if ok.any() else np.array([np.nan])
-    print(f"{lab:<34}{float(P.sum() * cell_area_at(RB)):>10.3f}"
-          f"{float(lr.mean()):>28.3f}{int(ok.sum()):>7}")
+print(f"{'plane':<34}{'total':>10}{'mean |log ratio|':>18}{'on bins':>9}"
+      f"{'left EMPTY':>12}")
+for lab, P in zip(_names, (RQ, RW, RR)):
+    both = ok & (P > 0)
+    lr = float(np.abs(np.log(P[both] / RT[both])).mean()) if both.any() else float("nan")
+    print(f"{lab:<34}{float(P.sum() * cell_area_at(RB)):>10.3f}{lr:>18.3f}"
+          f"{int(both.sum()):>9}{int((ok & (P <= 0)).sum()):>12}")
 print(f"{'truth, node 0 (the reference)':<34}"
-      f"{float(RT.sum() * cell_area_at(RB)):>10.3f}{0.0:>28.3f}{int(ok.sum()):>7}")
+      f"{float(RT.sum() * cell_area_at(RB)):>10.3f}{0.0:>18.3f}{int(ok.sum()):>9}"
+      f"{0:>12}")
+print(f"\n`left EMPTY` counts bins where the truth has >= {N_MIN} entries and the series "
+      f"has none.\nFor a POINT estimate that is expected -- one point per jet cannot cover "
+      f"a distribution's\ntails -- and it is the same shrinkage the mean |log ratio| "
+      f"column reports on the bins it\ndoes populate. For q_bar it would be a real "
+      f"failure, and it is 0.")
 print(f"\n(the ratio is binned {RB}x{RB} rather than {NB}x{NB}: one entry per JET means a "
       f"model cell holds\n~{float(RTN.sum()) / NB ** 2:.1f} truth entries, where a ratio is "
       f"Poisson noise rather than a measurement.)")

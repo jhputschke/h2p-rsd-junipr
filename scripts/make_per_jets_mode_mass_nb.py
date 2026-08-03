@@ -2193,8 +2193,10 @@ fig.suptitle(f"where each estimate over- and under-populates the plane, on {RATI
              f"fewer than {N_MIN} truth splittings)", x=0.06, y=1.04, ha="left")
 plt.show()
 
+# A bin where truth has entries and the series has none is a real disagreement, not a
+# log(0) -- it is counted in its own column rather than averaged into an infinity.
 print(f"{'series':<8}{'splittings':>12}{'per jet':>10}{'rate / truth':>14}"
-      f"{'mean |log ratio|, shape':>26}")
+      f"{'|log ratio|, shape':>21}{'on bins':>9}{'left EMPTY':>12}")
 _lt = RPLANES["truth"]
 for s in SERIES:
     per = NSPL[s].sum() / max(len(W_JET), 1)
@@ -2204,13 +2206,18 @@ for s in SERIES:
     sa, sb = a.sum(), b.sum()
     shp = (float(np.mean(np.abs(np.log((a[ok] / sa) / (b[ok] / sb))))) if ok.any() and sa > 0
            else float("nan"))
+    gate = (_lt > 0) & (RCOUNT["truth"] >= N_MIN)
+    empty = int((gate & (a <= 0)).sum())
     print(f"{s:<8}{int(NSPL[s].sum()):>12,}{per:>10.3f}"
           + (f"{'--':>14}" if s == "truth" else f"{rate:>14.3f}")
-          + (f"{'--':>26}" if s == "truth" else f"{shp:>26.3f}"))
+          + (f"{'--':>21}" if s == "truth" else f"{shp:>21.3f}")
+          + f"{int(ok.sum()):>9}{empty:>12}")
 print("\n`rate / truth` is the multiplicity ratio -- for `mode` it is dominated by the "
       f"{EMPTY_TOP1.mean():.0%} of jets\nwhose best skeleton is EMPTY, which contribute no "
       "splitting anywhere on the plane.")
-print("`mean |log ratio|, shape` is the placement error with the multiplicity divided out:")
+print("`left EMPTY` counts bins where truth has entries and the series has none -- a real")
+print("disagreement that log(0) cannot express, so it is counted rather than averaged in.")
+print("`|log ratio|, shape` is the placement error with the multiplicity divided out:")
 print("0 would mean the series populates the plane in exactly truth's proportions. Read the")
 print("two together -- a series can have the right rate in the wrong places, or the right")
 print("places at the wrong rate, and the two rows of the figure separate them.")
