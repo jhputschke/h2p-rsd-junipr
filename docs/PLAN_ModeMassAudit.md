@@ -27,13 +27,24 @@ discrete structure" licenses only the genuinely discrete half of a skeleton — 
 multiplicity and the order — not the cell labels, which are a discretized continuum.
 
 So `F(m)` is reported as the same-geometry, same-checkpoint comparison it validly is (which
-is all §7.5 needs), and `inference.mode_audit.node_hpd_area` adds the grid-free companion:
-the smallest Lund-plane **area** holding a fraction of a node's positional posterior, its
-linear scale, the ratio to the coordinate head's own width, and whether that head is
-truncation-saturated. On `v1_contstop_s0` the first splitting's 50% region spans ~17 cells
-and the head is saturated for ~90% of jets — the grid is finer than the model's own
-resolution, the posterior is one blob about one smearing width across, and the small
-per-skeleton masses are the grid slicing it. Reported in §6a of the notebook and the
+is all §7.5 needs), and two grid-free companions are added beside it:
+
+* `node_hpd_area` — the smallest Lund-plane **area** holding a fraction of a node's
+  positional posterior (a region at fixed mass), its linear scale, the ratio to the
+  coordinate head's own width, and whether that head is truncation-saturated.
+* `mode_mass_at_resolution` — **`M_1(r)`**, the largest mass in any box of half-width `r`
+  (a mass at fixed region). The window SLIDES, which is what a coarsened grid cannot do: a
+  fixed partition of any size carries an origin, so a mode on a boundary stays split. This
+  is what gives the dominance sentence back with its resolution named.
+* `coarse_skeleton_masses` — the sequence-level analogue, necessarily a lower bound (the
+  label sum does not factorise for `N >= 2`), tightening with `k`; a coarse mass over 1/2
+  is dominant by proof regardless.
+
+On `v1_contstop_s0`: the first splitting's 50% region spans ~17 cells, the head is
+saturated for ~92% of jets, and `M_1(r)` reaches 1/2 at `r ~ 0.45` — the leading splitting
+is localised to +-0.45 in `(ln 1/DeltaR, ln kt)` with even odds, the same number at any
+`n_bins`. Read at the grid's own half-cell instead, the pre-registered `F(0.5)` is 0.045;
+read at `r = 0.45` it is ~0.57. Same posterior. Reported in §6a/§6b of the notebook and the
 `resolution` block of `mode_audit.json`.
 
 Four deviations from the text below, each measured rather than assumed:

@@ -307,7 +307,20 @@ Two consequences are built into the code:
   for ~90% of jets, i.e. the grid is finer than the model's own resolution: the posterior
   occupies **one blob about one smearing width across**, and the small per-skeleton masses
   are the grid slicing it, not a fragmented posterior. Both readings are reported, with
-  $F(m)$ labelled for what it is — a same-geometry comparison. The audit is descriptive: it
+  $F(m)$ labelled for what it is — a same-geometry comparison.
+
+  The dominance *sentence* survives all of this, provided the resolution is named:
+  $M_1(r)$, the largest mass in any box of half-width $r$, is a probability of a stated
+  event — "the leading splitting lies within $\pm r$ of here" — and the window **slides**,
+  so no partition origin enters (coarsening the grid would not fix that: a mode straddling
+  a block boundary is split by a coarse grid exactly as by a fine one). Its shape is the
+  whole argument: $\propto r^2$ at small $r$, where the number measures the resolution
+  element and nothing else and where the grid's own $M_1$ sits; a knee at the posterior's
+  scale; saturation at 1. On the fielded checkpoint the median jet reaches $M_1 = \tfrac12$
+  at $r \approx 0.45$ — *the leading splitting is localised to $\pm0.45$ in
+  $(\ln 1/\Delta R,\ \ln k_t)$ with even odds*, which is the honest dominance statement and
+  is the same number at any $N_{\rm bins}$. Read at the grid's own resolution instead, the
+  pre-registered $F(0.5)$ reads 0.045; read at $r = 0.45$ it reads ~0.57. Same posterior. The audit is descriptive: it
   adopts and rejects nothing, and **MBR remains the headline estimator whatever it finds**
   (Kumar & Byrne, HLT-NAACL 2004; Eikema & Aziz, arXiv:2005.10283). A majority skeleton,
   where one exists, is an *additional* quotable — "this jet's parton structure is $S_1$

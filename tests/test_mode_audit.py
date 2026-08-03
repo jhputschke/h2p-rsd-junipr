@@ -30,9 +30,12 @@ from h2p_rsd_junipr.data.synthetic import synthetic_matched_dataset
 from h2p_rsd_junipr.eval.mode_audit import jet_strata, run_mode_audit, spearman
 from h2p_rsd_junipr.geometry import Geometry
 from h2p_rsd_junipr.inference.mode_audit import (
+    RESOLUTION_RADII,
     SkeletonEnumeration,
+    coarse_skeleton_masses,
     entropy_from_draws,
     enumerate_skeletons,
+    mode_mass_at_resolution,
     node_hpd_area,
     skeleton_log_prob,
 )
@@ -436,6 +439,72 @@ def test_hpd_area_is_none_without_a_coordinate_head():
     assert node_hpd_area(model, xf, nx) is None
 
 
+def test_mode_mass_at_resolution_is_monotone_and_saturates():
+    """`M_1(r)` is the mass of a box that only grows, so it must be non-decreasing, and
+    a box the size of the plane holds everything."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    span = geom.ln_invdelta_range[1] - geom.ln_invdelta_range[0]
+    out = mode_mass_at_resolution(model, xf, nx, radii=(0.05, 0.2, 0.5, 1.0, span),
+                                  sub=9)
+    m = out["mass"]
+    assert all(a <= b + 1e-9 for a, b in zip(m, m[1:])), "M_1(r) must not decrease in r"
+    assert m[-1] == pytest.approx(1.0, abs=1e-3), "a box the size of the plane holds all"
+    assert all(0.0 <= v <= 1.0 + 1e-9 for v in m)
+
+
+def test_sliding_window_beats_the_fixed_partition_it_replaces():
+    """THE reason the window slides. A cell is one possible placement of a box of
+    half-width `half_u`, so the sliding maximum can only be larger — and where it is
+    strictly larger, the fixed grid was splitting the mode across a boundary, which is
+    exactly what coarsening into blocks would keep doing."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    out = mode_mass_at_resolution(model, xf, nx, radii=(geom.half_u,), sub=9)
+    region = node_hpd_area(model, xf, nx, sub=9)
+    assert out["mass"][0] >= region["modal_cell_mass"] - 1e-6
+
+
+def test_mode_mass_scales_as_the_area_at_small_r():
+    """The small-`r` regime is where the number measures the resolution element and not
+    the model: doubling `r` quadruples the mass while the density is locally flat. This
+    is the scaling that makes the grid's own `M_1` an artefact, asserted rather than
+    asserted-about."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    px = 2 * geom.half_u / 9          # one sub-pixel
+    out = mode_mass_at_resolution(model, xf, nx, radii=(px, 2 * px), sub=9)
+    ratio = out["mass"][1] / max(out["mass"][0], 1e-12)
+    assert 2.5 <= ratio <= 5.5, f"expected ~4x (area scaling), got {ratio:.2f}"
+
+
+def test_coarse_block_one_is_the_identity():
+    """Aggregating with `block=1` regroups nothing, so it must reproduce the enumeration
+    exactly — the check that the coarse bookkeeping is the same arithmetic."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    enum = enumerate_skeletons(model, xf, nx, k=16, budget=100_000, prune_rel=0.0,
+                               topk_children=0, max_emissions=MAX_EM)
+    fine = coarse_skeleton_masses(enum, geom, block=1)
+    assert fine["n_labels"] == len({tuple(c) for c, _lm in enum.skeletons})
+    assert fine["M1_coarse_lower"] == pytest.approx(enum.m1, rel=1e-9)
+    assert fine["gain_over_fine"] == pytest.approx(1.0, rel=1e-9)
+
+
+def test_coarse_aggregation_is_a_bound_that_can_only_help():
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    enum = enumerate_skeletons(model, xf, nx, k=32, budget=100_000, prune_rel=0.0,
+                               topk_children=0, max_emissions=MAX_EM)
+    c = coarse_skeleton_masses(enum, geom, block=2)
+    assert c["M1_coarse_lower"] >= enum.m1 - 1e-12, "coarsening cannot lose mass"
+    assert c["M1_coarse_upper"] >= c["M1_coarse_lower"]
+    assert c["M1_coarse_upper"] <= 1.0 + 1e-9
+    # the certificate: over 1/2 is dominant by proof, because coarse labels PARTITION
+    assert c["coarse_dominant_certified"] == bool(c["M1_coarse_lower"] > 0.5)
+    assert c["n_labels"] <= len(enum.skeletons)
+
+
 def test_runner_carries_the_grid_free_block():
     _cfg, geom, model, ds, jets = _tiny()
     aud = {**audit_params(), "k": 8, "budget": 2000}
@@ -446,6 +515,13 @@ def test_runner_carries_the_grid_free_block():
                 "frac_truncation_saturated", "q_N_mean"):
         assert key in res
     assert np.isfinite(res["hpd_area_50"])
+    # M_1(r) on the SHARED radius grid, so a population median of the curve is a curve
+    c = res["m1_of_r"]
+    assert c["radii"] == [float(x) for x in RESOLUTION_RADII]
+    assert len(c["median"]) == len(RESOLUTION_RADII)
+    assert all(a <= b + 1e-9 for a, b in zip(c["median"], c["median"][1:]))
+    assert res["m1_at_r_cell"] <= res["m1_at_r_sigma"] + 1e-9 or res["r_sigma"] < res["r_cell"]
+    assert "coarse_sequence" in res
     # q(N|x) is the grid-free factor and must be a pmf over the three classes
     q = res["q_N_mean"]
     assert q["0"] + q["1"] + q[">=2"] == pytest.approx(1.0, abs=1e-6)

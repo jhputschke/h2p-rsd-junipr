@@ -86,6 +86,12 @@ import torch
 # onto none raises from `PosteriorModel.skeleton_search_spec` by name, loudly.
 KINDS = ("ar", "nhead", "factorized")
 
+# The shared `r` grid for `mode_mass_at_resolution`, in ln units and deliberately NOT
+# derived from the geometry: the whole point of the curve is to be comparable across
+# n_bins, and a grid that moved with the cell size would defeat that. Spans one tenth of
+# a default cell to most of the plane.
+RESOLUTION_RADII = (0.02, 0.035, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.45, 0.7, 1.0, 1.5)
+
 _NEG_INF = float("-inf")
 
 
@@ -485,8 +491,185 @@ def skeleton_log_prob(model, cells, xf, nx, *, spec=None) -> float:
 # The grid-free companion to M_1
 # ---------------------------------------------------------------------------
 @torch.inference_mode()
+def _node_density_image(model, xf, nx, *, spec, sub=7, cells_logp=None):
+    """The FIRST splitting's positional density as an image over the Lund plane, exact.
+
+    `(image (n_bins*sub, n_bins*sub), meta)` with the `u = ln(1/DeltaR)` axis first, so
+    neighbouring pixels are neighbouring points — which is what any windowed statistic
+    needs and what a flat `(n_cells, sub, sub)` layout does not give.
+
+    Exact rather than sampled because the mixture is BLOCK-WISE: each cell's coordinate
+    component is a truncated normal bounded by that cell, so it contributes to that block
+    and to no other, and a `sub x sub` lattice inside every cell evaluates the whole
+    density. `pixel_area` closes the quadrature check.
+    """
+    geom = model.geometry
+    dev = xf.device
+    n_bins, n_cells = geom.n_bins, geom.n_cells
+    hu, hv = geom.half_u, geom.half_v
+    if cells_logp is None:
+        tok = torch.full((1, 1), int(spec.start_token), dtype=torch.long, device=dev)
+        _p_cont, cells_logp, _h = spec.step(tok, spec.e, spec.h0)
+    p0 = torch.softmax(cells_logp.reshape(-1), dim=-1)
+
+    # Every one-node chain's coordinate head in ONE pass: the decoder state after START is
+    # shared across cells, so only the cell embedding differs between rows.
+    yc = torch.arange(n_cells, dtype=torch.long, device=dev).unsqueeze(1)
+    du_m, dv_m, du_s, dv_s = (t.squeeze(1) for t in
+                              model._coord_params_padded(xf, nx, yc)[:4])
+
+    from ..distributions import trunc_normal_logpdf
+
+    step_u, step_v = 2 * hu / sub, 2 * hv / sub
+    du = torch.tensor([-hu + (k + 0.5) * step_u for k in range(sub)], device=dev)
+    dv = torch.tensor([-hv + (k + 0.5) * step_v for k in range(sub)], device=dev)
+    lu = trunc_normal_logpdf(du.view(1, sub), du_m.view(-1, 1), du_s.view(-1, 1), -hu, hu)
+    lv = trunc_normal_logpdf(dv.view(1, sub), dv_m.view(-1, 1), dv_s.view(-1, 1), -hv, hv)
+    comp = (lu.unsqueeze(2) + lv.unsqueeze(1)).exp()      # (n_cells, sub, sub), each -> 1
+    dens = p0.view(-1, 1, 1) * comp
+    # cell = ix * n_bins + iy, so (n_bins, n_bins, sub, sub) -> (n_bins, sub, n_bins, sub)
+    img = dens.reshape(n_bins, n_bins, sub, sub).permute(0, 2, 1, 3).reshape(
+        n_bins * sub, n_bins * sub)
+    meta = {"p0": p0, "du_sig": du_s, "dv_sig": dv_s,
+            "modal_cell": int(p0.argmax()),
+            "step_u": float(step_u), "step_v": float(step_v),
+            "pixel_area": float(step_u * step_v),
+            "cell_area": float(4.0 * hu * hv)}
+    return img, meta
+
+
+@torch.inference_mode()
+def mode_mass_at_resolution(model, xf, nx, *, radii=RESOLUTION_RADII, sub=7,
+                            cells_logp=None, spec=None, grid=None) -> dict | None:
+    """`M_1(r)` — the largest mass the first splitting's posterior puts in ANY box of
+    half-width `r`. The resolution-labelled version of the mode mass.
+
+    `M_1` as the audit reports it is this at `r = ` half a cell, with the box forced onto
+    the grid. Both restrictions are arbitrary, and the second one bites: a fixed partition
+    — including a COARSENED one — carries an origin, so a mode straddling a boundary is
+    split by the coarse grid exactly as it was by the fine one. Sliding the window removes
+    the phase and leaves only the scale, which is the thing a physicist can actually
+    choose: `sigma_0 + Lambda_eff/k_t`, the width below which the coordinates cannot
+    concentrate.
+
+    Read the curve, not one point of it. `M_1(r) ~ r^2` at small `r` is the regime where
+    the number is measuring the resolution element (density x area) and nothing else; the
+    knee is the posterior's own scale; the saturation to 1 is the plane. `r_cell` and
+    `r_sigma` are marked so the two ends are identifiable.
+
+    Exact: the density is evaluated block-wise (see `_node_density_image`) and the window
+    sums come from an integral image, so no sampling and no smoothing approximation enters.
+    The achieved half-width is snapped to whole pixels and RETURNED as `r_used` rather than
+    silently differing from what was asked.
+    """
+    if grid is None:
+        if not bool(getattr(model, "has_continuous_coords", False)):
+            return None
+        if getattr(model, "_coord_params_padded", None) is None:
+            return None
+        spec = model.skeleton_search_spec(xf, nx) if spec is None else spec
+        if spec.kind != "ar" and cells_logp is None:
+            return None
+        grid = _node_density_image(model, xf, nx, spec=spec, sub=sub,
+                                   cells_logp=cells_logp)
+    img, meta = grid
+    geom = model.geometry
+    su, sv, pix = meta["step_u"], meta["step_v"], meta["pixel_area"]
+    c_star = meta["modal_cell"]
+    r_cell = float(geom.half_u)
+    r_sigma = float(max(meta["du_sig"][c_star], meta["dv_sig"][c_star]))
+
+    # integral image of the per-pixel MASS, so a window sum is four lookups
+    mass = img * pix
+    cum = torch.cumsum(torch.cumsum(mass, dim=0), dim=1)
+    cum = torch.nn.functional.pad(cum, (1, 0, 1, 0))          # zero row/col for the offset
+    n_u, n_v = mass.shape
+
+    def _max_window(r: float) -> tuple[float, float]:
+        wu = max(1, min(int(round(2.0 * r / su)), n_u))
+        wv = max(1, min(int(round(2.0 * r / sv)), n_v))
+        s = (cum[wu:, wv:] - cum[:-wu or None, wv:] - cum[wu:, :-wv or None]
+             + cum[:-wu or None, :-wv or None])
+        return float(min(float(s.max()), 1.0)), float(0.5 * max(wu * su, wv * sv))
+
+    # `radii` is a SHARED grid across jets so a population median of the curve is
+    # meaningful; the two marks are per-jet and are reported as scalars beside it.
+    curve = []
+    for r in radii:
+        m, r_used = _max_window(float(r))
+        curve.append({"r": float(r), "r_used": r_used, "mass": m})
+    return {
+        "radii": [float(r) for r in radii],
+        "curve": curve,
+        "mass": [c["mass"] for c in curve],
+        "r_cell": r_cell, "r_sigma": r_sigma,
+        # the two ends of the argument, named: today's resolution and the model's own
+        "mass_at_r_cell": _max_window(r_cell)[0],
+        "mass_at_r_sigma": _max_window(r_sigma)[0],
+        "pixel": float(max(su, sv)),
+    }
+
+
+@torch.inference_mode()
+def coarse_skeleton_masses(enum: SkeletonEnumeration, geometry, *, block: int = 3,
+                           top: int = 5) -> dict:
+    """The enumerated skeletons re-grouped by COARSE cell label — dominance of a
+    `block x block` super-cell instead of a single one.
+
+    Unlike the per-node window above this is a statement about the whole SEQUENCE, and it
+    is a lower bound rather than an identity: summing fine skeletons that share a coarse
+    label does not factorise for `N >= 2`, because the decoder state depends on the fine
+    cell, so the futures differ within a block. (That is the label-sum / determinization
+    problem, and it is NP-hard in general — the same reason a sequence model's best
+    LABEL CLASS is not its best sequence.) What can be done exactly is to aggregate what
+    the search enumerated, which gives
+
+        mass_lower <= true coarse mass <= mass_lower + remainder
+
+    with `remainder` the enumeration's own certified bound. The useful part: if
+    `mass_lower > 1/2` the coarse label is dominant BY PROOF anyway, because coarse labels
+    partition the space and the total mass is 1 — so an incomplete enumeration can still
+    certify coarse dominance where it cannot certify fine dominance.
+
+    A fixed partition still has an arbitrary origin; `mode_mass_at_resolution` is the
+    phase-free companion, and the two answer the same question at the sequence and the
+    per-node level respectively.
+    """
+    n = int(geometry.n_bins)
+
+    def _coarse(cell: int) -> tuple[int, int]:
+        ix, iy = divmod(int(cell), n)
+        return ix // block, iy // block
+
+    agg: dict[tuple, float] = {}
+    for cells, lm in enum.skeletons:
+        key = tuple(_coarse(c) for c in cells)
+        agg[key] = agg.get(key, 0.0) + math.exp(lm)
+    rows = sorted(agg.items(), key=lambda kv: -kv[1])[:top]
+    rem = enum.remainder_bound
+    out = {
+        "block": int(block),
+        "coarse_cell_width": float(block * 2 * geometry.half_u),
+        "n_labels": len(agg),
+        "top": [{"label": [list(k) for k in key], "n_nodes": len(key),
+                 "mass_lower": float(m), "mass_upper": float(min(1.0, m + rem))}
+                for key, m in rows],
+        "remainder": float(rem),
+    }
+    if rows:
+        m1 = float(rows[0][1])
+        out["M1_coarse_lower"] = m1
+        out["M1_coarse_upper"] = float(min(1.0, m1 + rem))
+        # partition + total mass 1: a coarse label over 1/2 cannot be beaten, whatever
+        # the search left unexplored.
+        out["coarse_dominant_certified"] = bool(m1 > 0.5)
+        out["gain_over_fine"] = float(m1 / enum.m1) if enum.m1 > 0 else float("nan")
+    return out
+
+
+@torch.inference_mode()
 def node_hpd_area(model, xf, nx, *, alphas=(0.5, 0.9), sub=7, cells_logp=None,
-                  spec=None) -> dict | None:
+                  spec=None, grid=None) -> dict | None:
     """The smallest Lund-plane AREA holding a fraction `alpha` of the FIRST splitting's
     positional posterior — the dominance statement `M_1` cannot make.
 
@@ -522,41 +705,30 @@ def node_hpd_area(model, xf, nx, *, alphas=(0.5, 0.9), sub=7, cells_logp=None,
     density to take a region of) or a non-`ar` search spec, rather than inventing one.
     """
     geom = model.geometry
-    if not bool(getattr(model, "has_continuous_coords", False)):
-        return None
-    params_fn = getattr(model, "_coord_params_padded", None)
-    if params_fn is None:
-        return None
-    spec = model.skeleton_search_spec(xf, nx) if spec is None else spec
-    if spec.kind != "ar":
-        # `nhead`/`factorized` reach the first node's cell head differently; the area is
-        # well defined there too, but the caller must supply `cells_logp` for it.
-        if cells_logp is None:
+    if grid is None:
+        if not bool(getattr(model, "has_continuous_coords", False)):
             return None
-
-    dev = xf.device
-    n_cells, hu, hv = geom.n_cells, geom.half_u, geom.half_v
-    if cells_logp is None:
-        tok = torch.full((1, 1), int(spec.start_token), dtype=torch.long, device=dev)
-        _p_cont, cells_logp, _h = spec.step(tok, spec.e, spec.h0)
-    p0 = torch.softmax(cells_logp.reshape(-1), dim=-1)
-
-    # Every one-node chain's coordinate head in ONE pass: the decoder state after START is
-    # shared across cells, so only the cell embedding differs between rows.
-    yc = torch.arange(n_cells, dtype=torch.long, device=dev).unsqueeze(1)
-    du_m, dv_m, du_s, dv_s = (t.squeeze(1) for t in params_fn(xf, nx, yc)[:4])
-
-    from ..distributions import trunc_normal_logpdf
-
-    step_u, step_v = 2 * hu / sub, 2 * hv / sub
-    du = torch.tensor([-hu + (k + 0.5) * step_u for k in range(sub)], device=dev)
-    dv = torch.tensor([-hv + (k + 0.5) * step_v for k in range(sub)], device=dev)
-    lu = trunc_normal_logpdf(du.view(1, sub), du_m.view(-1, 1), du_s.view(-1, 1), -hu, hu)
-    lv = trunc_normal_logpdf(dv.view(1, sub), dv_m.view(-1, 1), dv_s.view(-1, 1), -hv, hv)
-    comp = (lu.unsqueeze(2) + lv.unsqueeze(1)).exp()          # (n_cells, sub, sub), each ->1
-    pix = float(step_u * step_v)
-    dens = (p0.view(-1, 1, 1) * comp).reshape(-1)
-    c_star = int(p0.argmax())
+        if getattr(model, "_coord_params_padded", None) is None:
+            return None
+        spec = model.skeleton_search_spec(xf, nx) if spec is None else spec
+        if spec.kind != "ar":
+            # `nhead`/`factorized` reach the first node's cell head differently; the area
+            # is well defined there too, but the caller must supply `cells_logp` for it.
+            if cells_logp is None:
+                return None
+        grid = _node_density_image(model, xf, nx, spec=spec, sub=sub,
+                                   cells_logp=cells_logp)
+    img, meta = grid
+    hu, hv = geom.half_u, geom.half_v
+    p0, c_star, pix = meta["p0"], meta["modal_cell"], meta["pixel_area"]
+    du_s, dv_s = meta["du_sig"], meta["dv_sig"]
+    dens = img.reshape(-1)
+    sub = img.shape[0] // geom.n_bins        # read off the image, not the argument: a
+    #                                          caller-supplied `grid` sets its own
+    ix, iy = divmod(int(c_star), geom.n_bins)
+    # the modal cell's own component, renormalised — the image block divided by its weight
+    comp_star = img[ix * sub:(ix + 1) * sub, iy * sub:(iy + 1) * sub] / max(
+        float(p0[c_star]), 1e-300)
 
     def _area(d) -> dict:
         srt, _ = torch.sort(d.reshape(-1), descending=True)
@@ -568,7 +740,7 @@ def node_hpd_area(model, xf, nx, *, alphas=(0.5, 0.9), sub=7, cells_logp=None,
             out[f"{a:g}"] = float(min(k, srt.numel()) * pix)
         return out
 
-    full, one = _area(dens), _area(comp[c_star])
+    full, one = _area(dens), _area(comp_star)
     s_u, s_v = float(du_s[c_star]), float(dv_s[c_star])
     box = (2.0 * s_u) * (2.0 * s_v)
     return {

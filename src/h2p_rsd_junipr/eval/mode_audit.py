@@ -50,8 +50,12 @@ import torch
 
 from ..features import node_raw
 from ..inference.mode_audit import (
+    RESOLUTION_RADII,
+    _node_density_image,
+    coarse_skeleton_masses,
     entropy_from_draws,
     enumerate_skeletons,
+    mode_mass_at_resolution,
     node_hpd_area,
     skeleton_log_prob,
     skeleton_log_probs,
@@ -229,7 +233,18 @@ def audit_jet(model, item, jet, geometry, device, *, audit, draws=None, groom=No
                float(pmf[1]) if pmf.size > 1 else 0.0,
                float(pmf[2:].sum()) if pmf.size > 2 else 0.0]
 
-    region = node_hpd_area(model, xf, nx, spec=spec) if hpd else None
+    # One density image serves both grid-free readings — the region at fixed mass
+    # (`node_hpd_area`) and the mass at fixed region (`mode_mass_at_resolution`) — so the
+    # second costs an integral image rather than a second pass over the coordinate head.
+    region = curve = None
+    if hpd and bool(getattr(model, "has_continuous_coords", False)) and spec.kind == "ar":
+        grid = _node_density_image(model, xf, nx, spec=spec, sub=7)
+        region = node_hpd_area(model, xf, nx, grid=grid)
+        curve = mode_mass_at_resolution(model, xf, nx, grid=grid)
+    # The sequence-level coarsening, as a certified LOWER bound (see the function's
+    # docstring for why it cannot be an identity for N >= 2).
+    coarse = coarse_skeleton_masses(enum, geometry, block=int(audit.get("coarse_block", 3)))
+
     strata = jet_strata(jet, geometry, z_cut=groom["z_cut"], beta=groom["beta"],
                         kt_floor=groom["kt_floor"])
     masses = enum.masses
@@ -277,6 +292,22 @@ def audit_jet(model, item, jet, geometry, device, *, audit, draws=None, groom=No
             "modal_cell_mass": region["modal_cell_mass"],
             "hpd_quadrature": region["mass_quadrature"],
         })
+    if curve is not None:
+        # M_1(r) on the SHARED radius grid, so the population median of the curve is a
+        # curve; plus the two named points, which are per-jet.
+        record.update({
+            "m1_curve": [float(m) for m in curve["mass"]],
+            "m1_at_r_cell": curve["mass_at_r_cell"],
+            "m1_at_r_sigma": curve["mass_at_r_sigma"],
+            "r_sigma": curve["r_sigma"], "r_cell": curve["r_cell"],
+        })
+    record.update({
+        "coarse_M1_lower": coarse.get("M1_coarse_lower", float("nan")),
+        "coarse_M1_upper": coarse.get("M1_coarse_upper", float("nan")),
+        "coarse_gain": coarse.get("gain_over_fine", float("nan")),
+        "coarse_certified": bool(coarse.get("coarse_dominant_certified", False)),
+        "coarse_block": coarse["block"],
+    })
     return record, enum
 
 
@@ -405,6 +436,47 @@ def summarise_mode_audit(records, *, thresholds=(0.3, 0.5, 0.7), audit=None, kin
                      ">=2": _mean_of(records, "qN_ge2")},
     }
 
+    # M_1(r): the mode mass with its resolution NAMED rather than inherited from the grid.
+    # The curve is the argument in one object -- ~r^2 at small r (where the number is
+    # measuring the resolution element and nothing else), a knee at the posterior's own
+    # scale, saturation at 1. Median elementwise over jets, on the shared radius grid.
+    curves = [r["m1_curve"] for r in records if r.get("m1_curve")]
+    if curves:
+        arr = np.asarray(curves, dtype=float)
+        resolution["m1_of_r"] = {
+            "radii": [float(x) for x in RESOLUTION_RADII],
+            "median": [float(v) for v in np.median(arr, axis=0)],
+            "p90": [float(v) for v in np.percentile(arr, 90, axis=0)],
+            "note": "M_1(r) = the largest mass in ANY box of half-width r (a sliding "
+                    "window, so no partition origin enters). r = half a cell reproduces "
+                    "the grid's own M_1; r = the head's sigma is the model's own scale.",
+        }
+        resolution["m1_at_r_cell"] = _med("m1_at_r_cell")
+        resolution["m1_at_r_sigma"] = _med("m1_at_r_sigma")
+        resolution["r_sigma"] = _med("r_sigma")
+        resolution["r_cell"] = _med("r_cell")
+
+    # ...and the sequence-level version of the same move, which can only be a bound.
+    empty_mode = np.array([not r["cells_top1"] for r in records], dtype=bool)
+    gain = np.array([r.get("coarse_gain", np.nan) for r in records], dtype=float)
+    gain_ne = gain[~empty_mode & np.isfinite(gain)]
+    resolution["coarse_sequence"] = {
+        "block": int(records[0].get("coarse_block", 3)),
+        "M1_lower_median": _med("coarse_M1_lower"),
+        # The empty skeleton's coarse label is the empty tuple and is therefore ALONE by
+        # construction, so it can never gain from aggregation. Pooling it in would report
+        # a gain of 1.0 that says nothing about the coarsening.
+        "gain_median_nonempty_mode": (float(np.median(gain_ne)) if gain_ne.size
+                                      else float("nan")),
+        "n_nonempty_mode": int(gain_ne.size),
+        "frac_certified_dominant": float(np.mean(
+            [bool(r.get("coarse_certified", False)) for r in records])),
+        "note": "the ENUMERATED skeletons regrouped by coarse cell label: a lower bound "
+                "(summing fine skeletons that share a coarse label does not factorise "
+                "for N >= 2), tightening as k grows. A coarse mass over 1/2 is dominant "
+                "by proof regardless, since coarse labels partition the space.",
+    }
+
     ent = np.array([r["H_hat"] for r in records], dtype=float)
     eff = np.array([r["eff_skeletons"] for r in records], dtype=float)
     ent_lo = np.array([r["H_enumerated_lower"] for r in records], dtype=float)
@@ -487,6 +559,23 @@ def _print_resolution(out) -> None:
     if np.isfinite(q.get("0", float("nan"))):
         print(f"      length belief (grid-free): q(N=0) {q['0']:.3f}   q(N=1) "
               f"{q['1']:.3f}   q(N>=2) {q['>=2']:.3f}")
+    c = r.get("m1_of_r")
+    if c:
+        print("      M_1(r), the mode mass with its resolution NAMED (sliding window, "
+              "medians):")
+        print("        r    " + " ".join(f"{v:6.3f}" for v in c["radii"]))
+        print("        mass " + " ".join(f"{v:6.3f}" for v in c["median"]))
+        print(f"        at r = half a cell ({r['r_cell']:.3f}): "
+              f"{r['m1_at_r_cell']:.3f}   <- this is what F(m) above is built on")
+        print(f"        at r = the head's own sigma ({r['r_sigma']:.3f}): "
+              f"{r['m1_at_r_sigma']:.3f}")
+    cs = r.get("coarse_sequence")
+    if cs and np.isfinite(cs.get("gain_median_nonempty_mode", float("nan"))):
+        print(f"      whole-SEQUENCE coarsening ({cs['block']}x{cs['block']} blocks, a "
+              f"certified lower bound): median gain\n        "
+              f"{cs['gain_median_nonempty_mode']:.2f}x over the fine M_1 on the "
+              f"{cs['n_nonempty_mode']} jets whose mode is a splitting "
+              f"(the empty label is alone by construction)")
 
 
 def _print_summary(out) -> None:

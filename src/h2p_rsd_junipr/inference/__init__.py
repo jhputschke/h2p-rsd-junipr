@@ -8,10 +8,14 @@ from .mbr import (
     mbr_select,
 )
 from .mode_audit import (
+    RESOLUTION_RADII,
     SkeletonEnumeration,
     SkeletonSearchSpec,
+    coarse_skeleton_masses,
     entropy_from_draws,
     enumerate_skeletons,
+    mode_mass_at_resolution,
+    node_hpd_area,
     skeleton_log_prob,
     skeleton_log_probs,
 )
@@ -38,4 +42,8 @@ __all__ = [
     "skeleton_log_prob",
     "skeleton_log_probs",
     "entropy_from_draws",
+    "node_hpd_area",
+    "mode_mass_at_resolution",
+    "coarse_skeleton_masses",
+    "RESOLUTION_RADII",
 ]

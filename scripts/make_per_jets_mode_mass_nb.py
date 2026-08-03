@@ -74,8 +74,10 @@ It answers four questions, in this order, and **never merges the first two**:
 2. **Is it the true one?** — the truth skeleton's exact mass and rank on the same jets (§7).
    Dominance and correctness are logically independent: a model can be sharply dominant and
    wrong, or diffuse and centred on the truth.
-3. **How big is the region the posterior actually occupies?** — the grid-free question §6a
-   asks, in $\ln(1/\Delta R)\times\ln k_t$ units, against the coordinate head's own width.
+3. **How big is the region the posterior actually occupies, and how much mass sits in a region
+   of a *stated* size?** — the grid-free pair, §6a (an area at fixed mass, in
+   $\ln(1/\Delta R)\times\ln k_t$ units) and §6b ($M_1(r)$, a mass at fixed size, which is what
+   turns the dominance sentence back into a quotable probability).
 4. **Does dominance buy a better point estimate?** — the per-splitting residual
    $\Delta = \text{estimate} - \text{truth}$ of `per_jets_estimation.ipynb`, now with the
    **mode-skeleton** estimate beside MAP and MBR, and split by whether the jet *has* a dominant
@@ -1405,6 +1407,136 @@ if _ok.any():
           f"believes there IS a splitting;")
     print(f"  it just spreads that belief over ~{np.median(HPD_CELLS[_ok]):.0f} cells, "
           f"which is why no single skeleton holds much.")
+''')
+
+# ---------------------------------------------------------------------------
+md(r"""
+### 6b. $M_1(r)$ — the mode mass with its resolution *named*
+
+§6a fixed the mass and reported the size. Here is the same content read the other way, which
+is the one that gives back a quotable probability: **the largest mass the posterior puts in any
+box of half-width $r$**,
+
+$$M_1(r)\;=\;\max_{(u,v)}\ \int_{\lVert p-(u,v)\rVert_\infty<r} q(p\mid x)\,\mathrm{d}^2p .$$
+
+Two properties earn it its place. It is a **probability of a stated event** — "the leading
+splitting lies within $\pm r$ of here" — so the dominance sentence survives. And the window
+**slides**, so no partition origin enters: coarsening the grid into blocks would not do this, because
+a blob straddling a block boundary is split by the coarse grid exactly as it was by the fine one.
+Only the *scale* is a choice, and it is a choice a physicist can defend.
+
+Read the curve, not a point of it:
+
+- $M_1(r)\propto r^2$ at small $r$ — the regime where the number is measuring the resolution
+  element (density $\times$ area) and nothing about the model. **`M₁` as §6 reports it lives here.**
+- a **knee** at the posterior's own scale;
+- saturation at 1 when the box swallows the plane.
+
+Two vertical marks make the argument: $r=$ half a cell (what §6's $F(m)$ is built on) and
+$r=\sigma$ of the coordinate head (what the model claims for itself). The gap between the two
+readings *is* the grid artefact.
+
+The last panel is the sequence-level version of the same move — the enumerated skeletons regrouped
+by coarse cell label. That one can only be a **lower bound**: summing fine skeletons that share a
+coarse label does not factorise for $N\ge2$, because the decoder state depends on the fine cell, so
+the futures differ within a block (the label-sum problem, NP-hard in general). It tightens as $k$
+grows, and a coarse mass above $\tfrac12$ is dominant *by proof* regardless, since coarse labels
+partition the space.
+""")
+
+code(r'''
+from h2p_rsd_junipr.inference.mode_audit import RESOLUTION_RADII
+
+CURVES = np.array([a["m1_curve"] for a in AUDITS if a.get("m1_curve")], dtype=float)
+R_GRID = np.array(RESOLUTION_RADII, dtype=float)
+M1_RCELL = np.array([a.get("m1_at_r_cell", np.nan) for a in AUDITS])
+M1_RSIG = np.array([a.get("m1_at_r_sigma", np.nan) for a in AUDITS])
+R_SIG = np.array([a.get("r_sigma", np.nan) for a in AUDITS])
+COARSE_GAIN = np.array([a.get("coarse_gain", np.nan) for a in AUDITS])
+COARSE_CERT = np.array([bool(a.get("coarse_certified", False)) for a in AUDITS])
+
+if not len(CURVES):
+    print("no positional density -- section 6b does not apply to this family")
+else:
+    fig, axes = plt.subplots(1, 3, figsize=(14.4, 4.3))
+    med = np.median(CURVES, axis=0)
+    lo, hi = np.percentile(CURVES, [16, 84], axis=0)
+    r_cell = float(geom.half_u)
+    r_sig = float(np.nanmedian(R_SIG))
+
+    # (a) the curve itself, log-log, with the r^2 slope that IS the artefact
+    axes[0].fill_between(R_GRID, lo, hi, color=C_MODE, alpha=0.18, linewidth=0,
+                         label="16-84% of jets")
+    axes[0].plot(R_GRID, med, color=C_MODE, lw=2.0, marker="P", ms=4,
+                 label=r"median $M_1(r)$")
+    _ref = med[2] * (R_GRID / R_GRID[2]) ** 2
+    axes[0].plot(R_GRID, np.minimum(_ref, 1.0), color=INK, ls="--", lw=1.2,
+                 label=r"$\propto r^2$ (pure resolution)")
+    axes[0].axvline(r_cell, color=C_MAP, ls=":", lw=1.6,
+                    label=f"half a cell = {r_cell:.2f}")
+    axes[0].axvline(r_sig, color=C_MBR, ls=":", lw=1.6,
+                    label=rf"head's $\sigma$ = {r_sig:.2f}")
+    axes[0].set_xscale("log")
+    axes[0].set_yscale("log")
+    finish(axes[0], xlabel=r"$r$   [ln units]", ylabel=r"$M_1(r)$",
+           title="(a) the mode mass against the resolution it is quoted at",
+           legend=True, loc="upper left")
+
+    # (b) the PRE-REGISTERED thresholds, as functions of r
+    for t, c in zip(THRESHOLDS, (MUTED, INK, C_MAP)):
+        axes[1].plot(R_GRID, (CURVES >= t).mean(axis=0), color=c, lw=1.8, marker="o",
+                     ms=3.4, label=rf"$F({t:g})$ at resolution $r$")
+    axes[1].axvline(r_cell, color=C_MAP, ls=":", lw=1.6)
+    axes[1].axvline(r_sig, color=C_MBR, ls=":", lw=1.6)
+    axes[1].set_xscale("log")
+    axes[1].set_ylim(0.0, 1.02)
+    finish(axes[1], xlabel=r"$r$   [ln units]", ylabel=r"$\mathrm{frac}(M_1(r) \geq m)$",
+           title="(b) section 6's headline, as a function of the resolution",
+           legend=True, loc="upper left")
+
+    # (c) the sequence-level coarsening, on the jets where it can do anything
+    _ne = (~EMPTY_TOP1) & np.isfinite(COARSE_GAIN)
+    if _ne.sum():
+        axes[2].hist(COARSE_GAIN[_ne], bins=30, color=C_MODE, alpha=0.6,
+                     edgecolor=C_MODE, linewidth=0.8)
+        axes[2].axvline(1.0, color=INK, ls=":", lw=1.4, label="no gain")
+        axes[2].axvline(np.median(COARSE_GAIN[_ne]), color=C_MAP, lw=1.6,
+                        label=f"median {np.median(COARSE_GAIN[_ne]):.2f}x")
+    finish(axes[2], xlabel=r"coarse $M_1$ / fine $M_1$", ylabel="jets",
+           title=f"(c) whole-sequence {int(AUDITS[0].get('coarse_block', 3))}x"
+                 f"{int(AUDITS[0].get('coarse_block', 3))} coarsening, lower bound   "
+                 f"({int(_ne.sum())} jets with a non-empty mode)",
+           legend=bool(_ne.sum()), loc="upper right")
+
+    fig.suptitle(r"6b. name the resolution and the mode mass comes back as a quotable "
+                 r"probability", x=0.006, y=1.005, ha="left")
+    fig.tight_layout()
+    plt.show()
+
+    print(f"{'r [ln]':>9}" + "".join(f"{r:>8.3f}" for r in R_GRID))
+    print(f"{'M_1(r)':>9}" + "".join(f"{v:>8.3f}" for v in med))
+    for t in THRESHOLDS:
+        print(f"{'F(' + f'{t:g}' + ')':>9}"
+              + "".join(f"{v:>8.3f}" for v in (CURVES >= t).mean(axis=0)))
+    print()
+    print(f"at r = half a cell   ({r_cell:.3f}): median M_1 = "
+          f"{np.nanmedian(M1_RCELL):.4f}   <- the resolution section 6 inherited")
+    print(f"at r = head's sigma  ({r_sig:.3f}): median M_1 = "
+          f"{np.nanmedian(M1_RSIG):.4f}   <- the resolution the model claims")
+    _i50 = int(np.argmin(np.abs(med - 0.5)))
+    print(f"the median jet reaches M_1 = 0.5 at r ~ {R_GRID[_i50]:.2f} ln, i.e. the "
+          f"leading splitting is\nlocalised to about +/-{R_GRID[_i50]:.2f} in "
+          f"(ln 1/dR, ln kt) with even odds. THAT is the honest\ndominance statement, and "
+          f"it is the same number at any n_bins.")
+    if _ne.sum():
+        print(f"\nwhole-sequence coarsening ({int(AUDITS[0].get('coarse_block', 3))}x"
+              f"{int(AUDITS[0].get('coarse_block', 3))} blocks): median "
+              f"{np.median(COARSE_GAIN[_ne]):.2f}x the fine M_1 on the {int(_ne.sum())} "
+              f"jets whose\n  mode is a splitting; certified coarse-dominant (> 1/2, so "
+              f"proof regardless of what the\n  search left unexplored) for "
+              f"{COARSE_CERT.mean():.1%} of all jets. This is a LOWER bound and it\n  "
+              f"tightens with k -- the enumeration covers C_k = {np.median(CK):.2f} of "
+              f"the mass, so most of a\n  coarse label's members were never enumerated.")
 ''')
 
 # ---------------------------------------------------------------------------

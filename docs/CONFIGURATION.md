@@ -1051,6 +1051,7 @@ tree pops completions in exact descending mass order. See
 | `max_frontier` | `20000` | heap cap; the lowest-mass entries are evicted into the pruned accounting rather than dropped |
 | `eps_n` | `1e-4` | `q(N|x)` floor for the per-`N` searches of the `n_head` / `factorized` families; the dropped mass goes to the pruned total |
 | `thresholds` | `[0.3, 0.5, 0.7]` | the pre-registered `F(m) = frac(M_1 ≥ m)` grid |
+| `coarse_block` | `3` | block size for the sequence-level coarsening in `resolution.coarse_sequence`; `1` is the identity |
 | `n_jets` | `0` | jets audited; `0` → `experiment.closure_jets`, so the audit reports on the same population as the rest of the suite |
 
 ```bash
@@ -1085,6 +1086,20 @@ Four things about this block that are **not** conventions:
   cell and carries that width in the cell distribution instead. Where that fraction is
   high, a small `M₁` says the grid is finer than the model's resolution, not that the
   posterior is fragmented. **Read `resolution` before quoting any mode mass.**
+- **Naming the resolution gives the probability back.** `resolution.m1_of_r` is `M₁(r)`:
+  the largest mass the posterior puts in *any* box of half-width `r`. The window **slides**,
+  so unlike a coarsened grid it carries no partition origin — a mode straddling a block
+  boundary would be split by a coarse grid exactly as it was by the fine one. `M₁(r) ∝ r²`
+  at small `r` is the regime where the number measures the resolution element and nothing
+  else, and that is where the grid's own `M₁` sits (`m1_at_r_cell`); the knee is the
+  posterior's own scale; `m1_at_r_sigma` is the same reading at the width the head claims.
+  This is what restores the quotable sentence — *"the leading splitting lies within ±r of
+  here with probability p"* — with `r` stated. `resolution.coarse_sequence` is the
+  sequence-level analogue, necessarily a **lower bound**: summing fine skeletons that share
+  a coarse label does not factorise for `N ≥ 2` (the decoder state depends on the fine
+  cell), so it aggregates what the search enumerated and tightens with `audit.k`. A coarse
+  mass above ½ is dominant by proof regardless, since coarse labels partition the space.
+  `audit.coarse_block` sets the block size (default 3).
 - **Two validity checks, not gates.** The artifact reports the per-jet mass-accounting
   defect (`Σᵢ Mᵢ + frontier + pruned − 1`, float-exact) and the enumerated `M(N=0)` against
   the model's own `q(0|x)` reached through a different code path. A nonzero defect means

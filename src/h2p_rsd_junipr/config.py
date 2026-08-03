@@ -398,6 +398,10 @@ class AuditConfig:
     #                             likewise goes to the pruned total)
     thresholds: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.7])
     #                             the pre-registered F(m) = frac(M_1 >= m) grid (§7.1)
+    coarse_block: int = 3       # block size for the sequence-level coarsening reported in
+    #                             `resolution.coarse_sequence`. A LOWER bound (the label
+    #                             sum does not factorise for N >= 2), tightening with `k`;
+    #                             1 is the identity and reproduces the fine masses.
     n_jets: int = 0             # 0 -> experiment.closure_jets, so the audit reports on the
     #                             same population as the rest of the eval suite
 
@@ -657,6 +661,7 @@ _AUDIT_DEFAULTS: dict = {
     "max_frontier": 20_000,
     "eps_n": 1e-4,
     "thresholds": [0.3, 0.5, 0.7],
+    "coarse_block": 3,
     "n_jets": 0,
 }
 
