@@ -1279,12 +1279,22 @@ md(r"""
 
 The same three coordinates, now sliced by splitting index: $t=0$, $t=1$, and the two pooled.
 
-$t=0$ is the widest-angle primary splitting that survived grooming — the hardest, the most
-perturbative, and the best determined. Every series should be at its narrowest there, and
-the gap between plain RSD and the model at $t=0$ is the cleanest single statement of what
-the posterior buys. Disagreement that only appears at $t=1$ is the expected pattern (later
-splittings are softer and the hadron→parton map is less constrained); disagreement already
-at $t=0$ is not.
+$t=0$ is the **widest-angle** primary splitting that survived grooming — and *usually*, but not
+always, also the hardest. Declustering marches inward in angle, so $t=0$ is the widest for 98.4%
+of multi-splitting truth trees; the hardest emission ($\max_t \ln k_t$) sits at $t=0$ for only
+**80%** of them (74.6% for plain RSD), landing at $t=1$ in most of the rest. When the two differ
+they are usually a near-tie: the $\ln k_t$ given up by quoting $t=0$ instead of the hardest has
+median 0.000, mean 0.071 and p90 0.289 — a factor 1.34 in $k_t$ at p90.
+
+So read $t=0$ as *the widest*, not as *the hardest*. The alignment-free observables of
+`eval/closure.py` (`leading_emission_cell`) and the audit's `lnkt_lead` stratification use the
+hardest instead, and the two are different observables that agree on four jets in five.
+
+Every series should still be at its narrowest at $t=0$ — it is the most perturbative and the best
+determined — and the gap between plain RSD and the model there is the cleanest single statement of
+what the posterior buys. Disagreement that only appears at $t=1$ is the expected pattern (later
+splittings are softer and the hadron→parton map is less constrained); disagreement already at
+$t=0$ is not.
 """)
 
 code(r'''

@@ -255,6 +255,80 @@ Two consequences are built into the code:
   $q_\phi(N\mid x)$ marginal — a **decoding-layer** correction that leaves the likelihood (and
   thus any likelihood-ratio analysis) intact, unlike minimum-risk / sequence fine-tuning.
   It is most effective with a calibrated head (`ar_junipr_v3`, cINN, diffusion).
+- **Is there a dominant configuration at all? — the mode-mass audit.** Everything above
+  argues about which *summary* of the posterior to report. The prior question is whether
+  the posterior has a summary worth reporting: does $q_\phi(y\mid x)$ concentrate on one
+  discrete configuration, with a quotable probability? That is measurable **exactly**
+  (`inference/mode_audit.py`, `eval/mode_audit.py`, `experiment.mode_audit=true`,
+  [`PLAN_ModeMassAudit.md`](PLAN_ModeMassAudit.md)), and two facts make it so.
+
+  First, dominance is only well posed for the **skeleton** $S=(N, c_0\dots c_{N-1})$ — the
+  multiplicity plus the *ordered* cell sequence. The continuous coordinates never
+  concentrate below the non-perturbative width $\sigma_0+\Lambda_{\rm eff}/k_t$ (§2.2), so
+  "the most probable $y$" as a point in $\mathbb R^{4N}$ is not a physical claim; what can
+  be dominant is the *structure*. And because each per-node coordinate factor is a proper
+  density **given the cell**, it integrates to 1 and the marginal collapses analytically:
+  $q_\phi(S\mid x)=\big[\prod_t P_{\rm cont}P_{\rm split}(c_t)\big]P_{\rm cont}(\text{stop})$,
+  computable from the discrete heads alone.
+
+  Second, prefix mass equals subtree mass — the remaining factors are normalized — so a
+  best-first search on the prefix tree pops completed skeletons in **exact descending mass
+  order** (Dijkstra; the monotone-score framing is Meister, Vieira & Cotterell, *TACL*
+  **8** (2020) 795, arXiv:2007.03909, and the exact-enumeration-of-modes precedent is
+  Stahlberg & Byrne, arXiv:1908.10090). Since the total mass is 1 and every pruned branch
+  is accounted in closed form, $M_1>\tfrac12$ is a **certificate** of dominance rather than
+  evidence for it.
+
+  Three things follow that the write-up must not blur. **Dominance and correctness are
+  logically independent**: a model can put 90% of its mass on one skeleton that is not the
+  truth, or be diffuse and centred on it, so $F(m)=\mathrm{frac}(M_1\ge m)$ and
+  $\mathrm{frac}(S_{\rm truth}=S_{\rm top1})$ are reported in separate tables and only ever
+  crossed explicitly. The **empty skeleton is a first-class row** with mass
+  $P_{\rm cont}(\text{stop}\mid h_0,e)$ — the same $q(0\mid x)$ of the empty-tree analysis
+  — so a "dominant mode" that is the empty tree is a different physical statement from a
+  dominant *splitting*, and the two are separated everywhere.
+
+  And — the one that will mislead a reader who stops at the first two — **$M_1$ is
+  resolution-relative, because exactness is not invariance.** A skeleton bundles degrees of
+  freedom of two kinds: the multiplicity and the *order*, which are genuinely discrete and
+  reference no binning, and the cell labels, which are a discretization of a continuum whose
+  probability is $\approx$ density $\times$ area. Refining $N_{\rm bins}$ therefore drives
+  every $N\ge1$ skeleton's mass toward zero while leaving $q(0\mid x)$ alone, so the empty
+  tree eventually wins the argmax for every jet — the discrete-mode analogue of the
+  empty-string mode of NMT (Stahlberg & Byrne, arXiv:1908.10090), and the same
+  non-commensurability the split-likelihood term carries across $N_{\rm bins}$
+  (`nll_terms`). Dominance is a well-posed *probability* question only for the grid-free
+  half. For the cell half the honest object is an **area**: the smallest Lund-plane region
+  holding a given fraction of a node's positional posterior, in
+  $\ln(1/\Delta R)\times\ln k_t$ units, which has a limit under refinement and a natural
+  yardstick in the coordinate head's own width — and, beyond that, in the irreducible
+  $\sigma_0+\Lambda_{\rm eff}/k_t$ of §2.2. On the fielded 30×30 checkpoint that region
+  spans ~17 cells and the head is truncation-saturated ($\sigma$ larger than a half-cell)
+  for ~90% of jets, i.e. the grid is finer than the model's own resolution: the posterior
+  occupies **one blob about one smearing width across**, and the small per-skeleton masses
+  are the grid slicing it, not a fragmented posterior. Both readings are reported, with
+  $F(m)$ labelled for what it is — a same-geometry comparison.
+
+  The dominance *sentence* survives all of this, provided the resolution is named:
+  $M_1(r)$, the largest mass in any box of half-width $r$, is a probability of a stated
+  event — "the leading splitting lies within $\pm r$ of here" — and the window **slides**,
+  so no partition origin enters (coarsening the grid would not fix that: a mode straddling
+  a block boundary is split by a coarse grid exactly as by a fine one). Its shape is the
+  whole argument: $\propto r^2$ at small $r$, where the number measures the resolution
+  element and nothing else and where the grid's own $M_1$ sits; a knee at the posterior's
+  scale; saturation at 1. On the fielded checkpoint the median jet reaches $M_1 = \tfrac12$
+  at $r \approx 0.45$ — *the leading splitting is localised to $\pm0.45$ in
+  $(\ln 1/\Delta R,\ \ln k_t)$ with even odds*, which is the honest dominance statement and
+  is the same number at any $N_{\rm bins}$. Read at the grid's own resolution instead, the
+  pre-registered $F(0.5)$ reads 0.045; read at $r = 0.45$ it reads ~0.57. Same posterior. The audit is descriptive: it
+  adopts and rejects nothing, and **MBR remains the headline estimator whatever it finds**
+  (Kumar & Byrne, HLT-NAACL 2004; Eikema & Aziz, arXiv:2005.10283). A majority skeleton,
+  where one exists, is an *additional* quotable — "this jet's parton structure is $S_1$
+  with probability $M_1$" — not a replacement for a decision rule fitted to a loss.
+  Measured per jet in `notebooks/per_jets_estimation_mode_mass.ipynb`, stratified in the
+  variables that control the smearing (leading $\ln k_t$, distance to the soft-drop
+  boundary, distance to the $k_t$ floor), all three read off $x$ so an analysis can make
+  the same cut on data.
 - **A direct conditional MLE.** A simpler MAP-on-a-tractable-likelihood precedent is
   the Ginkgo / Quantum-Trellis line (arXiv:2105.10512, arXiv:2112.12795); here the
   likelihood is the learned $q_\phi$.

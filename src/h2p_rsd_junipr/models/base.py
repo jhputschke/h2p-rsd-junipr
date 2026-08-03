@@ -289,6 +289,26 @@ class PosteriorModel(nn.Module, ABC):
                               **mbr_kwargs_from_decode(decode))
         return self.map_estimate(xf, nx, **decode)
 
+    def skeleton_search_spec(self, xf, nx):
+        """What `inference.mode_audit.enumerate_skeletons` needs to enumerate this
+        family's SKELETON posterior exactly (docs/PLAN_ModeMassAudit.md WP-2).
+
+        A `SkeletonSearchSpec` naming one of three strategies — `ar` (per-step
+        continue/stop), `nhead` (explicit q(N|x), cells conditioned on the realized N),
+        `factorized` (q(N|x) with prefix-independent cells) — carrying the incremental
+        decode hooks the search steps. Nothing new is asked of the model: `ar` hands over
+        the same `_step` that `beam_search_cells` consumes.
+
+        The default raises with the family NAME rather than returning None: a silent
+        None would let the audit report an empty table for a family it never searched,
+        and the audit's whole value is that its numbers are certificates."""
+        raise NotImplementedError(
+            f"{type(self).__name__} ({getattr(self, 'model_name', '?')}) has no skeleton "
+            f"search adapter, so its mode-mass audit would be a beam-search approximation "
+            f"rather than an exact enumeration. Implement skeleton_search_spec() for this "
+            f"family (docs/PLAN_ModeMassAudit.md §5) or drop it from the audit."
+        )
+
     def length_pmf(self, xf, nx, mults=None, n_samples: int = 500) -> np.ndarray:
         """The model's per-jet length belief P(n|x) as a normalized pmf over n=0,1,...
 

@@ -201,6 +201,27 @@ class Diffusion(PosteriorModel):
                          dim=-1).squeeze(0).cpu().numpy()
 
     @torch.inference_mode()
+    def skeleton_search_spec(self, xf, nx):
+        """Same factorization as `cinn`: `q(N|e) prod_t P(c_t|e)`.
+
+        `exact_likelihood=False` is about the COORDINATE half — the denoising-score
+        surrogate — and does not reach the two categorical heads, so this family's
+        skeleton marginal is exact even though its joint log-density is not. That is
+        worth stating rather than assuming: the audit is a statement about the discrete
+        structure only, which is the one place this family is on the same footing as the
+        others."""
+        from ..inference.mode_audit import SkeletonSearchSpec
+
+        self.eval()
+        e = self.encode(xf, nx)
+        return SkeletonSearchSpec(
+            kind="factorized", e=e,
+            log_qn=F.log_softmax(self.recalibrated_n_logits(self.n_head(e)), dim=-1).squeeze(0),
+            log_cells=F.log_softmax(self.cell_head(e), dim=-1).squeeze(0),
+            max_emissions=self.max_emissions, family="diffusion",
+        )
+
+    @torch.inference_mode()
     def map_estimate(self, xf, nx, **kw) -> LundPointEstimate:
         self.eval()
         dev = xf.device
