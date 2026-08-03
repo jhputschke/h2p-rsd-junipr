@@ -1956,10 +1956,19 @@ plt.show()
 md(r"""
 ### 9b. The first two splittings
 
-$t=0$ is the widest-angle primary splitting that survived grooming — the hardest, the most
-perturbative, the best determined. Every series should be at its narrowest there, and the gap
-between plain RSD and the model at $t=0$ is the cleanest single statement of what the posterior
-buys.
+$t=0$ is the **widest-angle** primary splitting that survived grooming — and *usually*, but not
+always, also the hardest. Declustering marches inward in angle, so $t=0$ is the widest for 98.4% of
+multi-splitting truth trees; the hardest emission ($\max_t \ln k_t$) sits at $t=0$ for only **80%**
+of them, at $t=1$ for most of the rest, and when the two differ they are usually a near-tie
+(the $\ln k_t$ given up has median 0.000, p90 0.289).
+
+That distinction matters here more than in the sibling notebook, because §6–§8 stratify on
+`lnkt_lead`, which is the **hardest** emission of $x$, while this section slices on $t$, which is
+the **widest**. They are different observables that agree on four jets in five.
+
+Every series should still be at its narrowest at $t=0$ — it is the most perturbative and the best
+determined — and the gap between plain RSD and the model there is the cleanest single statement of
+what the posterior buys.
 """)
 
 code(r'''

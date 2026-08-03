@@ -91,6 +91,21 @@ Everything is **exact**: the positional density is a block-wise mixture (each ce
 normal is confined to its own cell), the window sums come from an integral image, and the
 quadrature check is printed. Nothing here is sampled and nothing is a bound.
 
+### Which splitting, exactly
+
+**Node $t=0$ is the *widest-angle* splitting, not necessarily the hardest.** Declustering marches
+inward in angle, so $t=0$ is the widest for 98.4% of multi-splitting truth trees — but the hardest
+emission ($\max_t \ln k_t$) sits at $t=0$ for only **80%** of them (74.6% for plain RSD), landing at
+$t=1$ in most of the rest. When they differ they are usually a near-tie: the $\ln k_t$ given up by
+taking $t=0$ has median 0.000 and p90 0.289.
+
+Those are two different observables, and this notebook measures **both**: the coverage test runs on
+$t=0$ (the declustering-order node, which is what a teacher-forced prefix walks) *and* on the
+hardest node of the truth, so the reader can see whether the calibration result survives the swap
+rather than assume it. `eval/closure.py`'s `leading_emission_cell` and the audit's `lnkt_lead`
+stratification both use the hardest; §7 of `per_jets_estimation.ipynb` slices on $t$, which is the
+widest.
+
 ### What is deliberately *not* here
 
 No top-$k$ enumeration, no $F(m)$ over ranks, no truth-rank table — those live in
@@ -548,6 +563,10 @@ def jet_windows(i, radii=RADII, max_nodes=MAX_NODES):
         img, meta = grid
         wins = {float(r): max_mass_window(grid, float(r)) for r in radii}
         truth = y[t, :2] if t < len(y) else None
+        # ...and the truth's HARDEST node, which is a different observable: for node 0's
+        # window the two questions are "is the widest-angle truth in the box" and "is the
+        # hardest truth in the box", and they are the same question for ~80% of jets.
+        hard = (y[int(np.argmax(y[:, 1])), :2] if len(y) else None)
         nodes.append({
             "t": t,
             "windows": wins,
@@ -559,6 +578,11 @@ def jet_windows(i, radii=RADII, max_nodes=MAX_NODES):
             "truth": (None if truth is None else [float(truth[0]), float(truth[1])]),
             "hit": {r: (None if truth is None else in_window(truth, w))
                     for r, w in wins.items()},
+            "hit_hardest": {r: (None if hard is None else in_window(hard, w))
+                            for r, w in wins.items()},
+            "truth_hardest": (None if hard is None else
+                              [float(hard[0]), float(hard[1])]),
+            "truth_hardest_index": (None if not len(y) else int(np.argmax(y[:, 1]))),
             "quadrature": float((img * meta["pixel_area"]).sum()),
             "conditional_on": [int(c) for c in cells[:t]],
             "modal_cell": int(meta["modal_cell"]),
@@ -747,6 +771,12 @@ MASS = {float(r): np.array([x["nodes"][0]["windows"][float(r)]["mass"] for x in 
         for r in RADII}
 HIT = {float(r): np.array([bool(x["nodes"][0]["hit"][float(r)]) if x["nodes"][0]["hit"][float(r)]
                            is not None else False for x in REC]) for r in RADII}
+# the same window, asked about the truth's HARDEST node instead of its widest-angle one
+HIT_HARD = {float(r): np.array([bool(x["nodes"][0]["hit_hardest"][float(r)])
+                                if x["nodes"][0]["hit_hardest"][float(r)] is not None
+                                else False for x in REC]) for r in RADII}
+FIRST_IS_HARDEST = np.array([x["nodes"][0].get("truth_hardest_index") == 0
+                             for x in REC], dtype=bool)
 QUAD = np.array([x["nodes"][0]["quadrature"] for x in REC])
 M1_FINE = np.array([x["M1_fine"] for x in REC])
 CELLS_EMPTY = np.array([not x["cells"] for x in REC], dtype=bool)
@@ -821,14 +851,22 @@ fig.suptitle("the mode's region is a prediction; the truth is the outcome",
 fig.tight_layout()
 plt.show()
 
-print(f"{'r':>7}{'mean mass claimed':>20}{'truth inside':>15}{'95% Wilson':>20}"
-      f"{'difference':>13}")
+print(f"{'r':>7}{'mean mass claimed':>20}{'t=0 inside':>13}{'95% Wilson':>20}"
+      f"{'diff':>8}{'HARDEST inside':>16}{'diff':>8}")
 for r in RADII:
     c = HIT[float(r)][sel].mean()
+    ch = HIT_HARD[float(r)][sel].mean()
     lo, hi = wilson(int(HIT[float(r)][sel].sum()), int(sel.sum()))
     cl = MASS[float(r)][sel].mean()
     ci = "[%.3f, %.3f]" % (lo, hi)
-    print(f"{r:>7.2f}{cl:>20.3f}{c:>15.3f}{ci:>20}{c - cl:>+13.3f}")
+    print(f"{r:>7.2f}{cl:>20.3f}{c:>13.3f}{ci:>20}{c - cl:>+8.3f}{ch:>16.3f}"
+          f"{ch - cl:>+8.3f}")
+print(f"\nthe two right-hand columns ask the SAME window a different question: is the")
+print(f"truth's widest-angle node in it (t=0, what the prefix walks) versus its HARDEST")
+print(f"node (max ln kt, what the stratification uses). They coincide for "
+      f"{FIRST_IS_HARDEST[sel].mean():.1%} of these")
+print("jets, so the two columns track each other -- and where they part, the coverage")
+print("claim is about t=0, because that is the node the density was built for.")
 print(f"\non {int(sel.sum()):,} jets with a truth node 0. A difference consistent with zero")
 print("means the window's mass is an honest probability -- the posterior's WIDTH around its")
 print("mode is calibrated, whatever the mode's own cell mass looked like.")
@@ -875,8 +913,12 @@ def _row(label, k, n):
 _row("node 0 in the SAME CELL as the mode (same-geometry)",
      int(CELL_MATCH[sel].sum()), int(sel.sum()))
 for r in RADII:
-    _row("node 0 inside the mode window, r = %g" % r,
+    _row("t=0 (widest) inside the mode window, r = %g" % r,
          int(HIT[float(r)][sel].sum()), int(sel.sum()))
+_row("the HARDEST truth node inside it, r = %g" % R_STAR,
+     int(HIT_HARD[float(R_STAR)][sel].sum()), int(sel.sum()))
+_row("t=0 IS the hardest truth node (for reference)",
+     int(FIRST_IS_HARDEST[sel].sum()), int(sel.sum()))
 print(f"\nboth on the {int(sel.sum()):,} jets whose truth has a node 0. The first line is what")
 print("an exact-label comparison can say; every line below it is the same comparison with a")
 print("resolution named, and only those transfer to another n_bins.")
@@ -1073,12 +1115,17 @@ if WRITE_ARTIFACTS:
         "coverage": {
             "n_jets_with_node0": int(sel.sum()),
             "note": "the window's mass is P(node 0 in the box | x, N>=1); the outcome is "
-                    "whether the truth's node 0 is in it. Node 0 only.",
+                    "whether the truth's node 0 is in it. Node 0 is the WIDEST-ANGLE "
+                    "splitting; `frac_hardest_inside` asks the same window about the "
+                    "truth's hardest node instead, and `frac_t0_is_hardest` says how "
+                    "often those are the same node.",
             "by_radius": {f"{r:g}": {"mean_mass_claimed": float(MASS[float(r)][sel].mean()),
                                      "frac_truth_inside": float(HIT[float(r)][sel].mean()),
+                                     "frac_hardest_inside": float(HIT_HARD[float(r)][sel].mean()),
                                      "wilson95": list(wilson(int(HIT[float(r)][sel].sum()),
                                                              int(sel.sum())))}
                           for r in RADII},
+            "frac_t0_is_hardest": float(FIRST_IS_HARDEST[sel].mean()),
             "same_cell_match": float(CELL_MATCH[sel].mean()),
         },
         "resolution": {
@@ -1111,6 +1158,11 @@ md(r"""
 - **Calibration is not correctness.** A perfectly calibrated model can put its regions in the
   wrong place — §5 would still sit on the diagonal. §7's residual is the check that they are in the
   *right* place, and the two have to be read together.
+- **`t=0` is the widest-angle splitting, not the hardest.** They coincide for ~80% of
+  multi-splitting jets, and §5 asks the same window about both so the difference is measured rather
+  than assumed. Everything conditional here walks the declustering order, so `t=0` is the node the
+  density is built for; `lnkt_lead` and `leading_emission_cell` elsewhere in the repo mean the
+  hardest, and mixing the two names was a real error in the sibling notebook's §7 text.
 - **Only node 0 is unconditional.** Its window mass is
   $P(\text{node }0 \in B \mid x,\ N\ge1)$, an honest marginal. Every later node is conditioned on
   the mode's earlier cells being right, which they mostly are not, so §6's deeper rows measure the
