@@ -41,6 +41,7 @@ from h2p_rsd_junipr.inference.mode_audit import (
     node_density_image,
     node_hpd_area,
     skeleton_log_prob,
+    window_centroid,
     window_mode_sequence,
 )
 from h2p_rsd_junipr.models.base import build_model
@@ -523,6 +524,32 @@ def test_window_mass_is_at_least_the_directly_summed_pixels():
     iv = int(round((w["v_lo"] - meta["origin_v"]) / sv))
     direct = float(img[iu:iu + w["w_u"], iv:iv + w["w_v"]].sum()) * pix
     assert direct == pytest.approx(w["mass"], rel=1e-9, abs=1e-12)
+
+
+def test_window_centroid_is_inside_and_lattice_free():
+    """The point quoted for a window is the mass-weighted centroid, not the box's
+    midpoint: the placement is only determined up to the pixel lattice, so the midpoint
+    would put a grid back into an answer the sliding window took one out of."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    with torch.inference_mode():
+        grid = node_density_image(model, xf, nx,
+                                  spec=model.skeleton_search_spec(xf, nx), sub=9)
+    img, meta = grid
+    w = max_mass_window(grid, 0.6)
+    c = window_centroid(grid, w)
+    assert in_window(c, w), "the centroid of a region lies in it"
+
+    # ...and it is the same number a direct weighted sum gives
+    su, sv = meta["step_u"], meta["step_v"]
+    iu = int(round((w["u_lo"] - meta["origin_u"]) / su))
+    iv = int(round((w["v_lo"] - meta["origin_v"]) / sv))
+    blk = img[iu:iu + w["w_u"], iv:iv + w["w_v"]].double().numpy()
+    u = meta["origin_u"] + (np.arange(iu, iu + w["w_u"]) + 0.5) * su
+    v = meta["origin_v"] + (np.arange(iv, iv + w["w_v"]) + 0.5) * sv
+    want = ((blk.sum(1) * u).sum() / blk.sum(), (blk.sum(0) * v).sum() / blk.sum())
+    assert c[0] == pytest.approx(want[0], rel=1e-6)
+    assert c[1] == pytest.approx(want[1], rel=1e-6)
 
 
 def test_density_image_conditions_on_the_prefix():

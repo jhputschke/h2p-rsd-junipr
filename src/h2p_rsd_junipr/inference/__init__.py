@@ -14,10 +14,15 @@ from .mode_audit import (
     coarse_skeleton_masses,
     entropy_from_draws,
     enumerate_skeletons,
+    in_window,
+    max_mass_window,
     mode_mass_at_resolution,
+    node_density_image,
     node_hpd_area,
     skeleton_log_prob,
     skeleton_log_probs,
+    window_centroid,
+    window_mode_sequence,
 )
 from .point_estimate import LundNode, LundPointEstimate, beam_search_cells
 from .sampling import ancestral_sample_cells
@@ -46,4 +51,9 @@ __all__ = [
     "mode_mass_at_resolution",
     "coarse_skeleton_masses",
     "RESOLUTION_RADII",
+    "window_centroid",
+    "window_mode_sequence",
+    "max_mass_window",
+    "node_density_image",
+    "in_window",
 ]

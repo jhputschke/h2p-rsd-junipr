@@ -624,6 +624,42 @@ def window_mode_sequence(model, xf, nx, cells, *, radii=RESOLUTION_RADII, sub=7,
     return out
 
 
+@torch.inference_mode()
+def window_centroid(grid, win) -> tuple[float, float]:
+    """The mass-weighted centre of the density INSIDE the window — the point to quote.
+
+    The box's geometric centre is the obvious choice and the wrong one: the window
+    placement is determined only up to the pixel lattice (and for a flat-topped density
+    many placements tie), so quoting its midpoint puts a lattice back into the answer
+    after the sliding window took the cell grid out of it. The centroid has no such
+    dependence, and it is the conditional mean given the region — the minimiser of
+    squared error restricted to the box.
+
+    Measured on the fielded checkpoint at `r = 0.45` the two agree to well inside a pixel
+    (median shift 0.024 / 0.006 against a 0.029 pixel) and their residual RMS differs by
+    <1%, because the density inside a box that size is near-symmetric. The choice is made
+    on the principle, not on that difference — but the difference is why it is not worth
+    arguing about either.
+
+    For contrast, the density's PEAK — the actual mode of the positional posterior — is
+    measurably worse than any of them (RMS 0.801 against 0.697, and a -0.20 bias in
+    `ln(1/DeltaR)`): the mode-vs-mean story of §3 of the plan, at the coordinate level.
+    """
+    img, meta = grid
+    su, sv = meta["step_u"], meta["step_v"]
+    iu = int(round((win["u_lo"] - meta["origin_u"]) / su))
+    iv = int(round((win["v_lo"] - meta["origin_v"]) / sv))
+    blk = img[iu:iu + win["w_u"], iv:iv + win["w_v"]]
+    total = float(blk.sum())
+    if total <= 0.0:      # an empty box has no centroid; its geometric centre is all
+        return (0.5 * (win["u_lo"] + win["u_hi"]), 0.5 * (win["v_lo"] + win["v_hi"]))
+    u = meta["origin_u"] + (torch.arange(iu, iu + win["w_u"], device=img.device,
+                                         dtype=img.dtype) + 0.5) * su
+    v = meta["origin_v"] + (torch.arange(iv, iv + win["w_v"], device=img.device,
+                                         dtype=img.dtype) + 0.5) * sv
+    return (float((blk.sum(1) * u).sum() / total), float((blk.sum(0) * v).sum() / total))
+
+
 def in_window(point, win) -> bool:
     """Is `(u, v)` inside the box? Half-open on the upper edges, so adjacent windows
     tile without double-counting a point that lands exactly on a boundary."""

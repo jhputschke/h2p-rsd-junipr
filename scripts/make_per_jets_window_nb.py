@@ -82,9 +82,10 @@ the grid. A box can be asked the question that matters — *is the truth in it?*
    the exact-cell-match number, side by side. The gap between them is the grid artefact in the
    *correctness* question, which is the same defect as in the dominance question and was left
    standing there.
-3. **§7 — the residual of a region-based point estimate.** The box's centre is a legitimate point
-   estimate ("the centre of the densest region at scale $r$"), so it goes into the same
-   $\Delta = \text{estimate} - \text{truth}$ panels as plain RSD, MAP and MBR.
+3. **§7 — the residual of a region-based point estimate.** The **mass-weighted centroid inside
+   the window** is a point estimate in its own right, so it goes into the same
+   $\Delta = \text{estimate} - \text{truth}$ panels as plain RSD, MAP and MBR — beside the
+   density's own **peak**, which is what "the most likely point" means and is measurably worse.
 
 Everything is **exact**: the positional density is a block-wise mixture (each cell's truncated
 normal is confined to its own cell), the window sums come from an integral image, and the
@@ -281,6 +282,7 @@ from h2p_rsd_junipr.inference.mode_audit import (
     in_window,
     max_mass_window,
     node_density_image,
+    window_centroid,
 )
 from h2p_rsd_junipr.models.base import build_model
 from h2p_rsd_junipr.train.checkpoint import load_for_inference
@@ -549,6 +551,11 @@ def jet_windows(i, radii=RADII, max_nodes=MAX_NODES):
         nodes.append({
             "t": t,
             "windows": wins,
+            # the point to quote is the mass-weighted centroid INSIDE the window; the
+            # other two are kept so section 7 can price the choice rather than assert it
+            "centroid": {r: list(window_centroid(grid, w)) for r, w in wins.items()},
+            "box_centre": {r: list(box_centre(w)) for r, w in wins.items()},
+            "peak": [float(x) for x in density_peak(grid)],
             "truth": (None if truth is None else [float(truth[0]), float(truth[1])]),
             "hit": {r: (None if truth is None else in_window(truth, w))
                     for r, w in wins.items()},
@@ -566,9 +573,22 @@ def jet_windows(i, radii=RADII, max_nodes=MAX_NODES):
             "rsd": np.asarray(node_raw(*jet["x"]), dtype=float)}
 
 
-def window_centre(w):
-    """The box's centre -- the region-based POINT estimate."""
+def box_centre(w):
+    """The box's geometric centre. NOT the estimate this notebook quotes -- the window
+    placement is only determined up to the pixel lattice, so its midpoint puts a grid
+    back into the answer after the sliding window took one out."""
     return np.array([0.5 * (w["u_lo"] + w["u_hi"]), 0.5 * (w["v_lo"] + w["v_hi"])])
+
+
+def density_peak(grid):
+    """The positional posterior's own maximum -- what "the most likely point" means. In
+    section 7 it is the worst of the three, which is the mode-vs-mean story at the
+    coordinate level rather than the skeleton level."""
+    img, meta = grid
+    a = img.cpu().double().numpy()
+    iu, iv = np.unravel_index(int(np.argmax(a)), a.shape)
+    return np.array([meta["origin_u"] + (iu + 0.5) * meta["step_u"],
+                     meta["origin_v"] + (iv + 0.5) * meta["step_v"]])
 
 
 def pick_showcase(n_min=2, start=0):
@@ -882,9 +902,22 @@ print("   usually wrong, so their gap is a measure of the PREFIX, not of the win
 md(r"""
 ## 7. The residual of a region-based point estimate
 
-The centre of the densest box at scale $r$ is a point estimate in its own right — "the middle of
-where the posterior actually is" — and it belongs in the same $\Delta = \text{estimate} -
-\text{truth}$ panels as plain RSD, the MAP and the MBR medoid, on the first splitting.
+The densest box at scale $r$ gives a point estimate — but *which* point?
+
+- The box's **geometric centre** is the obvious answer and the wrong one: the window placement is
+  determined only up to the pixel lattice, and for a flat-topped density many placements tie. Quoting
+  its midpoint would put a grid back into the answer after the sliding window took one out.
+- The **mass-weighted centroid inside the box** has no such dependence. It is the conditional mean
+  given the region — the minimiser of squared error restricted to the box — and it is what this
+  notebook quotes.
+- The density's **peak** is the third candidate, and it is what "the most likely point" actually
+  means.
+
+The three are printed together below so the choice is priced rather than asserted. On this
+checkpoint the first two agree to well inside a pixel and their RMS differs by under 1% (the density
+inside a box that size is near-symmetric), so the decision rests on the principle, not on the
+number. The **peak**, though, is measurably worse than either — the mode-versus-mean story of the
+plan's §3, now at the coordinate level rather than the skeleton level.
 
 $\ln z$ is absent: the window lives on the Lund **plane**, so a $\Delta \ln z$ panel would be
 reporting a coordinate the estimate never claimed. `per_jets_estimation.ipynb` has that panel for
@@ -892,10 +925,12 @@ the estimators that do claim it.
 """)
 
 code(r'''
-SERIES = ["truth", "rsd", "win"] + (["map", "mbr"] if WITH_REFERENCE else [])
+SERIES = (["truth", "rsd", "win", "peak"]
+          + (["map", "mbr"] if WITH_REFERENCE else []))
 STYLE = {"truth": (C_TRUTH, "-", r"truth $y$ (parton)"),
          "rsd": (C_RSD_E, "-", r"plain RSD $x$ (hadron)"),
-         "win": (C_WIN, "-.", rf"window centre, $r={R_STAR:g}$"),
+         "win": (C_WIN, "-.", rf"window centroid, $r={R_STAR:g}$"),
+         "peak": (C_POST, ":", r"density peak (the actual mode)"),
          "map": (C_MAP, "-", r"MAP $\hat y$"),
          "mbr": (C_MBR, "-", r"MBR $\hat y$")}
 MODELS = [s for s in SERIES if s != "truth"]
@@ -910,7 +945,8 @@ for i, rec in enumerate(REC):
         continue
     NODE0["truth"].append(rec["truth"][0, :2])
     NODE0["rsd"].append(rec["rsd"][0, :2] if len(rec["rsd"]) else np.full(2, np.nan))
-    NODE0["win"].append(window_centre(rec["nodes"][0]["windows"][float(R_STAR)]))
+    NODE0["win"].append(np.array(rec["nodes"][0]["centroid"][float(R_STAR)]))
+    NODE0["peak"].append(np.array(rec["nodes"][0]["peak"]))
     W_JET.append(rec["weight"])
     if WITH_REFERENCE:
         item = ds[i]
@@ -978,9 +1014,27 @@ for key in RES_KEYS:
         print(f"{TLABEL[key] if s == MODELS[0] else '':<12}{s:<8}{st['n']:>8,}"
               f"{st['bias']:>+9.3f}{st['rms']:>8.3f}{st['hw68']:>9.3f}"
               + (f"{'1  (baseline)':>18}" if s == "rsd" else f"{ratio:>18.3f}"))
-print("\nThe window centre is a point estimate of the same kind as the others and is scored")
-print("the same way. Its interest is not that it wins -- it is that the region AROUND it")
-print("carries a checked probability (section 5), which none of the other rows does.")
+# the choice of POINT, priced rather than asserted
+_bc = np.asarray([r["nodes"][0]["box_centre"][float(R_STAR)]
+                  for r in REC if r["n_truth"] >= 1], dtype=float)
+print()
+print(f"{'which point in the window':<34}{'RMS ln(1/dR)':>14}{'RMS ln kt':>12}"
+      f"{'median shift from the centroid':>32}")
+for lab, arr in (("mass-weighted centroid (quoted)", NODE0["win"]),
+                 ("the box's geometric centre", _bc),
+                 ("the density's peak (the mode)", NODE0["peak"])):
+    d = arr - NODE0["truth"]
+    sh = np.median(np.abs(arr - NODE0["win"]), axis=0)
+    print(f"{lab:<34}{np.sqrt((d[:, 0] ** 2).mean()):>14.3f}"
+          f"{np.sqrt((d[:, 1] ** 2).mean()):>12.3f}"
+          f"{'[%.3f, %.3f]' % (sh[0], sh[1]):>32}")
+print(f"one pixel is {2 * geom.half_u / SUB:.3f} ln, so the first two are the same point to")
+print("within the lattice -- the centroid is quoted because it does not DEPEND on that")
+print("lattice, not because it wins. The peak is a different estimator and loses to both:")
+print("the most likely point is not the best point, which is the same lesson MBR encodes")
+print("at the level of whole trees.")
+print("\nThe interest of the centroid row is not that it wins the residual -- it is that the")
+print("region AROUND it carries a checked probability (section 5), which no other row does.")
 ''')
 
 # ---------------------------------------------------------------------------
