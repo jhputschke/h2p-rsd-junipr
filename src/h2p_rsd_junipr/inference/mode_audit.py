@@ -491,8 +491,9 @@ def skeleton_log_prob(model, cells, xf, nx, *, spec=None) -> float:
 # The grid-free companion to M_1
 # ---------------------------------------------------------------------------
 @torch.inference_mode()
-def _node_density_image(model, xf, nx, *, spec, sub=7, cells_logp=None):
-    """The FIRST splitting's positional density as an image over the Lund plane, exact.
+def node_density_image(model, xf, nx, *, spec, sub=7, cells_logp=None, prefix=()):
+    """Node `len(prefix)`'s positional density as an image over the Lund plane, exact,
+    teacher-forced on `prefix`.
 
     `(image (n_bins*sub, n_bins*sub), meta)` with the `u = ln(1/DeltaR)` axis first, so
     neighbouring pixels are neighbouring points — which is what any windowed statistic
@@ -502,20 +503,34 @@ def _node_density_image(model, xf, nx, *, spec, sub=7, cells_logp=None):
     component is a truncated normal bounded by that cell, so it contributes to that block
     and to no other, and a `sub x sub` lattice inside every cell evaluates the whole
     density. `pixel_area` closes the quadrature check.
+
+    `prefix` empty is the first splitting, and that one is UNCONDITIONAL given `x` (bar
+    `N >= 1`, since the cell head at `h_0` is the distribution given that a splitting
+    happens at all). A non-empty prefix conditions on those earlier splittings being
+    exactly those cells — which is the honest reading of a mode skeleton's later nodes,
+    and the caller must say so rather than quoting them as marginals.
     """
     geom = model.geometry
     dev = xf.device
     n_bins, n_cells = geom.n_bins, geom.n_cells
     hu, hv = geom.half_u, geom.half_v
+    prefix = [int(c) for c in prefix]
     if cells_logp is None:
-        tok = torch.full((1, 1), int(spec.start_token), dtype=torch.long, device=dev)
-        _p_cont, cells_logp, _h = spec.step(tok, spec.e, spec.h0)
+        h, tok = spec.h0, spec.start_token
+        for c in prefix:                       # walk to h_t, one step per prefix node
+            tok_t = torch.full((1, 1), int(tok), dtype=torch.long, device=dev)
+            _p, _lp, h = spec.step(tok_t, spec.e, h)
+            tok = c
+        tok_t = torch.full((1, 1), int(tok), dtype=torch.long, device=dev)
+        _p_cont, cells_logp, _h = spec.step(tok_t, spec.e, h)
     p0 = torch.softmax(cells_logp.reshape(-1), dim=-1)
 
-    # Every one-node chain's coordinate head in ONE pass: the decoder state after START is
-    # shared across cells, so only the cell embedding differs between rows.
-    yc = torch.arange(n_cells, dtype=torch.long, device=dev).unsqueeze(1)
-    du_m, dv_m, du_s, dv_s = (t.squeeze(1) for t in
+    # Every continuation's coordinate head in ONE pass: rows are `prefix + [c]`, so the
+    # decoder state is shared up to `t` and only the last cell embedding differs.
+    tail = torch.arange(n_cells, dtype=torch.long, device=dev).unsqueeze(1)
+    yc = (torch.cat([torch.tensor(prefix, dtype=torch.long, device=dev)
+                     .repeat(n_cells, 1), tail], dim=1) if prefix else tail)
+    du_m, dv_m, du_s, dv_s = (t[:, -1] for t in
                               model._coord_params_padded(xf, nx, yc)[:4])
 
     from ..distributions import trunc_normal_logpdf
@@ -534,8 +549,86 @@ def _node_density_image(model, xf, nx, *, spec, sub=7, cells_logp=None):
             "modal_cell": int(p0.argmax()),
             "step_u": float(step_u), "step_v": float(step_v),
             "pixel_area": float(step_u * step_v),
-            "cell_area": float(4.0 * hu * hv)}
+            "cell_area": float(4.0 * hu * hv),
+            "origin_u": float(geom.ln_invdelta_range[0]),
+            "origin_v": float(geom.ln_kt_range[0]),
+            "prefix": list(prefix), "depth": len(prefix)}
     return img, meta
+
+
+# back-compat for the private name this started life under
+_node_density_image = node_density_image
+
+
+@torch.inference_mode()
+def max_mass_window(grid, r: float) -> dict:
+    """The highest-mass BOX of half-width `r`, and where it is.
+
+    `{mass, u_lo, u_hi, v_lo, v_hi, r_used}` — the box is returned, not just its mass,
+    because the whole point of a sliding window is that you can then ask whether the
+    TRUTH is inside it. That question is what turns a dominance number into a coverage
+    number, and it is not askable of a cell-indexed mode.
+
+    The window is snapped to whole pixels and the achieved half-width comes back as
+    `r_used` rather than silently differing from what was asked. Placement is by integral
+    image, so the search over placements is exact and costs four lookups per position.
+    """
+    img, meta = grid
+    su, sv, pix = meta["step_u"], meta["step_v"], meta["pixel_area"]
+    mass = img * pix
+    cum = torch.cumsum(torch.cumsum(mass, dim=0), dim=1)
+    cum = torch.nn.functional.pad(cum, (1, 0, 1, 0))
+    n_u, n_v = mass.shape
+    wu = max(1, min(int(round(2.0 * r / su)), n_u))
+    wv = max(1, min(int(round(2.0 * r / sv)), n_v))
+    s = (cum[wu:, wv:] - cum[:-wu or None, wv:] - cum[wu:, :-wv or None]
+         + cum[:-wu or None, :-wv or None])
+    flat = int(torch.argmax(s.reshape(-1)))
+    iu, iv = divmod(flat, s.shape[1])
+    u_lo = meta["origin_u"] + iu * su
+    v_lo = meta["origin_v"] + iv * sv
+    return {"mass": float(min(float(s.reshape(-1)[flat]), 1.0)),
+            "u_lo": float(u_lo), "u_hi": float(u_lo + wu * su),
+            "v_lo": float(v_lo), "v_hi": float(v_lo + wv * sv),
+            "r_used": float(0.5 * max(wu * su, wv * sv)),
+            "w_u": int(wu), "w_v": int(wv)}
+
+
+@torch.inference_mode()
+def window_mode_sequence(model, xf, nx, cells, *, radii=RESOLUTION_RADII, sub=7,
+                         spec=None) -> list[dict]:
+    """One entry per node of `cells`: the highest-mass window at every `r`, teacher-forced
+    on the preceding nodes of that same chain.
+
+    This is the mode skeleton quoted the way the plan's §3 says a mode's kinematics have
+    to be quoted — as conditional summaries with a width — except that the width is now a
+    REGION with an exact probability attached instead of a `±sigma` whose coverage nobody
+    checked.
+
+    Node 0's numbers are unconditional given `x` (bar `N >= 1`). Later nodes are
+    conditional on the earlier ones being exactly the mode's cells, which is a real
+    conditioning and not a marginal: read `depth > 0` rows as "given the mode's first `t`
+    splittings", and expect their coverage to be worse for exactly that reason.
+    """
+    spec = model.skeleton_search_spec(xf, nx) if spec is None else spec
+    out = []
+    for t in range(len(cells)):
+        grid = node_density_image(model, xf, nx, spec=spec, sub=sub,
+                                  prefix=[int(c) for c in cells[:t]])
+        wins = {}
+        for r in radii:
+            w = max_mass_window(grid, float(r))
+            wins[float(r)] = w
+        out.append({"t": t, "cell": int(cells[t]), "windows": wins,
+                    "quadrature": float((grid[0] * grid[1]["pixel_area"]).sum())})
+    return out
+
+
+def in_window(point, win) -> bool:
+    """Is `(u, v)` inside the box? Half-open on the upper edges, so adjacent windows
+    tile without double-counting a point that lands exactly on a boundary."""
+    u, v = float(point[0]), float(point[1])
+    return bool(win["u_lo"] <= u < win["u_hi"] and win["v_lo"] <= v < win["v_hi"])
 
 
 @torch.inference_mode()

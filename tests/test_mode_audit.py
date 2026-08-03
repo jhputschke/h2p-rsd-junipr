@@ -35,9 +35,13 @@ from h2p_rsd_junipr.inference.mode_audit import (
     coarse_skeleton_masses,
     entropy_from_draws,
     enumerate_skeletons,
+    in_window,
+    max_mass_window,
     mode_mass_at_resolution,
+    node_density_image,
     node_hpd_area,
     skeleton_log_prob,
+    window_mode_sequence,
 )
 from h2p_rsd_junipr.models.base import build_model
 
@@ -54,6 +58,11 @@ MAX_EM = 4
 # closes to float32 precision (~1e-7 per head), not float64. A defect above this is a
 # bug in the search; below it is the head's own arithmetic.
 MASS_TOL = 1e-6
+# The density image is a Riemann sum on a `sub x sub` lattice PER CELL, so its accuracy
+# is set by the lattice against the density's curvature inside a cell. This deliberately
+# coarse 2x2 geometry has 3.0-wide cells, where that is crude; the fielded 30x30 (0.2
+# cells) closes to ~2e-3 at sub=7, which is what the notebook asserts.
+QUAD_TOL = 3e-2
 
 
 def _tiny(extra=None, seed=0, dims=None):
@@ -476,6 +485,72 @@ def test_mode_mass_scales_as_the_area_at_small_r():
     out = mode_mass_at_resolution(model, xf, nx, radii=(px, 2 * px), sub=9)
     ratio = out["mass"][1] / max(out["mass"][0], 1e-12)
     assert 2.5 <= ratio <= 5.5, f"expected ~4x (area scaling), got {ratio:.2f}"
+
+
+def test_max_mass_window_returns_the_box_it_measured():
+    """The box is the deliverable, not the mass: a cell-indexed mode can only be compared
+    to the truth by exact label match, a box can be asked whether the truth is inside."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    with torch.inference_mode():
+        spec = model.skeleton_search_spec(xf, nx)
+        grid = node_density_image(model, xf, nx, spec=spec, sub=9)
+    w = max_mass_window(grid, 0.5)
+    assert w["u_hi"] > w["u_lo"] and w["v_hi"] > w["v_lo"]
+    assert w["u_lo"] >= geom.ln_invdelta_range[0] - 1e-9
+    assert w["u_hi"] <= geom.ln_invdelta_range[1] + 1e-9
+    assert 0.0 <= w["mass"] <= 1.0 + 1e-9
+    # the centre is inside its own box, and a point outside is outside
+    c = (0.5 * (w["u_lo"] + w["u_hi"]), 0.5 * (w["v_lo"] + w["v_hi"]))
+    assert in_window(c, w)
+    assert not in_window((w["u_lo"] - 1.0, c[1]), w)
+    # half-open on the upper edge, so adjacent windows tile without double-counting
+    assert in_window((w["u_lo"], w["v_lo"]), w)
+    assert not in_window((w["u_hi"], w["v_lo"]), w)
+
+
+def test_window_mass_is_at_least_the_directly_summed_pixels():
+    """Independent arithmetic for the same number: sum the density over the box by brute
+    force and compare with the integral-image answer."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    with torch.inference_mode():
+        spec = model.skeleton_search_spec(xf, nx)
+        img, meta = node_density_image(model, xf, nx, spec=spec, sub=9)
+    w = max_mass_window((img, meta), 0.4)
+    su, sv, pix = meta["step_u"], meta["step_v"], meta["pixel_area"]
+    iu = int(round((w["u_lo"] - meta["origin_u"]) / su))
+    iv = int(round((w["v_lo"] - meta["origin_v"]) / sv))
+    direct = float(img[iu:iu + w["w_u"], iv:iv + w["w_v"]].sum()) * pix
+    assert direct == pytest.approx(w["mass"], rel=1e-9, abs=1e-12)
+
+
+def test_density_image_conditions_on_the_prefix():
+    """A later node's density is teacher-forced on the earlier cells, so it must MOVE
+    when the prefix changes — otherwise every 'conditional' number in the window notebook
+    would silently be node 0's marginal wearing a different label."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    with torch.inference_mode():
+        spec = model.skeleton_search_spec(xf, nx)
+        a = node_density_image(model, xf, nx, spec=spec, sub=9, prefix=[0])
+        b = node_density_image(model, xf, nx, spec=spec, sub=9, prefix=[geom.n_cells - 1])
+    assert a[1]["depth"] == 1 and a[1]["prefix"] == [0]
+    assert not torch.allclose(a[0], b[0]), "the prefix did not reach the density"
+    for img, meta in (a, b):                       # each is still a proper density
+        assert float((img * meta["pixel_area"]).sum()) == pytest.approx(1.0, abs=QUAD_TOL)
+
+
+def test_window_mode_sequence_walks_the_chain():
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    cells = [0, 1, 2]
+    seq = window_mode_sequence(model, xf, nx, cells, radii=(0.5, 1.5), sub=9)
+    assert [s["t"] for s in seq] == [0, 1, 2]
+    assert [s["cell"] for s in seq] == cells
+    for s in seq:
+        assert s["quadrature"] == pytest.approx(1.0, abs=QUAD_TOL)
+        assert s["windows"][0.5]["mass"] <= s["windows"][1.5]["mass"] + 1e-9
 
 
 def test_coarse_block_one_is_the_identity():

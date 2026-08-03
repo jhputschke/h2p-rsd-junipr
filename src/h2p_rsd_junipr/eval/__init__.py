@@ -5,7 +5,6 @@ from .calibration import (
     run_tarp,
     tarp_null_band,
 )
-from .exposure import continue_prob_by_depth, length_marginal, run_exposure
 from .closure import (
     geometric_median,
     leading_emission_cell,
@@ -15,6 +14,7 @@ from .closure import (
     print_point_estimate,
     run_closure,
 )
+from .exposure import continue_prob_by_depth, length_marginal, run_exposure
 from .mode_audit import audit_jet, jet_strata, run_mode_audit, summarise_mode_audit
 from .report import plot_calibration, save_metrics
 from .support import run_support_audit
