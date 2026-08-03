@@ -358,6 +358,17 @@ C_MODE  = "#b0499e"    # MODE SKELETON estimate   -- magenta (slot 4)
 # Mass-spectrum accents: the enumerated bars take the mode series' hue, the two
 # accounting bands the neutrals, so nothing in section 4b competes with a data series.
 C_FRONT, C_PRUNE = "#c3c2b7", "#e1e0d9"
+# The plane maps, inherited verbatim from lund_distribution_closure_v2.ipynb so the two
+# notebooks' Lund panels are readable against each other without re-learning a scale.
+# Sequential = ONE hue light->dark (magnitude); diverging = two poles with a NEUTRAL grey
+# midpoint (polarity), so "agrees with truth" reads as nothing at all.
+SEQ_BLUE = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+            "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
+CMAP = mpl.colors.LinearSegmentedColormap.from_list("h2p_blue", SEQ_BLUE)
+CMAP.set_bad(SURFACE)   # empty bins recede to the surface instead of reading as data
+DIV = mpl.colors.LinearSegmentedColormap.from_list(
+    "h2p_div", ["#0d366b", "#2a78d6", "#9ec5f4", "#f0efec", "#f0a3a3", "#d03b3b", "#7a1f1f"])
+DIV.set_bad(SURFACE)
 
 mpl.rcParams.update({
     "figure.dpi": 120, "savefig.dpi": 120,
@@ -2040,6 +2051,169 @@ print("SAMPLE, not a paired comparison: the dominant subset is also the more")
 print("perturbative one (section 8's Spearman), and an easier population is expected to")
 print("be easier for plain RSD too. Read the `rsd` row as the control -- the model rows")
 print("only mean something to the extent they beat it.")
+''')
+
+# ---------------------------------------------------------------------------
+md(r"""
+### 9d. The primary Lund plane, and where each estimate puts its splittings
+
+$\rho(\ln 1/\Delta R,\ \ln k_t)$ — weighted splittings **per jet per unit Lund area**, the same
+observable and the same binning as §6 of
+[`lund_distribution_closure_v2.ipynb`](lund_distribution_closure_v2.ipynb), so the two overlay
+without re-learning a scale. At fixed coupling the primary Lund density is approximately flat
+($\rho \approx 2\alpha_s C_F/\pi$) — that plateau is what the coordinates are for — with the
+running coupling tilting it toward small $k_t$ and the grooming cutting hard edges into it.
+
+The new series here is **`mode`**, the top-1 skeleton. Two ratio rows, because it under-produces
+splittings for a reason that has nothing to do with *where* it puts them:
+
+- **rate ratio** — $\rho_s/\rho_{\rm truth}$ as measured. The `mode` row is suppressed almost
+  everywhere, and it should be: its skeleton is the empty tree for ~78% of jets (§6), so it
+  contributes no splitting at all on those. This ratio is the multiplicity deficit and the
+  placement error multiplied together.
+- **shape ratio** — both planes normalised to unit total first, which divides the multiplicity out
+  and asks the separate question: *given that it emits, does it emit in the right places?*
+
+Reading only the first would blame the mode's placement for a length effect; reading only the
+second would hide that the length effect exists. The pair is the honest presentation, and it is the
+same rate-versus-shape split the closure notebook makes for the multiplicity bias.
+""")
+
+code(r'''
+U_LO, U_HI = geom.ln_invdelta_range
+V_LO, V_HI = geom.ln_kt_range
+PLANE_NB = geom.n_bins          # the density map: the model's own cells, so its granularity
+#                                 shows rather than hides
+# The RATIO is binned coarser, and it has to be: this sample has ~1.4 truth splittings per
+# jet, so at 30x30 a cell holds ~3 of them and a ratio there is Poisson noise painted in
+# saturated colour. RATIO_NB divides n_bins, so a ratio bin is a whole number of model
+# cells. Same reasoning as lund_distribution_closure_v2.ipynb section 6, which rebins for
+# the same reason on a larger sample.
+RATIO_NB = 10
+RLO, RHI, N_MIN = 0.4, 2.5, 12  # ratio scale, and the truth count a bin needs to divide by
+
+
+def pack(series):
+    """Splitting-level (coords, weights) for one series -- one row per node, carrying its
+    jet's weight, which is the level a per-jet-per-area density is defined on."""
+    v = [a for a in RAW[series] if len(a)]
+    w = [np.full(len(a), W_JET[i]) for i, a in enumerate(RAW[series]) if len(a)]
+    return (np.concatenate(v) if v else np.zeros((0, 4)),
+            np.concatenate(w) if w else np.zeros(0))
+
+
+def plane(series, nb):
+    """(density, raw counts) on an nb x nb grid: splittings per jet per unit Lund area."""
+    v, w = pack(series)
+    e = [np.linspace(U_LO, U_HI, nb + 1), np.linspace(V_LO, V_HI, nb + 1)]
+    h = np.histogram2d(v[:, 0], v[:, 1], bins=e, weights=w)[0]
+    n = np.histogram2d(v[:, 0], v[:, 1], bins=e)[0]
+    area = (U_HI - U_LO) * (V_HI - V_LO) / nb ** 2
+    return h / (W_JET.sum() * area), n, e
+
+
+PLANES, PCOUNT = {}, {}
+for s in SERIES:
+    PLANES[s], PCOUNT[s], PE = plane(s, PLANE_NB)
+# A single hot bin would flatten the whole ramp on a shared linear scale, so the top of
+# the scale is a high percentile of the populated bins, not the maximum.
+_pop = np.concatenate([P[P > 0] for P in PLANES.values() if (P > 0).any()])
+vmax = float(np.percentile(_pop, 99)) if _pop.size else 1.0
+# View limits only -- the binning stays on the model's full window, but a 100 GeV sample
+# populates a corner of it and plotting the whole square would shrink every structure.
+_hit = np.sum(list(PLANES.values()), axis=0) > 0
+_iu, _iv = np.flatnonzero(_hit.any(axis=1)), np.flatnonzero(_hit.any(axis=0))
+XLIM = (PE[0][max(_iu[0] - 1, 0)], PE[0][min(_iu[-1] + 2, PLANE_NB)])
+YLIM = (PE[1][max(_iv[0] - 1, 0)], PE[1][min(_iv[-1] + 2, PLANE_NB)])
+
+fig, axes = plt.subplots(1, len(SERIES), figsize=(3.2 * len(SERIES), 3.9), sharey=True)
+for ax, s in zip(np.atleast_1d(axes), SERIES):
+    P = np.ma.masked_where(PLANES[s] <= 0, PLANES[s])
+    im = ax.pcolormesh(PE[0], PE[1], P.T, cmap=CMAP, vmin=0.0, vmax=vmax,
+                       shading="flat", rasterized=True)
+    ax.set_title(f"{STYLE[s][2]}\n{int(NSPL[s].sum()):,} splittings", fontsize=8)
+    ax.set_xlabel(LABEL["lnInvDelta"])
+    ax.set_xlim(*XLIM)
+    ax.set_ylim(*YLIM)
+    ax.grid(False)
+np.atleast_1d(axes)[0].set_ylabel(LABEL["lnkt"])
+fig.colorbar(im, ax=axes, fraction=0.016, pad=0.012,
+             label=r"$\rho$  [splittings / jet / unit area]")
+fig.suptitle(f"the primary Lund plane   (view cropped to the populated region; binning is "
+             f"the full {geom.ln_invdelta_range} x {geom.ln_kt_range} window)",
+             x=0.07, y=1.03, ha="left")
+plt.show()
+
+
+def plane_ratio(num, den, n_den, n_num):
+    """Ratio map, gated on truth having enough entries to divide by.
+
+    A bin where TRUTH is empty but the prediction is not is a real disagreement (ratio ->
+    infinity), so it saturates the top of the scale rather than being blanked -- blanking
+    would hide invented emissions."""
+    out = np.full(num.shape, np.nan)
+    ok = (den > 0) & (n_den >= N_MIN)
+    out[ok] = num[ok] / den[ok]
+    out[(den <= 0) & (n_num >= N_MIN)] = RHI
+    return np.ma.masked_invalid(out)
+
+
+RPLANES, RCOUNT = {}, {}
+for _s in SERIES:
+    RPLANES[_s], RCOUNT[_s], RE = plane(_s, RATIO_NB)
+
+fig, axes = plt.subplots(2, len(MODELS), figsize=(3.2 * len(MODELS), 7.4), sharey=True)
+axes = np.atleast_2d(axes)
+for j, s in enumerate(MODELS):
+    # row 0: the RATE ratio -- multiplicity and placement multiplied together
+    R = plane_ratio(RPLANES[s], RPLANES["truth"], RCOUNT["truth"], RCOUNT[s])
+    im = axes[0, j].pcolormesh(RE[0], RE[1], R.T, cmap=DIV,
+                               norm=mpl.colors.LogNorm(vmin=RLO, vmax=RHI),
+                               shading="flat", rasterized=True)
+    axes[0, j].set_title(f"{STYLE[s][2]} / truth\nRATE", fontsize=8)
+    # row 1: the SHAPE ratio -- each plane normalised to unit total first
+    a, b = RPLANES[s], RPLANES["truth"]
+    sa, sb = a.sum(), b.sum()
+    Rs = plane_ratio(a / sa if sa > 0 else a, b / sb if sb > 0 else b,
+                     RCOUNT["truth"], RCOUNT[s])
+    axes[1, j].pcolormesh(RE[0], RE[1], Rs.T, cmap=DIV,
+                          norm=mpl.colors.LogNorm(vmin=RLO, vmax=RHI),
+                          shading="flat", rasterized=True)
+    axes[1, j].set_title(f"{STYLE[s][2]} / truth\nSHAPE (unit-normalised)", fontsize=8)
+    for r in (0, 1):
+        axes[r, j].set_xlim(*XLIM)
+        axes[r, j].set_ylim(*YLIM)
+        axes[r, j].grid(False)
+        axes[r, j].set_xlabel(LABEL["lnInvDelta"])
+for r in (0, 1):
+    axes[r, 0].set_ylabel(LABEL["lnkt"])
+fig.colorbar(im, ax=axes, fraction=0.016, pad=0.012, label="ratio to truth")
+fig.suptitle(f"where each estimate over- and under-populates the plane, on {RATIO_NB}x"
+             f"{RATIO_NB} bins\n(grey = agrees, blue = too few, red = too many, blank = "
+             f"fewer than {N_MIN} truth splittings)", x=0.06, y=1.04, ha="left")
+plt.show()
+
+print(f"{'series':<8}{'splittings':>12}{'per jet':>10}{'rate / truth':>14}"
+      f"{'mean |log ratio|, shape':>26}")
+_lt = RPLANES["truth"]
+for s in SERIES:
+    per = NSPL[s].sum() / max(len(W_JET), 1)
+    rate = NSPL[s].sum() / max(NSPL["truth"].sum(), 1)
+    a, b = RPLANES[s], _lt
+    ok = (a > 0) & (b > 0) & (RCOUNT["truth"] >= N_MIN)
+    sa, sb = a.sum(), b.sum()
+    shp = (float(np.mean(np.abs(np.log((a[ok] / sa) / (b[ok] / sb))))) if ok.any() and sa > 0
+           else float("nan"))
+    print(f"{s:<8}{int(NSPL[s].sum()):>12,}{per:>10.3f}"
+          + (f"{'--':>14}" if s == "truth" else f"{rate:>14.3f}")
+          + (f"{'--':>26}" if s == "truth" else f"{shp:>26.3f}"))
+print("\n`rate / truth` is the multiplicity ratio -- for `mode` it is dominated by the "
+      f"{EMPTY_TOP1.mean():.0%} of jets\nwhose best skeleton is EMPTY, which contribute no "
+      "splitting anywhere on the plane.")
+print("`mean |log ratio|, shape` is the placement error with the multiplicity divided out:")
+print("0 would mean the series populates the plane in exactly truth's proportions. Read the")
+print("two together -- a series can have the right rate in the wrong places, or the right")
+print("places at the wrong rate, and the two rows of the figure separate them.")
 ''')
 
 # ---------------------------------------------------------------------------

@@ -331,6 +331,15 @@ mpl.rcParams.update({
 # magnitude. Never a rainbow -- the eye reads hue as category, not as order.
 CMAP_DENS = mpl.colors.LinearSegmentedColormap.from_list(
     "h2p_seq", ["#fcfcfb", "#cfe3f7", "#9ec5f4", "#5b9be8", "#2a78d6", "#184f95", "#0d366b"])
+# The plane maps, inherited verbatim from lund_distribution_closure_v2.ipynb section 6 so
+# the Lund panels of the three notebooks are readable against each other.
+SEQ_BLUE = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+            "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
+CMAP = mpl.colors.LinearSegmentedColormap.from_list("h2p_blue", SEQ_BLUE)
+CMAP.set_bad(SURFACE)
+DIV = mpl.colors.LinearSegmentedColormap.from_list(
+    "h2p_div", ["#0d366b", "#2a78d6", "#9ec5f4", "#f0efec", "#f0a3a3", "#d03b3b", "#7a1f1f"])
+DIV.set_bad(SURFACE)
 
 LABEL = {"lnInvDelta": r"$\ln(1/\Delta R)$", "lnkt": r"$\ln(k_t/\mathrm{GeV})$",
          "lnz": r"$\ln z$", "psi": r"$\psi$"}
@@ -760,10 +769,16 @@ seed_everything(SEED)
 _t0 = time.perf_counter()
 
 REC = []
+DENS_SUM = None          # sum_j q_j(u,v) for node 0 -- the MEAN posterior over jets, which
+DENS_META = None         # section 6a compares against where the truth's node 0 actually is
 for i in range(N):
     REC.append(jet_windows(i))
+    _img, DENS_META = REC[-1]["nodes"][0]["_grid"]
+    _a = _img.cpu().double().numpy()
+    DENS_SUM = _a.copy() if DENS_SUM is None else DENS_SUM + _a
     REC[-1]["nodes"] = [{k: v for k, v in nd.items() if k != "_grid"}
                         for nd in REC[-1]["nodes"]]      # drop the tensors, keep the numbers
+DENS_MEAN = DENS_SUM / max(N, 1)
 print(f"windowed {N:,} jets in {(time.perf_counter() - _t0) / 60:.2f} min")
 
 HAS_T0 = np.array([r["n_truth"] >= 1 for r in REC], dtype=bool)
@@ -938,6 +953,176 @@ for t in range(MAX_NODES):
     print(f"   {t:>6}{int(have.sum()):>8}{mm.mean():>20.3f}{hh.mean():>15.3f}")
 print("   node 0 is unconditional given N>=1; the rest are conditioned on a prefix that is")
 print("   usually wrong, so their gap is a measure of the PREFIX, not of the window.")
+''')
+
+# ---------------------------------------------------------------------------
+md(r"""
+## 6a. The Lund plane: the *average posterior* against where the truth actually is
+
+§5 asked a per-jet question — does this jet's window contain this jet's truth. Here is the
+population version of the same check, and it needs no window at all.
+
+If the model is calibrated, then averaging its **first-splitting posterior** over jets
+
+$$\bar q(u,v) \;=\; \frac1{N}\sum_j q_\phi(u, v \mid x_j,\ N\ge1)$$
+
+must reproduce the **marginal density of the truth's first splitting** on the same jets. That is a
+statement about the whole Lund plane rather than about one region, and it can fail in ways coverage
+cannot see: a posterior that is too wide in $\ln k_t$ and too narrow in $\ln(1/\Delta R)$ can still
+contain the truth at the right rate.
+
+Three things make this panel worth more than a scatter of point estimates:
+
+- $\bar q$ is the **exact** average density, not a histogram of draws — no sampling noise at all,
+  at the pixel resolution of §4's image.
+- Every jet contributes its whole posterior, not one number, so the plane is populated even where
+  no point estimate ever lands.
+- The ratio is the same object the closure notebook plots for the *sampled* posterior
+  ([`lund_distribution_closure_v2.ipynb`](lund_distribution_closure_v2.ipynb) §6), on the same
+  binning and the same colour scale — so this is that check with the Monte-Carlo error removed.
+
+The point-estimate planes (the window centroid, plain RSD's own node 0) sit beside it. They are a
+different object — one point per jet against a density per jet — so they are shown as densities of
+*where the estimate landed*, and compared with truth in the same ratio.
+""")
+
+code(r'''
+U_LO, U_HI = geom.ln_invdelta_range
+V_LO, V_HI = geom.ln_kt_range
+NB = geom.n_bins                 # the model's own cells: the resolution it decides at
+# The RATIO is binned coarser, and it has to be. There is one entry per JET here (node 0),
+# not one per splitting, so at 30x30 a typical cell holds ~2 truth entries and a ratio
+# there is Poisson noise painted in saturated colour. RATIO_NB divides n_bins, so a ratio
+# cell is a whole number of model cells. Same reasoning as
+# lund_distribution_closure_v2.ipynb section 6, one step further because the statistics
+# are per-jet rather than per-splitting.
+RATIO_NB = 10
+RLO, RHI, N_MIN = 0.4, 2.5, 12
+sel = HAS_T0
+EDG = [np.linspace(U_LO, U_HI, NB + 1), np.linspace(V_LO, V_HI, NB + 1)]
+
+
+def cell_area_at(nb):
+    return (U_HI - U_LO) * (V_HI - V_LO) / nb ** 2
+
+
+def q_bar_at(nb):
+    """The EXACT mean posterior, rebinned from the pixel image to an nb x nb grid."""
+    k = DENS_MEAN.shape[0] // nb
+    m = DENS_MEAN.reshape(nb, k, nb, k).sum(axis=(1, 3)) * DENS_META["pixel_area"]
+    return m / cell_area_at(nb)
+
+
+def point_plane(points, weights, nb):
+    """Density of WHERE a point estimate landed, and the raw counts behind it."""
+    e = [np.linspace(U_LO, U_HI, nb + 1), np.linspace(V_LO, V_HI, nb + 1)]
+    a = np.asarray(points, dtype=float)
+    ok = np.isfinite(a).all(axis=1)
+    w = np.asarray(weights)[ok]
+    h = np.histogram2d(a[ok, 0], a[ok, 1], bins=e, weights=w)[0]
+    n = np.histogram2d(a[ok, 0], a[ok, 1], bins=e)[0]
+    return h / (w.sum() * cell_area_at(nb)), n
+
+
+Q_BAR = q_bar_at(NB)
+CELL_AREA = cell_area_at(NB)
+
+
+W_T0 = np.array([r["weight"] for r in REC if r["n_truth"] >= 1])
+TRUTH0 = np.array([r["truth"][0, :2] for r in REC if r["n_truth"] >= 1])
+WIN0 = np.array([r["nodes"][0]["centroid"][float(R_STAR)] for r in REC if r["n_truth"] >= 1])
+RSD0 = np.array([(r["rsd"][0, :2] if len(r["rsd"]) else [np.nan, np.nan])
+                 for r in REC if r["n_truth"] >= 1])
+P_TRUTH, N_TRUTH = point_plane(TRUTH0, W_T0, NB)
+P_WIN, N_WIN = point_plane(WIN0, W_T0, NB)
+P_RSD, N_RSD = point_plane(RSD0, W_T0, NB)
+# ...and the same four planes at the coarser ratio binning
+RB = RATIO_NB
+REDG = [np.linspace(U_LO, U_HI, RB + 1), np.linspace(V_LO, V_HI, RB + 1)]
+RQ = q_bar_at(RB)
+RT, RTN = point_plane(TRUTH0, W_T0, RB)
+RW, RWN = point_plane(WIN0, W_T0, RB)
+RR, RRN = point_plane(RSD0, W_T0, RB)
+
+PANELS = [(r"$\bar q$: the mean POSTERIOR (exact)", Q_BAR, N_TRUTH),
+          ("truth, node 0", P_TRUTH, N_TRUTH),
+          (rf"window centroid, $r={R_STAR:g}$", P_WIN, N_WIN),
+          ("plain RSD, node 0", P_RSD, N_RSD)]
+_pop = np.concatenate([P[P > 0] for _l, P, _n in PANELS if (P > 0).any()])
+vmax = float(np.percentile(_pop, 99))
+_hit = np.sum([P for _l, P, _n in PANELS], axis=0) > 0
+_iu, _iv = np.flatnonzero(_hit.any(axis=1)), np.flatnonzero(_hit.any(axis=0))
+XLIM = (EDG[0][max(_iu[0] - 1, 0)], EDG[0][min(_iu[-1] + 2, NB)])
+YLIM = (EDG[1][max(_iv[0] - 1, 0)], EDG[1][min(_iv[-1] + 2, NB)])
+
+fig, axes = plt.subplots(1, 4, figsize=(15.6, 3.9), sharey=True)
+for ax, (lab, P, _n) in zip(axes, PANELS):
+    im = ax.pcolormesh(EDG[0], EDG[1], np.ma.masked_where(P <= 0, P).T, cmap=CMAP,
+                       vmin=0.0, vmax=vmax, shading="flat", rasterized=True)
+    ax.set_title(lab, fontsize=8)
+    ax.set_xlabel(LABEL["lnInvDelta"])
+    ax.set_xlim(*XLIM)
+    ax.set_ylim(*YLIM)
+    ax.grid(False)
+axes[0].set_ylabel(LABEL["lnkt"])
+fig.colorbar(im, ax=axes, fraction=0.016, pad=0.012, label=r"density [per unit area]")
+fig.suptitle(f"the first splitting on the Lund plane, {int(sel.sum()):,} jets   "
+             f"(view cropped to the populated region)", x=0.06, y=1.03, ha="left")
+plt.show()
+
+
+def plane_ratio(num, den, n_den, n_num):
+    """Gated on truth having enough entries to divide by; a bin where truth is empty but
+    the prediction is not saturates the top rather than being blanked -- blanking would
+    hide invented emissions."""
+    out = np.full(num.shape, np.nan)
+    ok = (den > 0) & (n_den >= N_MIN)
+    out[ok] = num[ok] / den[ok]
+    out[(den <= 0) & (n_num >= N_MIN)] = RHI
+    return np.ma.masked_invalid(out)
+
+
+RPANELS = [(PANELS[0][0], RQ, RTN), (PANELS[2][0], RW, RWN), (PANELS[3][0], RR, RRN)]
+fig, axes = plt.subplots(1, 3, figsize=(12.0, 3.9), sharey=True)
+for ax, (lab, P, n) in zip(axes, RPANELS):
+    R = plane_ratio(P, RT, RTN, n)
+    im = ax.pcolormesh(REDG[0], REDG[1], R.T, cmap=DIV,
+                       norm=mpl.colors.LogNorm(vmin=RLO, vmax=RHI), shading="flat",
+                       rasterized=True)
+    ax.set_title(f"{lab}  /  truth", fontsize=8)
+    ax.set_xlabel(LABEL["lnInvDelta"])
+    ax.set_xlim(*XLIM)
+    ax.set_ylim(*YLIM)
+    ax.grid(False)
+axes[0].set_ylabel(LABEL["lnkt"])
+fig.colorbar(im, ax=axes, fraction=0.016, pad=0.012, label="ratio to truth")
+fig.suptitle(f"ratio to the truth's own node-0 density, on {RB}x{RB} bins   "
+             f"(grey = agrees, blue = too few, red = too many, blank = < {N_MIN} truth "
+             f"entries)", x=0.05, y=1.03, ha="left")
+plt.show()
+
+ok = (RT > 0) & (RTN >= N_MIN)
+_names = ["q_bar: the mean POSTERIOR (exact)", f"window centroid, r={R_STAR:g}",
+          "plain RSD, node 0"]
+print(f"{'plane':<34}{'total':>10}{'mean |log ratio to truth|':>28}{'bins':>7}")
+for lab, P, _n in zip(_names, (RQ, RW, RR), (RTN, RWN, RRN)):
+    lr = np.abs(np.log(P[ok] / RT[ok])) if ok.any() else np.array([np.nan])
+    print(f"{lab:<34}{float(P.sum() * cell_area_at(RB)):>10.3f}"
+          f"{float(lr.mean()):>28.3f}{int(ok.sum()):>7}")
+print(f"{'truth, node 0 (the reference)':<34}"
+      f"{float(RT.sum() * cell_area_at(RB)):>10.3f}{0.0:>28.3f}{int(ok.sum()):>7}")
+print(f"\n(the ratio is binned {RB}x{RB} rather than {NB}x{NB}: one entry per JET means a "
+      f"model cell holds\n~{float(RTN.sum()) / NB ** 2:.1f} truth entries, where a ratio is "
+      f"Poisson noise rather than a measurement.)")
+print("\n`total` is the integrated density: 1 for the mean posterior and for any series")
+print("with exactly one entry per jet, so a departure there is a binning-window effect")
+print("(mass outside the plotted square), not a normalisation error.")
+print("\nThe first row is the one with no Monte-Carlo error in it: q_bar is the EXACT")
+print("average of the per-jet posteriors, so its ratio to truth is a clean marginal")
+print("calibration map for the first splitting. The point-estimate rows are a different")
+print("object -- one point per jet rather than a density per jet -- and a point estimate")
+print("is EXPECTED to be narrower than the distribution it summarises, so blue cores and")
+print("red tails there are the shrinkage of a summary, not a miscalibration.")
 ''')
 
 # ---------------------------------------------------------------------------
