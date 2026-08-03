@@ -11,6 +11,17 @@ logically independent:
 A model can be sharply dominant and wrong, or diffuse and centred on the truth; nothing
 below ever mixes the two into one number.
 
+**Question 1 is resolution-relative and question 2 is not.** A cell's probability is
+`~ density x area`, so `M_1` — and with it `F(m)` — scales with `n_bins`, which is a
+discretization choice and not a physics one (`inference/mode_audit.py`'s module docstring
+derives this). Every `F(m)` here is therefore a SAME-GEOMETRY, same-checkpoint comparison
+and never a grid-free claim that a dominant parton skeleton exists. The `resolution`
+block is the companion that IS grid-free: the Lund-plane AREA the first splitting's
+posterior occupies (`node_hpd_area`), in physical units, beside the width the coordinate
+head claims for itself. Read that block before quoting a mode mass — where the head is
+truncation-saturated, a small `M_1` says the grid is finer than the model's own
+resolution, not that the posterior is fragmented.
+
 This is a DESCRIPTIVE audit. Nothing is adopted or rejected on these numbers, so there
 are no pass/fail gates — but the quoted quantities and strata are pre-registered in the
 plan's §7 before the run, and the two VALIDITY checks (mass accounting, and the
@@ -41,6 +52,7 @@ from ..features import node_raw
 from ..inference.mode_audit import (
     entropy_from_draws,
     enumerate_skeletons,
+    node_hpd_area,
     skeleton_log_prob,
     skeleton_log_probs,
 )
@@ -115,6 +127,12 @@ def _pct(values, q) -> float:
     return float(np.percentile(v, q)) if v.size else float("nan")
 
 
+def _mean_of(records, key) -> float:
+    v = np.array([r.get(key, float("nan")) for r in records], dtype=float)
+    v = v[np.isfinite(v)]
+    return float(v.mean()) if v.size else float("nan")
+
+
 def _fraction(mask, label="") -> dict:
     """A proportion with its 95% Wilson interval (Brown, Cai & DasGupta, *Statist.
     Sci.* **16** (2001) 101) — the honest error bar on a few hundred jets, where the
@@ -159,7 +177,7 @@ def _stratum_summary(rec_idx, records, thresholds) -> dict:
 
 @torch.inference_mode()
 def audit_jet(model, item, jet, geometry, device, *, audit, draws=None, groom=None,
-              index=0, store_top=STORE_TOP):
+              index=0, store_top=STORE_TOP, hpd=True):
     """ONE jet's audit: `(record, SkeletonEnumeration)`.
 
     Split out of the runner so a notebook that already holds the jet's posterior draws
@@ -167,9 +185,12 @@ def audit_jet(model, item, jet, geometry, device, *, audit, draws=None, groom=No
     SAME record the CLI writes, rather than a second definition of the same numbers —
     the failure mode `docs/PLAN_prod_test_v0.md` §7 records for two closure populations.
 
-    `draws` given -> the entropy estimate reuses them at zero extra sampling cost; None
-    leaves `H_hat` NaN rather than quietly starting a sampling pass the caller did not
-    budget for.
+    `draws` given -> the entropy estimate AND the length marginal `q(N|x)` reuse them at
+    zero extra sampling cost; None leaves both unset rather than quietly starting a
+    sampling pass the caller did not budget for.
+
+    `hpd=True` adds the grid-free positional region (`node_hpd_area`) — the quantity that
+    survives a change of `n_bins`, and the one to read before quoting `M_1`.
     """
     groom = grooming_from_jets([jet]) if groom is None else groom
     search_kw = {k: audit[k] for k in
@@ -193,11 +214,22 @@ def audit_jet(model, item, jet, geometry, device, *, audit, draws=None, groom=No
     q0_model = math.exp(float(model.describe_cells(xf, nx, []).logprob))
 
     ent = {"H_hat": float("nan"), "eff_skeletons": float("nan"), "n_draws": 0}
+    q_n = [float("nan")] * 3
     if draws:
         ent = entropy_from_draws(
             skeleton_log_probs(model, [list(d) for d in draws], xf, nx, spec=spec)
         )
+        # The LENGTH belief, kept beside the skeleton masses because it is the grid-free
+        # half of the same factorization: q(S|x) = q(N|x) q(cells|N,x), and only the
+        # second factor carries the cell-area scaling. "Is there a splitting at all" is
+        # answerable without reference to any binning; "which cell" is not.
+        pmf = np.asarray(model.length_pmf(xf, nx, mults=[len(d) for d in draws]),
+                         dtype=float)
+        q_n = [float(pmf[0]) if pmf.size else float("nan"),
+               float(pmf[1]) if pmf.size > 1 else 0.0,
+               float(pmf[2:].sum()) if pmf.size > 2 else 0.0]
 
+    region = node_hpd_area(model, xf, nx, spec=spec) if hpd else None
     strata = jet_strata(jet, geometry, z_cut=groom["z_cut"], beta=groom["beta"],
                         kt_floor=groom["kt_floor"])
     masses = enum.masses
@@ -226,10 +258,25 @@ def audit_jet(model, item, jet, geometry, device, *, audit, draws=None, groom=No
         "top1_is_truth": bool(rank == 1),
         "n_truth": ny,
         "q0_enum": float(q0_enum), "q0_model": float(q0_model),
+        # the grid-FREE half of q(S|x) = q(N|x) q(cells|N,x)
+        "qN_0": q_n[0], "qN_1": q_n[1], "qN_ge2": q_n[2],
         "weight": float(jet.get("weight", 1.0)),
         "kind": spec.kind,
         **strata,
     }
+    if region is not None:
+        # The grid-free companion to M_1, flattened into the record so a stratified table
+        # can read it the same way it reads everything else.
+        record.update({
+            "hpd_area_50": region["area"]["0.5"], "hpd_area_90": region["area"]["0.9"],
+            "hpd_sqrt_50": region["sqrt_area"]["0.5"],
+            "hpd_cells_50": region["n_cells_equivalent"]["0.5"],
+            "hpd_over_sigma_box_50": region["area_over_sigma_box"]["0.5"],
+            "sigma_u": region["sigma_u"], "sigma_v": region["sigma_v"],
+            "truncation_saturated": region["truncation_saturated"],
+            "modal_cell_mass": region["modal_cell_mass"],
+            "hpd_quadrature": region["mass_quadrature"],
+        })
     return record, enum
 
 
@@ -328,6 +375,36 @@ def summarise_mode_audit(records, *, thresholds=(0.3, 0.5, 0.7), audit=None, kin
             [i for i in idx_all if i not in set(empty_truth)], records, thresholds),
     }
 
+    # The resolution block: what survives a change of n_bins. `M_1` does not, so nothing
+    # in `overall` / `by_region` / `by_class` above is comparable across geometries and
+    # these are the numbers that are.
+    def _med(key):
+        v = np.array([r.get(key, float("nan")) for r in records], dtype=float)
+        v = v[np.isfinite(v)]
+        return float(np.median(v)) if v.size else float("nan")
+
+    sat = [bool(r.get("truncation_saturated", False)) for r in records
+           if "truncation_saturated" in r]
+    resolution = {
+        "note": "the smallest Lund-plane region holding a fraction of the FIRST "
+                "splitting's positional posterior, in ln(1/DeltaR) x ln(kt) units. "
+                "Unlike M_1 this has a limit as n_bins refines, so it is comparable "
+                "across geometries and families.",
+        "hpd_area_50": _med("hpd_area_50"), "hpd_area_90": _med("hpd_area_90"),
+        "hpd_sqrt_50": _med("hpd_sqrt_50"),
+        "hpd_cells_50": _med("hpd_cells_50"),
+        "hpd_over_sigma_box_50": _med("hpd_over_sigma_box_50"),
+        "sigma_u": _med("sigma_u"), "sigma_v": _med("sigma_v"),
+        "modal_cell_mass": _med("modal_cell_mass"),
+        # A head whose sigma exceeds the half-cell on both axes cannot express its own
+        # width within a cell, so it carries that width in the CELL distribution instead.
+        # Where this is high, a small M_1 says the grid is finer than the model's
+        # resolution -- it is not evidence that the posterior is fragmented.
+        "frac_truncation_saturated": (float(np.mean(sat)) if sat else float("nan")),
+        "q_N_mean": {"0": _mean_of(records, "qN_0"), "1": _mean_of(records, "qN_1"),
+                     ">=2": _mean_of(records, "qN_ge2")},
+    }
+
     ent = np.array([r["H_hat"] for r in records], dtype=float)
     eff = np.array([r["eff_skeletons"] for r in records], dtype=float)
     ent_lo = np.array([r["H_enumerated_lower"] for r in records], dtype=float)
@@ -341,6 +418,10 @@ def summarise_mode_audit(records, *, thresholds=(0.3, 0.5, 0.7), audit=None, kin
         "grooming": dict(groom or {}),
         "K_entropy_draws": int(K),
         "overall": _stratum_summary(idx_all, records, thresholds),
+        "geometry_dependence": "M_1 and every F(m) below scale with the cell area, so "
+                               "they are same-geometry, same-checkpoint comparisons and "
+                               "not grid-free claims. See `resolution`.",
+        "resolution": resolution,
         "by_region": by_region,
         "by_class": by_class,
         # §7.3 — predicted signs +, +, +, -. Quoted as correlations, not as a fit: the
@@ -384,6 +465,30 @@ def summarise_mode_audit(records, *, thresholds=(0.3, 0.5, 0.7), audit=None, kin
     return out
 
 
+def _print_resolution(out) -> None:
+    """The grid-free block. Printed between the two questions rather than at the end,
+    because it is what tells the reader how to read the F(m) line above it."""
+    r = out.get("resolution") or {}
+    if not np.isfinite(r.get("hpd_area_50", float("nan"))):
+        return
+    q = r.get("q_N_mean", {})
+    print("    grid-FREE companion (first splitting's position, medians):")
+    print(f"      50% region {r['hpd_area_50']:.3f} ln^2  = {r['hpd_sqrt_50']:.2f} ln "
+          f"across  = {r['hpd_cells_50']:.0f} cells   90% region "
+          f"{r['hpd_area_90']:.3f} ln^2")
+    print(f"      head's own width sigma_u {r['sigma_u']:.3f} sigma_v {r['sigma_v']:.3f}"
+          f"  ->  the region is {r['hpd_over_sigma_box_50']:.1f}x its +-1sigma box")
+    if np.isfinite(r.get("frac_truncation_saturated", float("nan"))):
+        sat = r["frac_truncation_saturated"]
+        print(f"      truncation-saturated (sigma > half-cell on both axes) for "
+              f"{sat:.0%} of jets" + ("   <- the grid is FINER than the model's own "
+                                      "resolution, so a small M_1 above is a statement "
+                                      "about n_bins" if sat > 0.5 else ""))
+    if np.isfinite(q.get("0", float("nan"))):
+        print(f"      length belief (grid-free): q(N=0) {q['0']:.3f}   q(N=1) "
+              f"{q['1']:.3f}   q(N>=2) {q['>=2']:.3f}")
+
+
 def _print_summary(out) -> None:
     o = out["overall"]
     print(f"\nmode-mass audit ({out['n_jets']} jets, family kind {out['family_kind']!r}, "
@@ -396,6 +501,9 @@ def _print_summary(out) -> None:
         lo, hi = f["wilson95"]
         print(f"    F({t}) = frac(M_1 >= {t}) = {f['frac']:.3f}  "
               f"[{lo:.3f}, {hi:.3f}]   ({f['k']}/{f['n']} jets)")
+    print("    ^ SAME-GEOMETRY numbers: a cell's mass is ~ density x area, so these "
+          "scale with n_bins.")
+    _print_resolution(out)
     print("    dominance and correctness are INDEPENDENT — the next block is the "
           "second question:")
     print(f"    truth = top-1 {o['truth_is_top1']['frac']:.3f}   in top-3 "

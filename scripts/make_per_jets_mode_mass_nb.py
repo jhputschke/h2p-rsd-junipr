@@ -57,14 +57,26 @@ sequence. Two facts make this notebook possible, and both are proved in
 
 So $M_1 > \tfrac12$ is a *certificate* of dominance, not evidence for it.
 
-It answers three questions, in this order, and **never merges the first two**:
+**One thing $M_1$ is not, and the notebook says so at every turn: grid-free.** A cell's
+probability is $\approx$ density $\times$ area, so every $N\ge1$ skeleton's mass scales with the
+cell area while $q(N{=}0\mid x)$ — the one skeleton that references no cell — does not. Refine
+`n_bins` and both the *level* of $F(m)$ and the *identity* of the argmax change with nothing about
+the model changing. Exactness is not invariance. So $F(m)$ is quoted here as the **same-geometry,
+same-checkpoint** comparison it validly is, and §6a carries the grid-free companion: the
+Lund-plane **area** the posterior actually occupies, in physical units, against the width the
+coordinate head claims for itself.
+
+It answers four questions, in this order, and **never merges the first two**:
 
 1. **Does a dominant skeleton exist?** — the $M_1$ distribution and
-   $F(m) = \mathrm{frac}(M_1 \ge m)$, overall and per stratum (§6).
+   $F(m) = \mathrm{frac}(M_1 \ge m)$, overall and per stratum (§6), with §6a's
+   resolution-free reading of the same posterior beside it.
 2. **Is it the true one?** — the truth skeleton's exact mass and rank on the same jets (§7).
    Dominance and correctness are logically independent: a model can be sharply dominant and
    wrong, or diffuse and centred on the truth.
-3. **Does dominance buy a better point estimate?** — the per-splitting residual
+3. **How big is the region the posterior actually occupies?** — the grid-free question §6a
+   asks, in $\ln(1/\Delta R)\times\ln k_t$ units, against the coordinate head's own width.
+4. **Does dominance buy a better point estimate?** — the per-splitting residual
    $\Delta = \text{estimate} - \text{truth}$ of `per_jets_estimation.ipynb`, now with the
    **mode-skeleton** estimate beside MAP and MBR, and split by whether the jet *has* a dominant
    skeleton (§9–§10).
@@ -1100,6 +1112,9 @@ Two things to keep straight while reading it.
 - **The `certified` rate travels with every number.** A jet that exhausted the expansion budget
   before $k$ completions carries `certified = False`; its $M_1$ is still a valid lower bound, but its
   *ranking* claim is not, so the rate is printed beside every fraction rather than in a footnote.
+- **Every number in this section is a *same-geometry* number.** A cell's mass is $\approx$ density
+  $\times$ area, so $F(m)$ scales with `n_bins`; it compares checkpoints at one geometry and says
+  nothing grid-free. §6a is the companion that does — read it before quoting anything here.
 
 The strata are the axes on which $\sigma = \sigma_0 + \Lambda_{\rm eff}/k_t$ predicts the
 dominant/fragmented mixture to separate — all three read off $x$, so a data analysis can make the
@@ -1123,6 +1138,19 @@ TOP1_TRUE = np.array([a["top1_is_truth"] for a in AUDITS], dtype=bool)
 H_HAT = np.array([a["H_hat"] for a in AUDITS])
 EFF = np.array([a["eff_skeletons"] for a in AUDITS])
 DOMINANT = M1 >= DOMINANT_M
+# The grid-FREE half of q(S|x) = q(N|x) q(cells|N,x). Only the second factor carries the
+# cell-area scaling, so these three numbers mean the same thing at any n_bins.
+QN0 = np.array([a.get("qN_0", np.nan) for a in AUDITS])
+QN1 = np.array([a.get("qN_1", np.nan) for a in AUDITS])
+QN2 = np.array([a.get("qN_ge2", np.nan) for a in AUDITS])
+# ...and section 6a's region, per jet.
+HPD50 = np.array([a.get("hpd_area_50", np.nan) for a in AUDITS])
+HPD90 = np.array([a.get("hpd_area_90", np.nan) for a in AUDITS])
+HPD_CELLS = np.array([a.get("hpd_cells_50", np.nan) for a in AUDITS])
+HPD_SIG = np.array([a.get("hpd_over_sigma_box_50", np.nan) for a in AUDITS])
+SIG_U = np.array([a.get("sigma_u", np.nan) for a in AUDITS])
+SIG_V = np.array([a.get("sigma_v", np.nan) for a in AUDITS])
+SATURATED = np.array([bool(a.get("truncation_saturated", False)) for a in AUDITS])
 # The one candidate skeleton that is special: the EMPTY tree. "The posterior is sure
 # there is nothing there" and "the posterior is sure WHICH splitting is there" are both
 # dominance, and they are different physical claims -- so they are separated everywhere
@@ -1250,9 +1278,19 @@ print(f"\nthe EMPTY skeleton is the posterior's mode for {EMPTY_TOP1.mean():.1%}
       f"[{_lo:.3f}, {_hi:.3f}]\n  against a truth empty rate of {EMPTY_TRUTH.mean():.1%}; "
       f"of the jets whose mode is empty, "
       f"{(EMPTY_TRUTH & EMPTY_TOP1).sum() / max(EMPTY_TOP1.sum(), 1):.1%} really are.")
-print(f"  Two consequences, and both matter more than the pooled F(m) above:")
-print(f"    - 'the posterior is sure there is NOTHING there' and 'the posterior is sure "
-      f"WHICH splitting\n      is there' are different claims. On the "
+print(f"  Read that as a statement about the GRID, not about emptiness. The empty "
+      f"skeleton is the only\n  configuration the cell grid does not slice: its mass is "
+      f"cell-free, while every N>=1 skeleton's\n  is ~ density x area. Section 6a "
+      f"measures the slicing directly.")
+print(f"    - the model does NOT believe the jet is empty. Its own length belief here is "
+      f"q(N=0) = {np.nanmean(QN0):.3f}\n      against q(N>=1) = "
+      f"{1.0 - np.nanmean(QN0):.3f}"
+      + (f"; q(N=1) > q(N=0) for {np.nanmean(QN1 > QN0):.1%} of jets."
+         if np.isfinite(QN1).any() else ".")
+      + " That factor of q(S|x) = q(N|x) q(cells|N,x)\n      is grid-free, and it says "
+        "the opposite of what the mode does.")
+print(f"    - 'the posterior concentrates on ONE configuration' and 'the posterior "
+      f"concentrates on a\n      REGION' are different claims. On the "
       f"{int((~EMPTY_TOP1).sum()):,} jets whose mode IS a splitting, "
       f"F({DOMINANT_M:g}) = {(M1[~EMPTY_TOP1] >= DOMINANT_M).mean():.3f} "
       f"and median M_1 = {np.median(M1[~EMPTY_TOP1]):.3f};\n      on the rest, "
@@ -1260,6 +1298,113 @@ print(f"    - 'the posterior is sure there is NOTHING there' and 'the posterior 
       f"{np.median(M1[EMPTY_TOP1]):.3f}. The strata table above splits them.")
 print(f"    - the mode SERIES of section 9 contributes no splitting on those jets, so its "
       f"residual is\n      measured on the complement -- selected, not typical.")
+''')
+
+# ---------------------------------------------------------------------------
+md(r"""
+### 6a. The same posterior, measured without the grid
+
+§6 asked *how much mass sits on one cell*. That is $\approx$ density $\times$ cell area, so it is
+as much a statement about `n_bins` as about the model. Here is the grid-free question about the
+same object: **how large a region does the first splitting's posterior actually occupy?**
+
+The density over the first node's position is the mixture
+$\sum_c P_{\rm split}(c\mid h_0,e)\,\mathrm{TN}(du\mid c)\,\mathrm{TN}(dv\mid c)$, and every
+component is supported on *its own cell and nowhere else* — the coordinate head's truncated
+normals are bounded by construction. So the mixture is block-wise, a sub-grid inside each cell
+evaluates it exactly, and the $\alpha$-highest-density region is read off by sorting. The area
+comes out in $\ln(1/\Delta R)\times\ln k_t$ units and has a limit as the grid refines.
+
+Three numbers make it readable:
+
+- $\sqrt{\text{area}}$ — an effective **linear** scale, directly comparable to the cell width, to
+  the residual widths of §9, and to the non-perturbative smearing $\sigma_0+\Lambda_{\rm eff}/k_t$.
+- **area / $\pm1\sigma$ box** of the coordinate head at the modal cell — is the spread wider than
+  the width the model claims for itself?
+- **truncation saturation**: is the head's $\sigma$ *larger than half a cell*? If it is, the
+  within-cell density is nearly uniform, the head cannot express its own width inside a cell, and
+  the model is carrying its coordinate uncertainty in the **cell distribution** instead. In that
+  regime a small $M_1$ says *the grid is finer than the model's resolution* — it is not evidence
+  that the posterior is fragmented, and §6's headline must not be read as if it were.
+""")
+
+code(r'''
+fig, axes = plt.subplots(1, 3, figsize=(14.4, 4.3))
+
+_ok = np.isfinite(HPD50)
+if not _ok.any():
+    print("no positional region available -- this family has no continuous coordinate "
+          "head, so section 6a does not apply")
+else:
+    # (a) the region, as a linear scale, against the two yardsticks that matter
+    _lin = np.sqrt(HPD50[_ok])
+    axes[0].hist(_lin, bins=40, color=C_MODE, alpha=0.6, edgecolor=C_MODE, linewidth=0.8,
+                 label=f"50% region, median {np.median(_lin):.2f}")
+    axes[0].axvline(2 * geom.half_u, color=INK, ls=":", lw=1.4,
+                    label=f"one cell = {2 * geom.half_u:.2f}")
+    axes[0].axvline(np.nanmedian(2 * SIG_U), color=C_MAP, ls="--", lw=1.4,
+                    label=rf"head's $2\sigma_u$ = {np.nanmedian(2 * SIG_U):.2f}")
+    finish(axes[0], xlabel=r"$\sqrt{\mathrm{area}}$   [ln units]", ylabel="jets",
+           title="(a) how wide the first splitting's posterior is", legend=True,
+           loc="upper right")
+
+    # (b) how many CELLS that region spans -- the bridge between 6 and 6a
+    axes[1].hist(HPD_CELLS[_ok], bins=40, color=C_MAP, alpha=0.6, edgecolor=C_MAP,
+                 linewidth=0.8)
+    axes[1].axvline(1.0, color=INK, ls=":", lw=1.4, label="one cell")
+    axes[1].axvline(np.median(HPD_CELLS[_ok]), color=C_MODE, lw=1.6,
+                    label=f"median {np.median(HPD_CELLS[_ok]):.0f} cells")
+    axes[1].set_xscale("log")
+    finish(axes[1], xlabel="cells spanned by the 50% region", ylabel="jets",
+           title=f"(b) the grid slices it into this many pieces   "
+                 f"(of {geom.n_cells})", legend=True, loc="upper right")
+
+    # (c) M_1 against that count -- the claim that F(m) is a resolution readout
+    axes[2].scatter(HPD_CELLS[_ok], M1[_ok], s=7, color=C_MODE, alpha=0.3, linewidths=0)
+    _x = np.logspace(np.log10(max(np.nanmin(HPD_CELLS[_ok]), 0.5)),
+                     np.log10(np.nanmax(HPD_CELLS[_ok])), 50)
+    axes[2].plot(_x, 1.0 / _x, color=INK, lw=1.4, ls="--",
+                 label=r"$M_1 \propto 1/\mathrm{cells}$")
+    axes[2].set_xscale("log")
+    axes[2].set_yscale("log")
+    finish(axes[2], xlabel="cells spanned by the 50% region", ylabel=r"$M_1$",
+           title="(c) the mode mass IS a resolution readout", legend=True,
+           loc="lower left")
+
+fig.suptitle(r"6a. the same posterior with the grid divided out — these numbers survive "
+             r"a change of $n_\mathrm{bins}$", x=0.006, y=1.005, ha="left")
+fig.tight_layout()
+plt.show()
+
+if _ok.any():
+    print(f"{'quantity':<44}{'median':>12}{'p90':>12}")
+    for lab, v in (("50% region area  [ln^2]", HPD50),
+                   ("  its linear scale sqrt(area)  [ln]", np.sqrt(HPD50)),
+                   ("90% region area  [ln^2]", HPD90),
+                   ("cells spanned by the 50% region", HPD_CELLS),
+                   ("area / the head's own +-1 sigma box", HPD_SIG)):
+        f = v[np.isfinite(v)]
+        print(f"{lab:<44}{np.median(f):>12.3f}{np.percentile(f, 90):>12.3f}")
+    print(f"{'head width sigma_u at the modal cell':<44}"
+          f"{np.nanmedian(SIG_U):>12.3f}{np.nanpercentile(SIG_U, 90):>12.3f}")
+    print(f"{'head width sigma_v at the modal cell':<44}"
+          f"{np.nanmedian(SIG_V):>12.3f}{np.nanpercentile(SIG_V, 90):>12.3f}")
+    print(f"\ncell width {2 * geom.half_u:.3f} x {2 * geom.half_v:.3f}, "
+          f"half-cell {geom.half_u:.3f}")
+    print(f"TRUNCATION-SATURATED (sigma > half-cell on BOTH axes) for "
+          f"{SATURATED.mean():.1%} of jets.")
+    if SATURATED.mean() > 0.5:
+        print("  -> the head wants to be wider than a cell and the truncation forbids it,")
+        print("     so the within-cell density is nearly uniform and the model carries its")
+        print("     coordinate uncertainty in the CELL distribution. At this geometry the")
+        print("     grid is FINER than the model's own resolution, and section 6's small")
+        print("     M_1 is that fact, not a fragmented posterior.")
+    print(f"\nthe grid-free length belief, for comparison: q(N=0) = {np.nanmean(QN0):.3f}   "
+          f"q(N=1) = {np.nanmean(QN1):.3f}   q(N>=2) = {np.nanmean(QN2):.3f}")
+    print(f"  q(N=1|x) > q(N=0|x) for {np.nanmean(QN1 > QN0):.1%} of jets -- the model "
+          f"believes there IS a splitting;")
+    print(f"  it just spreads that belief over ~{np.median(HPD_CELLS[_ok]):.0f} cells, "
+          f"which is why no single skeleton holds much.")
 ''')
 
 # ---------------------------------------------------------------------------
@@ -1965,15 +2110,28 @@ md(r"""
   cost is the claim that nothing bigger was missed — which is why `certified` sits beside every
   fraction, why an uncertified $M_1$ is reported as a lower bound, and why the pre-registered
   dominance mark is $1/2$: above it, the claim is a proof.
+- **Exact is not invariant, and this is the one that will mislead you.** $M_1$ is a probability of
+  a *cell*, hence $\approx$ density $\times$ area: refine `n_bins` and every $N\ge1$ mass falls
+  while $q(N{=}0\mid x)$ does not, so both the level of $F(m)$ and which skeleton wins are set by
+  the grid. A skeleton bundles two different things — the multiplicity and the *order*, which are
+  genuinely discrete and grid-free, and the cell labels, which are a discretization of a continuum.
+  Dominance is a well-posed probability question only for the first. §6a measures the second the way
+  it has to be measured: as an **area**. On this checkpoint the first splitting's 50% region spans
+  ~17 cells, the coordinate head is truncation-saturated for ~90% of jets, and $M_1$ tracks
+  $1/\text{cells}$ — so §6's small numbers are the grid talking, not a fragmented posterior.
 - **Dominance is not correctness.** §6 and §7 answer different questions and are never combined
   except in the explicit four-way cross. A model that is *dominant and wrong* is worse than one that
   is diffuse; only that panel distinguishes them.
-- **The empty skeleton is a real answer, not a failure mode.** It carries mass
-  $P_{\rm cont}(\mathrm{stop}\mid h_0,e)$ like any other, and on this sample the parton truth really
-  is empty for ~17% of jets. Neither the MAP nor MBR can produce it under the default decode
-  (the argmax over $n$ lands at 0 essentially never; MBR's imbalance term prices an empty cloud at
-  near-maximal risk) — so §7's empty-truth line is measuring something the point-estimate table
-  structurally cannot.
+- **The empty skeleton is a real answer, not a failure mode — and its win is a grid effect.** It
+  carries mass $P_{\rm cont}(\mathrm{stop}\mid h_0,e)$ like any other, and on this sample the parton
+  truth really is empty for ~17% of jets. Neither the MAP nor MBR can produce it under the default
+  decode (the argmax over $n$ lands at 0 essentially never; MBR's imbalance term prices an empty
+  cloud at near-maximal risk) — so §7's empty-truth line measures something the point-estimate table
+  structurally cannot. But it is *also* the one configuration the cell grid does not slice, which is
+  why it wins the argmax far more often than the model believes the jet is empty: §6a prints
+  $q(N{=}1\mid x) > q(N{=}0\mid x)$ for the large majority of jets. "The mode is empty" and "the
+  posterior thinks there is nothing there" are not the same statement, and only the second would be
+  a claim about the physics.
 - **The coordinates never concentrate, and §4 says so on every line.** Dominance is a statement
   about the discrete skeleton only. The non-perturbative width $\sigma_0 + \Lambda_{\rm eff}/k_t$ is
   irreducible, so a mode-skeleton node is quoted as value $\pm$ the head's own width, with $\kappa$

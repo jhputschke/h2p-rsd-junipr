@@ -279,14 +279,35 @@ Two consequences are built into the code:
   is accounted in closed form, $M_1>\tfrac12$ is a **certificate** of dominance rather than
   evidence for it.
 
-  Two things follow that the write-up must not blur. **Dominance and correctness are
+  Three things follow that the write-up must not blur. **Dominance and correctness are
   logically independent**: a model can put 90% of its mass on one skeleton that is not the
   truth, or be diffuse and centred on it, so $F(m)=\mathrm{frac}(M_1\ge m)$ and
   $\mathrm{frac}(S_{\rm truth}=S_{\rm top1})$ are reported in separate tables and only ever
-  crossed explicitly. And the **empty skeleton is a first-class row** with mass
+  crossed explicitly. The **empty skeleton is a first-class row** with mass
   $P_{\rm cont}(\text{stop}\mid h_0,e)$ — the same $q(0\mid x)$ of the empty-tree analysis
   — so a "dominant mode" that is the empty tree is a different physical statement from a
-  dominant *splitting*, and the two are separated everywhere. The audit is descriptive: it
+  dominant *splitting*, and the two are separated everywhere.
+
+  And — the one that will mislead a reader who stops at the first two — **$M_1$ is
+  resolution-relative, because exactness is not invariance.** A skeleton bundles degrees of
+  freedom of two kinds: the multiplicity and the *order*, which are genuinely discrete and
+  reference no binning, and the cell labels, which are a discretization of a continuum whose
+  probability is $\approx$ density $\times$ area. Refining $N_{\rm bins}$ therefore drives
+  every $N\ge1$ skeleton's mass toward zero while leaving $q(0\mid x)$ alone, so the empty
+  tree eventually wins the argmax for every jet — the discrete-mode analogue of the
+  empty-string mode of NMT (Stahlberg & Byrne, arXiv:1908.10090), and the same
+  non-commensurability the split-likelihood term carries across $N_{\rm bins}$
+  (`nll_terms`). Dominance is a well-posed *probability* question only for the grid-free
+  half. For the cell half the honest object is an **area**: the smallest Lund-plane region
+  holding a given fraction of a node's positional posterior, in
+  $\ln(1/\Delta R)\times\ln k_t$ units, which has a limit under refinement and a natural
+  yardstick in the coordinate head's own width — and, beyond that, in the irreducible
+  $\sigma_0+\Lambda_{\rm eff}/k_t$ of §2.2. On the fielded 30×30 checkpoint that region
+  spans ~17 cells and the head is truncation-saturated ($\sigma$ larger than a half-cell)
+  for ~90% of jets, i.e. the grid is finer than the model's own resolution: the posterior
+  occupies **one blob about one smearing width across**, and the small per-skeleton masses
+  are the grid slicing it, not a fragmented posterior. Both readings are reported, with
+  $F(m)$ labelled for what it is — a same-geometry comparison. The audit is descriptive: it
   adopts and rejects nothing, and **MBR remains the headline estimator whatever it finds**
   (Kumar & Byrne, HLT-NAACL 2004; Eikema & Aziz, arXiv:2005.10283). A majority skeleton,
   where one exists, is an *additional* quotable — "this jet's parton structure is $S_1$

@@ -46,6 +46,29 @@ An uncertified `M_1` is a LOWER bound on the true top-1 mass (the search always 
 the highest-mass child of every expansion), so `frac(M_1 >= m)` computed from these
 numbers is a lower bound on the true fraction. Never the other way round.
 
+**`M_1` IS RESOLUTION-RELATIVE, AND EXACTNESS IS NOT INVARIANCE.** The two facts above
+buy an exact probability of a well-defined event; they do not buy a grid-free notion of
+dominance, and the difference is not a technicality. A skeleton bundles two kinds of
+degree of freedom:
+
+* genuinely discrete and grid-free — the multiplicity `N`, and the ORDER of the
+  splittings;
+* a discretized continuum — the cell labels, whose probability is `~ density x area`.
+
+Refining `n_bins` therefore drives every `N >= 1` skeleton's mass toward zero (measured
+on the fielded checkpoint: a 9x coarser cell raised the best one-splitting skeleton from
+0.015 to 0.098, very nearly linear in area) while leaving `q(N=0|x)` — the one skeleton
+that references no cell — untouched. Both the LEVEL of `frac(M_1 >= m)` and the IDENTITY
+of the argmax are consequences of the grid, and `n_bins` is not a physics choice.
+Conditioning on `N` does not repair this: at fixed `N` the area factors are shared, so
+ratios survive but absolute masses still scale.
+
+So `M_1` is quotable as a same-geometry, same-checkpoint comparison (which is what the
+plan's §7.5 cross-family delta needs) and is NOT a grid-free statement that "a dominant
+parton skeleton exists". `node_hpd_area` below is the companion that is: the smallest
+Lund-plane AREA holding a given fraction of a node's positional posterior, in physical
+units, with a limit under refinement.
+
 Nothing here writes to the estimator stack: the audit reads the posterior, and no
 decode-layer behaviour (MBR, MAP, floors) changes because of it.
 """
@@ -456,6 +479,114 @@ def skeleton_log_prob(model, cells, xf, nx, *, spec=None) -> float:
         total += float(torch.log_softmax(logits.reshape(-1), dim=-1)[c])
         tok = c
     return float(total)
+
+
+# ---------------------------------------------------------------------------
+# The grid-free companion to M_1
+# ---------------------------------------------------------------------------
+@torch.inference_mode()
+def node_hpd_area(model, xf, nx, *, alphas=(0.5, 0.9), sub=7, cells_logp=None,
+                  spec=None) -> dict | None:
+    """The smallest Lund-plane AREA holding a fraction `alpha` of the FIRST splitting's
+    positional posterior — the dominance statement `M_1` cannot make.
+
+    `M_1` answers "how much mass sits on one cell", which is `~ density x cell area` and
+    so is a readout of `n_bins`. This answers "how large a region does the posterior
+    actually occupy", in `ln(1/DeltaR) x ln k_t` units, which has a limit as the grid
+    refines and is comparable across geometries and families.
+
+    Computed exactly rather than sampled. The full density over the first node's position
+    is the mixture `sum_c P_split(c|h_0,e) * TN(du|c) TN(dv|c)`, and each component is
+    supported on ITS OWN CELL and nowhere else — the coordinate head's truncated normals
+    are bounded by construction. So the mixture is block-wise and a `sub x sub` grid
+    inside every cell evaluates it everywhere; the alpha-highest-density region is then
+    read off by sorting pixels. `mass_quadrature` is returned as the check that it is
+    (1.0 to the quadrature's own accuracy, ~2e-3 at sub=7).
+
+    Returned beside it, and the reason this is not merely a rescaling of `M_1`:
+
+    * `sigma_u`, `sigma_v` — the coordinate head's own widths at the modal cell, i.e. the
+      resolution the MODEL claims for itself.
+    * `sigma_box_area` = `(2 sigma_u)(2 sigma_v)`, and `area_over_sigma_box`. Above 1 the
+      positional spread is genuinely wider than the model's own per-node width; near 1 the
+      structure is as determined as this model can express.
+    * `truncation_saturated` — `sigma > half-cell` on BOTH axes, i.e. the head wants to be
+      wider than a cell and the truncation forbids it. When that is true the within-cell
+      density is nearly uniform and the model is carrying its coordinate uncertainty in
+      the CELL distribution instead — which is exactly the regime where a small `M_1` says
+      "the grid is finer than the model's resolution" rather than "the posterior is
+      fragmented". It is a property of the (geometry, checkpoint) pair, and it is the
+      first thing to read before quoting any mode mass.
+
+    Returns None for a family with no continuous coordinate head (there is no positional
+    density to take a region of) or a non-`ar` search spec, rather than inventing one.
+    """
+    geom = model.geometry
+    if not bool(getattr(model, "has_continuous_coords", False)):
+        return None
+    params_fn = getattr(model, "_coord_params_padded", None)
+    if params_fn is None:
+        return None
+    spec = model.skeleton_search_spec(xf, nx) if spec is None else spec
+    if spec.kind != "ar":
+        # `nhead`/`factorized` reach the first node's cell head differently; the area is
+        # well defined there too, but the caller must supply `cells_logp` for it.
+        if cells_logp is None:
+            return None
+
+    dev = xf.device
+    n_cells, hu, hv = geom.n_cells, geom.half_u, geom.half_v
+    if cells_logp is None:
+        tok = torch.full((1, 1), int(spec.start_token), dtype=torch.long, device=dev)
+        _p_cont, cells_logp, _h = spec.step(tok, spec.e, spec.h0)
+    p0 = torch.softmax(cells_logp.reshape(-1), dim=-1)
+
+    # Every one-node chain's coordinate head in ONE pass: the decoder state after START is
+    # shared across cells, so only the cell embedding differs between rows.
+    yc = torch.arange(n_cells, dtype=torch.long, device=dev).unsqueeze(1)
+    du_m, dv_m, du_s, dv_s = (t.squeeze(1) for t in params_fn(xf, nx, yc)[:4])
+
+    from ..distributions import trunc_normal_logpdf
+
+    step_u, step_v = 2 * hu / sub, 2 * hv / sub
+    du = torch.tensor([-hu + (k + 0.5) * step_u for k in range(sub)], device=dev)
+    dv = torch.tensor([-hv + (k + 0.5) * step_v for k in range(sub)], device=dev)
+    lu = trunc_normal_logpdf(du.view(1, sub), du_m.view(-1, 1), du_s.view(-1, 1), -hu, hu)
+    lv = trunc_normal_logpdf(dv.view(1, sub), dv_m.view(-1, 1), dv_s.view(-1, 1), -hv, hv)
+    comp = (lu.unsqueeze(2) + lv.unsqueeze(1)).exp()          # (n_cells, sub, sub), each ->1
+    pix = float(step_u * step_v)
+    dens = (p0.view(-1, 1, 1) * comp).reshape(-1)
+    c_star = int(p0.argmax())
+
+    def _area(d) -> dict:
+        srt, _ = torch.sort(d.reshape(-1), descending=True)
+        cum = torch.cumsum(srt, dim=0) * pix
+        tot = float(cum[-1])
+        out = {}
+        for a in alphas:
+            k = int(torch.searchsorted(cum, torch.tensor(a * tot, device=cum.device))) + 1
+            out[f"{a:g}"] = float(min(k, srt.numel()) * pix)
+        return out
+
+    full, one = _area(dens), _area(comp[c_star])
+    s_u, s_v = float(du_s[c_star]), float(dv_s[c_star])
+    box = (2.0 * s_u) * (2.0 * s_v)
+    return {
+        "alphas": [float(a) for a in alphas],
+        "area": full,
+        # The same region for ONE component. NOTE: when the head is truncation-saturated
+        # this measures the CELL, not the physics — read `truncation_saturated` first.
+        "area_one_component": one,
+        "sqrt_area": {a: math.sqrt(v) for a, v in full.items()},
+        "n_cells_equivalent": {a: v / (4.0 * hu * hv) for a, v in full.items()},
+        "sigma_u": s_u, "sigma_v": s_v, "sigma_box_area": box,
+        "area_over_sigma_box": {a: (v / box if box > 0 else float("nan"))
+                                for a, v in full.items()},
+        "truncation_saturated": bool(s_u > hu and s_v > hv),
+        "modal_cell": c_star, "modal_cell_mass": float(p0[c_star]),
+        "cell_area": float(4.0 * hu * hv),
+        "mass_quadrature": float(dens.sum() * pix),
+    }
 
 
 @torch.inference_mode()

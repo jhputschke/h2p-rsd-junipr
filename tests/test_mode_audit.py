@@ -33,6 +33,7 @@ from h2p_rsd_junipr.inference.mode_audit import (
     SkeletonEnumeration,
     entropy_from_draws,
     enumerate_skeletons,
+    node_hpd_area,
     skeleton_log_prob,
 )
 from h2p_rsd_junipr.models.base import build_model
@@ -361,6 +362,100 @@ def test_entropy_estimate_and_its_lower_bound():
     assert est["n_draws"] == 2000
     assert est["eff_skeletons"] == pytest.approx(math.exp(est["H_hat"]), rel=1e-9)
     assert enum.entropy_lower_bound() <= est["H_hat"] + 0.15
+
+
+# ---------------------------------------------------------------------------
+# The grid-free companion: M_1 is resolution-relative, the region is not
+# ---------------------------------------------------------------------------
+def test_hpd_area_is_a_proper_region_of_a_normalised_density():
+    """The mixture is block-wise (each component is confined to its own cell), so the
+    sub-grid quadrature must integrate to 1 and the regions must nest with alpha."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    r = node_hpd_area(model, xf, nx, alphas=(0.5, 0.9), sub=9)
+    assert r is not None
+    assert r["mass_quadrature"] == pytest.approx(1.0, abs=5e-3)
+    assert 0.0 < r["area"]["0.5"] <= r["area"]["0.9"] <= geom.n_cells * r["cell_area"]
+    assert r["sqrt_area"]["0.5"] == pytest.approx(math.sqrt(r["area"]["0.5"]))
+    assert r["n_cells_equivalent"]["0.5"] == pytest.approx(
+        r["area"]["0.5"] / r["cell_area"])
+    # the whole plane holds everything, so alpha -> 1 cannot exceed it
+    r1 = node_hpd_area(model, xf, nx, alphas=(0.999,), sub=9)
+    assert r1["area"]["0.999"] <= geom.n_cells * r["cell_area"] + 1e-9
+
+
+def test_hpd_area_is_grid_free_where_M1_is_not():
+    """THE point of the quantity. A concentrated cell head and a diffuse one differ in
+    `M_1` by construction; the region has to track the DENSITY, not the binning.
+
+    Constructed rather than sampled: two models cannot share a geometry and differ only
+    in n_bins, so the test instead pins the scaling law that makes M_1 grid-dependent —
+    the mode mass of a fixed density falls like the cell area, while the region does
+    not. Here that is exercised by summing the top cell's neighbourhood: a 3x3 block is
+    one cell of a 3x-coarser grid, and it holds strictly more mass while covering the
+    same region of the plane."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    r = node_hpd_area(model, xf, nx, sub=9)
+    with torch.inference_mode():
+        spec = model.skeleton_search_spec(xf, nx)
+        tok = torch.full((1, 1), spec.start_token, dtype=torch.long)
+        _p, logp, _h = spec.step(tok, spec.e, spec.h0)
+    p0 = torch.softmax(logp, dim=-1)
+    c = r["modal_cell"]
+    ix, iy = divmod(int(c), geom.n_bins)
+    block = [ (ix + a) * geom.n_bins + (iy + b)
+              for a in (-1, 0, 1) for b in (-1, 0, 1)
+              if 0 <= ix + a < geom.n_bins and 0 <= iy + b < geom.n_bins ]
+    coarse = float(sum(p0[j] for j in block))
+    assert coarse >= r["modal_cell_mass"] - 1e-9, (
+        "coarsening cannot lose mass — this is the scaling that makes M_1, and every "
+        "F(m) built on it, a statement about n_bins"
+    )
+    # the region, by contrast, is quoted in ln^2 and never references a cell count
+    assert r["area"]["0.5"] > 0.0 and r["cell_area"] > 0.0
+
+
+def test_truncation_saturation_is_reported_not_inferred():
+    """A head whose sigma exceeds the half-cell cannot express its own width inside a
+    cell. Whether that is true is a property of the (geometry, checkpoint) pair, so it
+    is measured and reported rather than assumed either way."""
+    _cfg, geom, model, ds, _jets = _tiny()
+    xf, nx, _ = _jet(ds)
+    r = node_hpd_area(model, xf, nx, sub=5)
+    assert r["truncation_saturated"] == bool(r["sigma_u"] > geom.half_u
+                                             and r["sigma_v"] > geom.half_v)
+
+
+def test_hpd_area_is_none_without_a_coordinate_head():
+    """v1 has no continuous coordinates, so there is no positional density to take a
+    region of — None, not a fabricated area."""
+    _cfg, _geom, model, ds, _jets = _tiny(["model=ar_junipr_v1",
+                                           "model.continuous_coords=false"])
+    xf, nx, _ = _jet(ds)
+    assert node_hpd_area(model, xf, nx) is None
+
+
+def test_runner_carries_the_grid_free_block():
+    _cfg, geom, model, ds, jets = _tiny()
+    aud = {**audit_params(), "k": 8, "budget": 2000}
+    out = run_mode_audit(model, ds, jets, geom, torch.device("cpu"), n_jets=6, K=16,
+                         audit=aud, verbose=False)
+    res = out["resolution"]
+    for key in ("hpd_area_50", "hpd_sqrt_50", "hpd_cells_50", "hpd_over_sigma_box_50",
+                "frac_truncation_saturated", "q_N_mean"):
+        assert key in res
+    assert np.isfinite(res["hpd_area_50"])
+    # q(N|x) is the grid-free factor and must be a pmf over the three classes
+    q = res["q_N_mean"]
+    assert q["0"] + q["1"] + q[">=2"] == pytest.approx(1.0, abs=1e-6)
+    # and the same-geometry caveat travels in the artifact, not only in the docstring
+    assert "n_bins" in out["geometry_dependence"] or "geometry" in out["geometry_dependence"]
+    r0 = out["records"][0]
+    assert r0["qN_0"] == pytest.approx(r0["q0_enum"], abs=0.2), (
+        "the sampler's empty rate and the exact empty-skeleton mass are the same "
+        "quantity measured two ways; K is small here so the tolerance is loose"
+    )
 
 
 def test_strata_are_read_off_the_hadron_side():

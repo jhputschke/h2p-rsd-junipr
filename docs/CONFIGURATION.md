@@ -1058,7 +1058,7 @@ h2p-rsd-junipr eval runs/.../best.ckpt experiment.mode_audit=true \
     experiment.closure_jets=2000 audit.k=32
 ```
 
-Three things about this block that are **not** conventions:
+Four things about this block that are **not** conventions:
 
 - **It never writes to the estimator stack.** The audit reads the posterior; no MAP, MBR,
   floor or NLL moves because of it, and `min_emissions` deliberately does **not** apply —
@@ -1068,6 +1068,23 @@ Three things about this block that are **not** conventions:
   exceed a half-mass mode whatever the search pruned. Below ½ the reported `M₁` is a
   **lower** bound on the true top-1 mass, so every `F(m)` is a lower bound too — never an
   over-claim.
+- **`M₁` is resolution-relative — exactness is not invariance.** A cell's probability is
+  `≈ density × area`, so every `N ≥ 1` skeleton's mass scales with the cell area while
+  `q(N=0|x)`, the one skeleton that references no cell, does not. Refine `geometry.n_bins`
+  and both the *level* of `F(m)` and the *identity* of the argmax change with nothing about
+  the model changing (measured: a 9× coarser cell took the best one-splitting skeleton from
+  0.015 to 0.098). Conditioning on `N` does not repair it — at fixed `N` the area factors
+  are shared, so ratios survive but absolute masses still scale. So `F(m)` is a
+  **same-geometry, same-checkpoint** comparison — which is exactly what the plan's §7.5
+  cross-family delta needs — and never a grid-free claim that a dominant parton skeleton
+  exists. The artifact's `resolution` block is the companion that *is* grid-free: the
+  Lund-plane **area** the first splitting's posterior occupies (in `ln(1/ΔR) × ln k_t`
+  units), its linear scale `√area`, the ratio to the coordinate head's own `±1σ` box, the
+  grid-free length belief `q(N|x)`, and `frac_truncation_saturated` — the fraction of jets
+  where the head's `σ` exceeds a half-cell, so it cannot express its own width *inside* a
+  cell and carries that width in the cell distribution instead. Where that fraction is
+  high, a small `M₁` says the grid is finer than the model's resolution, not that the
+  posterior is fragmented. **Read `resolution` before quoting any mode mass.**
 - **Two validity checks, not gates.** The artifact reports the per-jet mass-accounting
   defect (`Σᵢ Mᵢ + frontier + pruned − 1`, float-exact) and the enumerated `M(N=0)` against
   the model's own `q(0|x)` reached through a different code path. A nonzero defect means
