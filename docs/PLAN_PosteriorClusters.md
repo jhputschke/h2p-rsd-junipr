@@ -1,11 +1,62 @@
 # PLAN — Posterior clusters: set-valued prediction, two per-jet confidence scalars, and a gated bounded-loss MBR
 
-Status: **proposed** (not yet implemented). Six work packages (WP1–WP6), each
-independently mergeable, opt-in with defaults off per the established
-`point_estimator="map"` / `use_multiplicity_head` idiom. Every OFF path is
-bit-identical to today. Builds on the merged `PLAN_MBR_PerturbativeLund.md`,
+Status: **implemented** — WP1, WP2, WP3, WP4a, WP5 and WP6 have landed; **WP4b was never
+opened**, which §8.1 already reclassified as optional and §16 allows the plan to exit
+without. Six work packages (WP1–WP6), each independently mergeable, opt-in with defaults
+off per the established `point_estimator="map"` / `use_multiplicity_head` idiom. Every OFF
+path is bit-identical to today. Builds on the merged `PLAN_MBR_PerturbativeLund.md`,
 `PLAN_prod_test_v1.md` (WP-C.1, WP-C.2), `PLAN_empty_parton_tree.md`, and
 `PLAN_UPDATES.md` WP2 (the calibration suite).
+
+> **Implementation note (2026-08-04).** What shipped, and the four places it departs from
+> the text above:
+>
+> - **`inference/clusters.py`** — `PosteriorClusterSet`, `PosteriorSetEstimate`,
+>   `cluster_posterior` (`hdbscan` / `dbscan` / `pam`), `assert_cluster_metric_ok` (the §4
+>   guards, all raising), `fit_set_threshold` / `set_size_for`, `assign_truth` /
+>   `support_radii`, `random_partition_null`, and `assert_ancestral_draws` (§10.6's
+>   pushforward hygiene, as a callable guard — `PLAN_UPDATES.md` WP5's aggregate
+>   cross-check does not exist yet, so there is no call site to assert *at*).
+> - **`models/base.py: predict_set`** — the sibling of `map_or_mbr`, delegating to
+>   `inference/mbr.py: mbr_cluster_set`. `mbr_select` is refactored onto a shared
+>   `posterior_distances` so the point estimate and the set read the *same* `D`.
+> - **WP4a** — `_reduce_risk`, `bandwidth_quantile`, and `mbr_select(diagnostic_losses=...)`
+>   returning `(estimate, side_channel)`. `eval/stability.py` holds the §8.5 columns;
+>   `tests/test_stability.py::test_loss_spread_not_in_systematics` enforces §8.6's boundary
+>   by parsing `eval/systematics.py`.
+> - **WP5/WP6** — `eval/clusters.py` runs G2, G2′, G3, G5, G6, G7, G8 and G8′ in one pass,
+>   behind `experiment.cluster_diagnostics`; `eval/report.py: plot_clusters` draws the
+>   reliability and coverage figures. Notebooks:
+>   `notebooks/per_jets_estimation_cluster.ipynb` (the per-jet study with the quantities
+>   re-assigned for the set) and `notebooks/inference_demo_cluster.ipynb` (§10.5's
+>   single-jet MDS panel), both generated from `scripts/make_*_cluster_nb.py`.
+>
+> **Departures, each with its reason:**
+>
+> 1. **§10.1's diagnostics live in `eval/clusters.py`, not inside `run_closure`.** Every
+>    number needs the `K×K` matrix, and `run_closure`'s `map_or_mbr` builds and discards one
+>    per jet; a second pass inside it would double the suite's dominant cost (§14's own
+>    budget note). They land at `metrics["clusters"]`, the shape `support_audit` /
+>    `exposure` / `mode_audit` already use.
+> 2. **`pam`'s `k` selection takes a silhouette FLOOR of 0.50, not 0.**  A non-positive
+>    threshold is not a threshold: *k*-medoids cuts an isotropic Gaussian blob into three
+>    pieces at silhouette 0.32, and reporting that as three posterior explanations is the
+>    failure the control arm exists to catch. 0.50 is Kaufman & Rousseeuw's own boundary
+>    ("a reasonable structure has been found"), and it is what makes the kill criterion
+>    *reachable* by this method.
+> 3. **`assign_truth` compares against a per-cluster support radius** (the 95th percentile
+>    of member-to-exemplar distance) rather than a quantile over the `radii` vector. With
+>    two or three clusters per jet, a quantile over three numbers is the maximum; the
+>    per-cluster reach is the quantity "is the truth inside this cluster's support" is
+>    actually asking about.
+> 4. **`cluster_min_cluster_size`'s auto value is a fraction of the pool actually
+>    clustered**, not of `K`. Under `cluster_split` pool A is half the draws, so deriving it
+>    from `K` would double the effective threshold and change the partition's granularity —
+>    making gate G9 a measurement of granularity *plus* selection bias rather than of
+>    selection bias alone.
+>
+> The `[mbr]` extra gains `scikit-learn >= 1.3`; `cluster_method="pam"` needs none of it, so
+> the CI fast tier and every guard test run on a host without it.
 
 > **Line anchors.** File:line references were taken from the tree at commit
 > `34e98b8` (2026-08-02). Re-verify before editing; merges shift them.

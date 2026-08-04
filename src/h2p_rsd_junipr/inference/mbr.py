@@ -70,6 +70,21 @@ def mbr_kwargs_from_decode(decode: dict) -> dict:
     )
 
 
+def cluster_kwargs_from_decode(decode: dict) -> dict:
+    """Map a `decode_params(cfg)` dict onto `mbr_cluster_set`'s cluster-layer kwargs.
+
+    Sibling of `mbr_kwargs_from_decode`, kept separate because the two are *orthogonal*:
+    the cluster layer reads more off `D`, the risk reduction reduces over `D`, and neither
+    sees the other's output (docs/PLAN_PosteriorClusters.md §8.1)."""
+    return dict(
+        method=str(decode.get("cluster_method", "hdbscan")),
+        min_cluster_size=int(decode.get("cluster_min_cluster_size", 0)),
+        min_mass=float(decode.get("cluster_min_mass", 0.05)),
+        eps_quantile=float(decode.get("cluster_eps_quantile", 0.10)),
+        split=bool(decode.get("cluster_split", False)),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cloud adapter (cells -> centres, or v2 continuous nodes -> coords)
 # ---------------------------------------------------------------------------
@@ -536,12 +551,109 @@ def _qn_importance_weights(model, xf, nx, draws) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# The risk reduction (docs/PLAN_PosteriorClusters.md WP4a)
+# ---------------------------------------------------------------------------
+def bandwidth_quantile(D, gamma: float = 0.10) -> float:
+    """`Q_gamma` of the POSITIVE off-diagonal distances — the pre-registered epsilon.
+
+    `gamma = 0.10` is fixed before any test run and recorded with `fitted_under`. Tuning
+    epsilon against closure metrics is forbidden: it is the one free parameter the bounded
+    construction turns on, and a closure-tuned bandwidth makes gate G7 circular. The
+    quantile form also makes epsilon invariant to the `mbr_norm` / `energyflow` 1/R
+    convention, which is *why* it is a quantile rather than an absolute.
+
+    Only positive entries enter, which excludes both the zero diagonal and the
+    empty-empty pairs. That exclusion is not a convenience — it is exactly the §8.4
+    hazard: `_empty_value` puts every empty draw at mutual distance 0, so the empty clique
+    is invisible to the bandwidth rule while remaining decisive in the neighbour tally."""
+    d = np.asarray(D, dtype=float)
+    pos = d[d > 0]
+    if pos.size == 0:
+        return 0.0
+    return float(np.quantile(pos, float(gamma)))
+
+
+def _reduce_risk(D, w=None, *, loss: str = "linear", eps=None) -> np.ndarray:
+    """Row-wise Bayes risk of each candidate under the configured loss.
+
+    The general Bayes estimator is `y_hat = argmin_{y' in H} E_{y ~ q}[Delta(y', y)]`, and
+    the *character* of the answer is fixed by `Delta` (Goel & Byrne, *Computer Speech &
+    Language* **14** (2000) 115; Berger, *Statistical Decision Theory and Bayesian
+    Analysis*, Springer 1985, §2.4):
+
+      - ``linear``  — `Delta = d`, so the argmin is the Frechet median restricted to the
+        sample. **This is the merged behaviour and is bit-identical**: with `w=None` the
+        expression below is literally `D.mean(axis=1)`, and with weights it is literally
+        the `resample_to_qn` line it replaced.
+      - ``bounded`` — `Delta = 1[d > eps]`, so the risk is `1 - (neighbour fraction)` and
+        the argmin MAXIMISES the number of neighbours within `eps`: a Parzen window
+        (Silverman, *Density Estimation*, Chapman & Hall 1986, §3) evaluated on the pool,
+        i.e. a KDE mode restricted to valid draws.
+      - ``kernel``  — the same idea with a Gaussian window instead of a top hat.
+
+    `w` is uniform unless `resample_to_qn`, so the existing q(N|x) correction composes with
+    all three losses unchanged. **Cost: zero additional EMD calls.**
+
+    Two warnings that belong at the definition rather than in a plan (§8.3, §8.4):
+    under `bounded`/`kernel` the returned number is NOT an EMD — it is dimensionless and
+    in [0, 1] (bounded) or negative (kernel) — and the N = 0 stratum forms a zero-diameter
+    clique whose neighbour count is its own size at any `eps`, so a small `eps` can collapse
+    the estimate to the empty tree. That is why WP4a keeps this an eval-only side channel
+    and `.risk` keeps the linear value."""
+    D = np.asarray(D, dtype=float)
+    if loss == "linear":
+        return D.mean(axis=1) if w is None else (D * w[None, :]).sum(axis=1) / w.sum()
+    if eps is None or not np.isfinite(eps) or eps <= 0:
+        raise ValueError(
+            f"mbr_loss={loss!r} needs a positive bandwidth eps; got {eps!r}. Use "
+            f"`bandwidth_quantile(D, gamma)` — the pre-registered per-jet rule."
+        )
+    if loss == "bounded":
+        hit = (D <= float(eps)).astype(float)
+    elif loss == "kernel":
+        hit = np.exp(-0.5 * (D / float(eps)) ** 2)
+    else:
+        raise ValueError(f"unknown mbr_loss={loss!r}; expected linear | bounded | kernel")
+    num = hit.sum(axis=1) if w is None else (hit * w[None, :]).sum(axis=1)
+    den = float(D.shape[1]) if w is None else float(w.sum())
+    return -num / den if loss == "kernel" else 1.0 - num / den
+
+
+# ---------------------------------------------------------------------------
 # The estimator
 # ---------------------------------------------------------------------------
+def posterior_distances(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
+                        lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
+                        norm=False, periodic_phi=False, phi_col=-1, backend="pot"):
+    """Everything both the point estimate and the cluster layer need, computed once.
+
+    Returns `(draws, clouds, cand_idx, D)`. Factored out of `mbr_select` so `predict_set`
+    and the WP4a diagnostics read the SAME `D` the point estimate was selected from —
+    recomputing it would be `K^2` EMD solves for a matrix that is already in hand, and
+    (worse) it would let the two products drift apart under a config change."""
+    if draws is None:
+        draws = model.sample_batch(xf, nx, n_samples)
+    K = len(draws)
+    clouds_S = [
+        lund_cloud(d, geom, lnkt_cut=lnkt_cut, weight=weight, coords=coords) for d in draws
+    ]
+    if n_candidates and 0 < n_candidates < K:
+        cand_idx = list(range(n_candidates))
+    else:
+        cand_idx = list(range(K))
+    if not cand_idx:
+        return draws, clouds_S, cand_idx, np.zeros((0, 0), dtype=float)
+    clouds_C = [clouds_S[i] for i in cand_idx]
+    D = lund_emd_matrix(clouds_C, clouds_S, R=R, beta=beta, norm=norm,
+                        periodic_phi=periodic_phi, phi_col=phi_col, backend=backend, geom=geom)
+    return draws, clouds_S, cand_idx, D
+
+
 def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
                lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
                norm=False, periodic_phi=False, phi_col=-1, backend="pot",
-               resample_to_qn=False, coords_by_draw=None):
+               resample_to_qn=False, coords_by_draw=None, diagnostic_losses=(),
+               loss_quantile=0.10):
     """Sampling-based MBR (Eikema & Aziz, EMNLP 2022): pick the drawn tree of least
     mean perturbative-Lund EMD to the ``K`` draws.
 
@@ -559,29 +671,29 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     caller already drew alongside the cells. It used to re-attach the head modes, which
     threw away the one property that makes a medoid worth reporting — that it is a
     genuine posterior sample. v0 measured the price: a psi resultant ``|R| = 0.69``
-    against a truth of 0.045, out of a head whose median ``kappa`` is 0.022."""
-    if draws is None:
-        draws = model.sample_batch(xf, nx, n_samples)
-    K = len(draws)
-    clouds_S = [
-        lund_cloud(d, geom, lnkt_cut=lnkt_cut, weight=weight, coords=coords) for d in draws
-    ]
-    if n_candidates and 0 < n_candidates < K:
-        cand_idx = list(range(n_candidates))
-    else:
-        cand_idx = list(range(K))
+    against a truth of 0.045, out of a head whose median ``kappa`` is 0.022.
+
+    ``diagnostic_losses`` (WP4a of docs/PLAN_PosteriorClusters.md) is an **eval-only side
+    channel**: pass e.g. ``("bounded", "kernel")`` and the call returns
+    ``(point_estimate, {"linear": win_idx, "bounded": win_idx, ..., "eps": eps})``
+    instead of the bare estimate. The returned ``LundPointEstimate`` is untouched — same
+    tree, same ``.risk``, still the linear medoid — so ``.risk`` keeps meaning "the
+    achieved mean distance" for all fourteen of its consumers and no config field, serving
+    surface or config-hash churn is involved. It costs zero additional EMD calls: every
+    loss is another reduction over the `D` already built."""
+    draws, clouds_S, cand_idx, D = posterior_distances(
+        model, xf, nx, draws=draws, geom=geom, n_samples=n_samples, n_candidates=n_candidates,
+        lnkt_cut=lnkt_cut, weight=weight, coords=coords, R=R, beta=beta, norm=norm,
+        periodic_phi=periodic_phi, phi_col=phi_col, backend=backend,
+    )
     if not cand_idx:  # no draws at all -> honest empty tree (reflects the posterior)
         pe = model.describe_cells(xf, nx, [])
         pe.risk = 0.0
-        return pe
-    clouds_C = [clouds_S[i] for i in cand_idx]
-    D = lund_emd_matrix(clouds_C, clouds_S, R=R, beta=beta, norm=norm,
-                        periodic_phi=periodic_phi, phi_col=phi_col, backend=backend, geom=geom)
-    if resample_to_qn:  # match the support's multiplicity marginal to calibrated q(N|x)
-        w = _qn_importance_weights(model, xf, nx, draws)
-        risk = (D * w[None, :]).sum(axis=1) / w.sum()
-    else:
-        risk = D.mean(axis=1)
+        return (pe, {}) if diagnostic_losses else pe
+    # match the support's multiplicity marginal to calibrated q(N|x); None == uniform, and
+    # the uniform branch of `_reduce_risk` is literally `D.mean(axis=1)` (gate G1).
+    w = _qn_importance_weights(model, xf, nx, draws) if resample_to_qn else None
+    risk = _reduce_risk(D, w, loss="linear")
     best = int(np.argmin(risk))
     win_idx = cand_idx[best]
     winner = draws[win_idx]
@@ -591,4 +703,98 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     # genuine drawn tree -> LundPointEstimate, carrying its own sampled coordinates
     pe = model.describe_cells(xf, nx, winner, win_coords)
     pe.risk = float(risk[best])
-    return pe
+    if not diagnostic_losses:
+        return pe
+    eps = bandwidth_quantile(D, loss_quantile)
+    side = {"linear": win_idx, "eps": eps, "loss_quantile": float(loss_quantile)}
+    for loss in diagnostic_losses:
+        if loss == "linear":
+            continue
+        r = _reduce_risk(D, w, loss=loss, eps=eps) if eps > 0 else np.full(len(cand_idx), np.nan)
+        side[loss] = cand_idx[int(np.argmin(r))] if eps > 0 else win_idx
+    return pe, side
+
+
+# ---------------------------------------------------------------------------
+# WP2 — the set-valued prediction
+# ---------------------------------------------------------------------------
+def mbr_cluster_set(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
+                    lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
+                    norm=False, periodic_phi=False, phi_col=-1, backend="pot",
+                    resample_to_qn=False, coords_by_draw=None,
+                    method="hdbscan", min_cluster_size=0, min_mass=0.05,
+                    eps_quantile=0.10, split=False, screening_only=False,
+                    set_threshold=None, fitted_under=None, D=None):
+    """One `LundPointEstimate` per posterior cluster, each a genuine draw, with the
+    cluster's posterior mass and radius (docs/PLAN_PosteriorClusters.md WP2).
+
+    Runs at **stock MBR settings**: `mbr_select`'s point estimate is bit-identical whether
+    or not this is called, because nothing here touches `risk = D.mean(axis=1)`. `D` is the
+    same matrix — pass it in (`D=`) when the caller already built it, and no EMD is solved
+    at all.
+
+    Each member goes through `describe_cells(xf, nx, winner, win_coords)`, so every
+    exemplar carries its own sampled coordinates and `coords_source="sample"` exactly as
+    the WP-C.1 medoid does. The hypothesis space stays `H = {pool}`: nothing here
+    constructs a tree the model did not generate.
+
+    The two per-jet scalars (WP3) ride along on every member as `cluster_mass` /
+    `cluster_entropy`, so existing single-estimate consumers carry them without a
+    signature change. They are deliberately not folded into one +/-: `top_mass` is a
+    probability, `entropy` is an ambiguity over discrete alternatives, and only `radii[0]`
+    is a width."""
+    from .clusters import (
+        PosteriorSetEstimate,
+        assert_cluster_metric_ok,
+        cluster_posterior,
+        set_size_for,
+    )
+
+    assert_cluster_metric_ok(
+        {"mbr_beta": beta, "mbr_R": R, "mbr_coords": coords, "mbr_n_candidates": n_candidates},
+        geom,
+    )
+    if D is None:
+        draws, _clouds, cand_idx, D = posterior_distances(
+            model, xf, nx, draws=draws, geom=geom, n_samples=n_samples, n_candidates=0,
+            lnkt_cut=lnkt_cut, weight=weight, coords=coords, R=R, beta=beta, norm=norm,
+            periodic_phi=periodic_phi, phi_col=phi_col, backend=backend,
+        )
+        if not cand_idx:  # no draws at all -> an honestly empty set, not a fabricated one
+            return PosteriorSetEstimate(
+                members=[], masses=np.zeros(0), radii=np.zeros(0),
+                top_mass=float("nan"), entropy=float("nan"),
+                clusters=cluster_posterior(np.zeros((1, 1)), method="pam", backend=backend),
+            )
+    elif draws is None:
+        raise ValueError("mbr_cluster_set(D=...) also needs the `draws` that produced it")
+    w = _qn_importance_weights(model, xf, nx, draws) if resample_to_qn else None
+    # A deterministic exchangeable split: the draws are i.i.d. from q(y|x), so even/odd is
+    # as valid a split as any RNG draw and it is reproducible without carrying a seed.
+    split_index = None
+    if split:
+        split_index = np.zeros(len(draws), dtype=bool)
+        split_index[::2] = True
+    cs = cluster_posterior(
+        D, method=method, min_mass=min_mass, min_cluster_size=min_cluster_size,
+        eps_quantile=eps_quantile, weights=w, backend=backend,
+        screening_only=screening_only, split_index=split_index,
+    )
+    members = []
+    for j, e in enumerate(cs.exemplars):
+        ec = coords_by_draw[e] if (coords_by_draw is not None and e < len(coords_by_draw)) else None
+        pe = model.describe_cells(xf, nx, draws[e], ec)
+        pe.cluster_mass = float(cs.masses[j])
+        pe.cluster_entropy = float(cs.entropy)
+        members.append(pe)
+    return PosteriorSetEstimate(
+        members=members,
+        masses=cs.masses,
+        radii=cs.radii,
+        top_mass=cs.top_mass,
+        entropy=cs.entropy,
+        clusters=cs,
+        set_size=(set_size_for(cs.masses, set_threshold) if set_threshold is not None else None),
+        set_threshold=(float(set_threshold) if set_threshold is not None else None),
+        fitted_under=fitted_under,
+    )

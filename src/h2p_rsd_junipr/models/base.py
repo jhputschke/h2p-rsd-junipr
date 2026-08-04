@@ -289,6 +289,38 @@ class PosteriorModel(nn.Module, ABC):
                               **mbr_kwargs_from_decode(decode))
         return self.map_estimate(xf, nx, **decode)
 
+    def predict_set(self, xf, nx, *, draws=None, coords_by_draw=None, D=None,
+                    set_threshold=None, fitted_under=None, **decode):
+        """Set-valued prediction: one `LundPointEstimate` per posterior cluster, each a
+        genuine draw, with the cluster's posterior mass and radius
+        (docs/PLAN_PosteriorClusters.md WP2).
+
+        A **sibling** of `map_or_mbr`, not a replacement: `map_or_mbr` remains the
+        point-estimate entry point and is untouched, and the point estimate is bit-identical
+        whether or not this is also called — the cluster layer reads more off the same `D`
+        and never touches `risk = D.mean(axis=1)` (§8.1).
+
+        Requires `decode.cluster_posterior` to be meaningful, but does not read it: a caller
+        that asks for a set has asked, and gating a direct call on a config flag would make
+        the notebooks' one-jet panels depend on a run's YAML. `cmd_eval` and
+        `eval/closure.py` are what consult the flag.
+
+        Raises (never warns) when the metric settings make `D` non-metric — `mbr_beta != 1`,
+        `mbr_R` below half the ground diameter, or a candidate cap that leaves `D`
+        rectangular. See `inference.clusters.assert_cluster_metric_ok`."""
+        from ..inference.mbr import (
+            cluster_kwargs_from_decode,
+            mbr_cluster_set,
+            mbr_kwargs_from_decode,
+        )
+
+        mk = mbr_kwargs_from_decode(decode)
+        ck = cluster_kwargs_from_decode(decode)
+        return mbr_cluster_set(self, xf, nx, draws=draws, geom=self.geometry,
+                               coords_by_draw=coords_by_draw, D=D,
+                               set_threshold=set_threshold, fitted_under=fitted_under,
+                               **mk, **ck)
+
     def skeleton_search_spec(self, xf, nx):
         """What `inference.mode_audit.enumerate_skeletons` needs to enumerate this
         family's SKELETON posterior exactly (docs/PLAN_ModeMassAudit.md WP-2).

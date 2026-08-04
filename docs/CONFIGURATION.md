@@ -852,10 +852,18 @@ The serving layer reads the checkpoint's decode config. Source:
 | `mbr_periodic_phi` | `False` | MBR | wrap the ψ column (only with `mbr_coords=+psi`) |
 | `mbr_phi_col` | `-1` | MBR | ψ column index for the periodic wrap; `-1` = last coordinate |
 | `mbr_resample_to_qn` | `False` | MBR | reweight the candidate/support pool to the calibrated `q(N\|x)` marginal (decode-layer exposure-bias fix; `False` = plain mean risk) |
+| `cluster_posterior` | `False` | set-valued | build the `K×K` cluster labelling beside the point estimate. **Raises** unless `mbr_n_candidates == 0`, `mbr_beta == 1.0` and `mbr_R ≥ R_max/2` — see the guards below |
+| `cluster_method` | `"hdbscan"` | set-valued | `hdbscan` (density, no fixed *k*, native noise label) / `dbscan` (ε-explicit) / `pam` (*k*-medoids, *k* by silhouette; pure NumPy and deterministic) |
+| `cluster_min_cluster_size` | `0` | set-valued | `hdbscan`/`dbscan` control; `0` ⇒ `max(5, ceil(cluster_min_mass × K))` over the pool actually clustered |
+| `cluster_eps_quantile` | `0.10` | set-valued | **`dbscan` only**: `ε = Q_γ` of the *positive* off-diagonal distances. Backend- and `R`-invariant by construction, which is why it is a quantile |
+| `cluster_min_mass` | `0.05` | set-valued | clusters below this merge into a residual bucket, so the reported mass vector stays short |
+| `cluster_split` | `False` | set-valued | sample-split the mass estimate: cluster on pool A, estimate masses from a fresh pool B. **Off keeps the single-pool estimate, which is biased HIGH** |
+| `set_alpha` | `0.32` | set-valued | conformal miscoverage for `predict_set` (1 σ). The guarantee is **marginal over jets**, not conditional on *x* |
 
 `min_emissions`, `length_penalty`, and `length_floor_quantile` are explained in depth in
 §10; `point_estimator` / `mbr_*` — the whole second point-estimate family — are covered in
-the §10 MBR subsection. All are inference-time only, so you can A/B them on a fixed checkpoint.
+the §10 MBR subsection, and `cluster_*` / `set_alpha` in the §10 posterior-cluster
+subsection. All are inference-time only, so you can A/B them on a fixed checkpoint.
 
 ### `empty_threshold` — the one decision the other knobs cannot express
 
@@ -1029,6 +1037,7 @@ Controls the §8 closure / calibration / systematic run (`h2p-rsd-junipr eval`).
 | `tarp_null_reps` | `0` | Monte-Carlo reps for the TARP null band at this run's own `(n_jets, α grid)`; `0` keeps only the asymptotic `1.36/√n` floor |
 | `tarp_stratify` | `False` | TARP additionally per Lund quadrant |
 | `mode_audit` | `False` | exact top-k **skeleton** enumeration with dominance certificates → `mode_audit.json` (§8a) |
+| `cluster_diagnostics` | `False` | the posterior-cluster measurement pass → `metrics["clusters"]`: per-jet `n_clusters` / `top_mass` / `entropy`, gates **G2** (medoid-in-dominant-cluster), **G2′** (the oracle-set diagnostic with its mass-matched random-partition null and silhouette precondition), **G3**, **G6** (reliability + Brier decomposition), **G7** (conformal coverage) and the WP4a loss-stability columns. Needs `decode.point_estimator=mbr` — there is no distance matrix otherwise, and it says so and skips rather than emitting a table of NaN |
 
 Trade cost vs. precision with `closure_jets` and `n_closure_samples`.
 
@@ -1547,6 +1556,112 @@ reporting. `map_estimate` is unchanged — it is still the staged mode decode �
 estimator for a loss nobody is measuring (Stahlberg & Byrne, arXiv:1908.10090; Eikema &
 Aziz, arXiv:2005.10283). The decode headline is MBR; the population headline is the
 decode-free posterior series.
+
+### `cluster_posterior` — a set of explanations instead of one tree
+
+`mbr_select` returns the **Fréchet median restricted to the sample**: the draw of least
+*mean* EMD to the posterior. That is a *centrality* criterion and the right default. It is
+the wrong criterion when the posterior is **multimodal** — the medoid of a two-lobed
+posterior can land in the sparse valley between the lobes, minimising mean distance while
+representing neither explanation. The sample space is transdimensional,
+`Y = ⊔_N C^N`, and the strata are metrically separated by the EMD's imbalance term, so
+"one hard emission" and "two softer emissions consistent with the same `x`" are genuinely
+*alternative shower histories* rather than two ends of one continuum.
+
+`decode.cluster_posterior=true` clusters the **same** `K×K` matrix `mbr_select` already
+builds and hands back one genuine posterior draw per cluster, with its mass:
+
+```python
+ps = model.predict_set(xf, nx, draws=draws, **decode)   # a sibling of map_or_mbr
+ps.members[0]   # the top-mass exemplar — a LundPointEstimate, coords_source="sample"
+ps.masses       # posterior mass per cluster, mass-descending
+ps.radii        # mean within-cluster EMD to the exemplar
+ps.top_mass, ps.entropy
+```
+
+**The point estimate does not move.** `cluster_posterior` consumes `D`; `_reduce_risk`
+consumes `D`; neither sees the other's output, so `labels`, `exemplars`, `masses`, `radii`,
+`top_mass` and `entropy` are *bit-identical* across every risk reduction, and `map_or_mbr`
+returns the same tree and the same `.risk` whether or not a set was also taken. That
+orthogonality is what lets the cluster layer ship at stock MBR settings, and
+`tests/test_clusters.py::test_losses_do_not_move_clusters` asserts it rather than trusting
+the argument.
+
+**Three per-jet numbers, and they are not one ±.** A bimodal posterior summarised as
+mean ± sd points at a configuration neither mode supports, so the three are reported
+separately and `LundPointEstimate` carries the first two (`cluster_mass`,
+`cluster_entropy`, `None` on every other path):
+
+| quantity | what it is | quotable as ±? |
+|---|---|---|
+| `top_mass` | a **probability** — the posterior mass of the selected explanation | no |
+| `entropy` `H(m) = −Σ m log m` | an **ambiguity** over discrete alternatives, in nats | no |
+| `radii[0]` | the **width** of the selected explanation | **yes**, and only this one |
+
+`top_mass` is *not* a calibrated probability out of the box: the joint tree posterior is
+over-confident by v1 TARP, and with `cluster_split=false` it is additionally biased **high**
+because the same draws define the cluster and are then counted into it (post-selection
+inference; Berk, Brown, Buja, Zhang & Zhao, *Ann. Statist.* **41** (2013) 802). Turn on
+`experiment.cluster_diagnostics` to measure both — reliability diagram, ECE, the Brier
+decomposition and the split-vs-no-split difference — before quoting it.
+
+**Three guards, and every one raises rather than warns** (a mass vector nobody can see is a
+number that gets quoted anyway). All three are measured facts, not conventions:
+
+1. **`mbr_n_candidates` must be 0.** With a candidate cap `D` is `|C|×K` and there is no
+   pairwise matrix over the posterior to cluster. Not silently overridden: the cap changes
+   which point estimate you get, so overriding it would answer a different question.
+2. **`mbr_beta` must be 1.0.** At β ≠ 1 the perturbative-Lund EMD violates the triangle
+   inequality — 300 violations in 64 000 measured triples at β = 2, against 0 at β = 1 —
+   and HDBSCAN's mutual-reachability construction assumes a metric.
+3. **`mbr_R ≥ R_max/2`** for the active `mbr_coords`, KMT's condition for the EMD to be a
+   metric. Computed from *your* `geometry` block, not hard-coded at 8.485, so a non-default
+   range cannot silently break it. At the default `[0, 6]²` the diagonal is `6√2 = 8.485`,
+   exactly `mbr_R`'s default; `+lnz` and `+psi` raise it to ≈ 9.9 and ≈ 11.7, still leaving
+   margin.
+
+**`mbr_backend="surrogate"` is refused** for a cluster mass vector. Not principally for its
+two triangle violations in 64 000 — `_lund_image` **normalises**, so the surrogate is
+*exactly* blind to total `k_t` and multiplicity and collapses the very `N`-stratum
+separation that makes the clusters physical. It stays admissible as a cheap screening pass
+for the medoid-in-dominant-cluster verdict, which is robust to that collapse, via an
+explicit `screening_only=True` at the Python level; there is no config route to it.
+
+**Dependency.** `cluster_method` `hdbscan`/`dbscan` need `scikit-learn ≥ 1.3`, added under
+the existing **`[mbr]` extra** — the `point_estimator="map"` path must import nothing new,
+and both are lazy-imported inside their branch. `cluster_method="pam"` is pure NumPy and
+deterministic, which makes it both the no-dependency fallback and the control arm for
+whether the gate-G2 verdict is method-dependent.
+
+**`K` is what the mass vector's resolution is.** At the default `n_posterior_samples=500`
+and `cluster_min_mass=0.05` a reportable cluster is 25 draws, and the Monte-Carlo error on
+a mass of 0.6 is `√(0.6·0.4/500) ≈ 0.022`. Whether the medoid sits in the dominant cluster
+is answerable there; *how many* clusters there are is not. Density estimation needs
+resolution in the sample space itself, and the sample size to resolve **modes** scales far
+worse than the one to estimate a mean — so raise `K` before quoting a three-cluster split,
+and remember the `K²` EMD block grows with it.
+
+**The bounded-loss reduction is deliberately not a config field.** `mbr_select` accepts an
+eval-only `diagnostic_losses=("bounded", "kernel")` side channel that returns the alternative
+argmins beside an *unchanged* `LundPointEstimate`. It is kept out of `DecodeConfig` because
+`.risk` is documented as "the achieved mean distance" and has fourteen consumers, five of
+which aggregate it across jets; under a bounded loss it silently becomes a dimensionless
+neighbour deficit, and none of them break loudly. The columns those diagnostics produce live
+in [`eval/stability.py`](../src/h2p_rsd_junipr/eval/stability.py) — **not**
+`eval/systematics.py`, and the module boundary is the guard: the linear-vs-bounded spread is
+a *stability* check, not a systematic, because the two are different functionals of one
+posterior (a Fréchet median and a density mode) rather than two approximations to one
+quantity, and the posterior width is already reported by `radii[0]`.
+`tests/test_stability.py::test_loss_spread_not_in_systematics` asserts the boundary.
+
+**ε is pre-registered, not tuned.** Where a bandwidth is needed (`dbscan`, and the bounded
+diagnostics) it is `Q_γ` of the *positive* off-diagonal distances with γ fixed in advance.
+Tuning it against a closure metric is forbidden: it is the one free parameter the
+construction turns on, and a closure-tuned bandwidth makes the conformal gate circular. The
+quantile form is also what makes it invariant to the `mbr_norm` / `energyflow` `1/R`
+convention. Note what it excludes: `_empty_value` returns exactly 0 for two empty clouds, so
+the `N = 0` clique is invisible to the bandwidth rule while remaining decisive in the
+neighbour tally — that is the hazard the `empty_clique_size` column exists to measure.
 
 ---
 

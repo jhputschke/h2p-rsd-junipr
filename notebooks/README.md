@@ -101,6 +101,51 @@ the docs:
   notebook source is past what the notebook editor can open, so edit the generator and
   re-run it, then re-execute.
 
+- **per_jets_estimation_cluster.ipynb** — the **set-valued** counterpart of
+  `per_jets_estimation.ipynb`, implementing
+  [`docs/PLAN_PosteriorClusters.md`](../docs/PLAN_PosteriorClusters.md) on the same
+  checkpoint, held-out file and decode, so the two read side by side. `mbr_select` returns
+  the Fréchet median of the pool — a *centrality* criterion, and the wrong one when the
+  posterior is multimodal, because the medoid of a two-lobed posterior can land in the
+  sparse valley between the lobes and represent neither explanation. This clusters the
+  **same** `K×K` distance matrix and reports one genuine posterior draw per cluster with
+  its mass. Everything is read off that one matrix, so the MBR point estimate is
+  **bit-identical** to the sibling notebook's — §5c asserts it live rather than claiming
+  it. The per-jet quantities are re-assigned accordingly: `set0` (the top-mass exemplar,
+  argmax of *integrated* density) joins `mbr` (the medoid) and `rsd` as a headline series,
+  and `setbest` — the member closest to truth — is carried in the panels but **fenced out
+  of every summary table**, because it is an oracle. Three scalars replace the single ±:
+  `top_mass` is a *probability*, `entropy` an *ambiguity* over discrete alternatives, and
+  `radii[0]` is the only one of the three that is a width. §7 is the test that makes them
+  worth quoting — the residual re-computed inside quantile bins of each scalar, so a
+  confidence that does not predict the error is visible as such; §8 is the reliability
+  diagram, ECE and Brier decomposition of `top_mass` (gate G6) with the one-temperature
+  recalibration and the `cluster_split` selection-bias measurement (G9); §9 carries gates
+  G2, G2′ — with its **mandatory mass-matched random-partition null**, since a minimum over
+  *n* exemplars beats the medoid by an order statistic alone — the silhouette precondition
+  and the unassigned rate; §10 the loss-stability columns (G8, G8′), reported *beside* the
+  answer and never folded into it; §11 the conformal set, whose guarantee is **marginal
+  over jets, not conditional on x**. Three settings are forced rather than chosen and all
+  three raise: `MBR_N_CANDIDATES = 0` (a candidate cap leaves `D` rectangular),
+  `mbr_beta = 1` (β ≠ 1 breaks the triangle inequality), and never the `surrogate` backend
+  (it normalises, so it is exactly blind to the total `k_t` and multiplicity that separate
+  the `N` strata). Writes `per_jet_clusters.json` beside the checkpoint. **Generated** by
+  [`scripts/make_per_jets_cluster_nb.py`](../scripts/make_per_jets_cluster_nb.py).
+
+- **inference_demo_cluster.ipynb** — the short, standalone "what does a set-valued
+  prediction look like" companion to `inference_demo.ipynb` (§10.5 of the same plan).
+  One jet, three panels: the posterior cloud on the Lund plane coloured by cluster with
+  the exemplars marked; the pool in **its own geometry** via classical MDS on `D` —
+  *display only*, since the clustering works on `D` directly because the tree space has no
+  vector space to embed into, with the stress printed so a bad picture is not mistaken for
+  a bad partition; and the length belief with each cluster's `N` marked, so a split
+  *between* `N` strata is visibly different from a split *within* one. Prints the set as a
+  tree table (every member a genuine draw, so its `log q(y|x)` is the density of exactly
+  what is shown) and closes with a small aggregate giving gate **G2** a number. The
+  population measurement pass lives in `per_jets_estimation_cluster.ipynb`. **Generated**
+  by
+  [`scripts/make_inference_demo_cluster_nb.py`](../scripts/make_inference_demo_cluster_nb.py).
+
 - **lund_distribution_closure.ipynb** — the **population** counterpart to
   `inference_demo.ipynb`. Where `eval/closure.py` and `eval/calibration.py` ask per-jet
   questions, this asks whether the predicted *ensemble* of primary-Lund splittings looks

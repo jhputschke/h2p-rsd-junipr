@@ -70,6 +70,22 @@ class LundPointEstimate:
     # or "sample" (a genuine draw — what the MBR medoid carries, since the medoid IS a
     # posterior sample and re-attaching modes forfeits exactly that property).
     coords_source: str = "mode"
+    # --- posterior-cluster scalars (docs/PLAN_PosteriorClusters.md WP3) ---------------
+    # Set only by `inference.mbr.mbr_cluster_set` / `PosteriorModel.predict_set`, and None
+    # on every other path — including the MBR medoid, which is a centrality estimate with
+    # no cluster attached. They live here so `eval/closure.py`, `serving/` and the
+    # notebooks carry the scalars without a signature change.
+    #
+    # `cluster_mass` is a PROBABILITY: the posterior mass of the selected explanation. It
+    # is NOT calibrated until docs/PLAN_PosteriorClusters.md WP5 says it is (the joint tree
+    # posterior is over-confident by v1 TARP), and under `decode.cluster_split=false` it is
+    # biased HIGH — the same draws define the cluster and are counted into it.
+    cluster_mass: float | None = None
+    # `cluster_entropy` is an AMBIGUITY over discrete alternatives, H(m) = -sum m log m in
+    # nats. It is not a width and must never be quoted as one: a bimodal posterior
+    # summarised as mean +/- sd points at a configuration neither mode supports. The width
+    # of the selected explanation is the cluster RADIUS (`PosteriorSetEstimate.radii[0]`).
+    cluster_entropy: float | None = None
 
     @property
     def n_psi_unidentified(self) -> int:

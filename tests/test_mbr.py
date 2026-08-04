@@ -489,3 +489,258 @@ def test_decode_draws_never_touch_the_sampling_stream(batch):
     model.map_estimate(xf, nx)                    # psi gate fires here
     model.describe_cells(xf, nx, [12, 34, 56])    # and a coordinate draw here
     assert model.sample(xf, nx, 32) == plain
+
+
+# ---------------------------------------------------------------------------
+# docs/PLAN_PosteriorClusters.md §4 — the metric audit, as a regression test.
+#
+# Clustering imposes requirements on `D` that the point estimator does not: HDBSCAN's
+# mutual-reachability construction assumes a METRIC, and at beta != 1 the perturbative-Lund
+# EMD is not one. §4 measured this on 40 synthetic clouds / 64 000 triples; the fixture
+# below is the same construction at a size the unit suite can afford, and the beta = 2
+# NEGATIVE control is what proves the check can detect a violation at all.
+# ---------------------------------------------------------------------------
+def _audit_clouds(n=14, seed=0):
+    """`n` synthetic Lund clouds of 0-5 points each — the §4 fixture, in miniature.
+
+    Deliberately includes empty clouds: `_empty_value` is a separate code path and it is
+    the one the empty-clique hazard runs through."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(n):
+        m = int(rng.integers(0, 6))
+        pts = rng.uniform([0.0, 0.0], [6.0, 6.0], size=(m, 2))
+        w = np.exp(pts[:, 1]) if m else np.zeros(0)
+        out.append((pts, w))
+    return out
+
+
+def _triangle_violations(D, tol=1e-9):
+    """Count `d(i,k) > d(i,j) + d(j,k) + tol` over every ordered triple."""
+    viol = D[:, :, None] - (D[:, None, :] + D[None, :, :]) > tol
+    np.fill_diagonal(viol.any(-1), False)
+    return int(viol.sum())
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+@pytest.mark.parametrize("beta,expect_metric", [(1.0, True), (2.0, False)])
+def test_metric_audit_triangle_inequality(beta, expect_metric):
+    clouds = _audit_clouds()
+    D = mbr.lund_emd_matrix(clouds, clouds, R=8.485, beta=beta, backend="pot")
+    assert np.abs(D - D.T).max() < 1e-10, "symmetry is asserted, not assumed"
+    assert np.abs(np.diag(D)).max() < 1e-10
+    n_viol = _triangle_violations(D)
+    if expect_metric:
+        assert n_viol == 0, (
+            f"beta = 1 must satisfy the triangle inequality (KMT's condition for the EMD "
+            f"to be a metric); got {n_viol} violations"
+        )
+    else:
+        # The negative control. Without it a green triangle test proves only that the
+        # checker never fires, and `assert_cluster_metric_ok`'s beta guard would be
+        # defending against nothing.
+        assert n_viol > 0, "beta = 2 is expected to VIOLATE the triangle inequality"
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_surrogate_is_blind_to_the_mass_the_strata_are_made_of():
+    """§4's mass-sensitivity row, and the reason `mbr_backend='surrogate'` may not produce
+    a quoted mass vector: `_lund_image` NORMALISES, so scaling every weight by 10 leaves
+    the surrogate distance at exactly 0 while `pot` sees 100+."""
+    a = _cloud([12, 34, 56], lnkt_cut=0.0)
+    b = (a[0], a[1] * 10.0)
+    assert mbr.lund_emd(a, b, backend="surrogate", geom=GEOM) == pytest.approx(0.0)
+    assert mbr.lund_emd(a, b, backend="pot") > 1.0
+
+
+# ---------------------------------------------------------------------------
+# WP4a — `_reduce_risk`, and gate G1 (the linear path is bit-identical)
+# ---------------------------------------------------------------------------
+def test_reduce_risk_against_a_hand_computed_matrix():
+    """A 4x4 by hand, all three losses, so the implementation is checked against
+    arithmetic rather than against itself."""
+    D = np.array([
+        [0.0, 1.0, 5.0, 9.0],
+        [1.0, 0.0, 4.0, 8.0],
+        [5.0, 4.0, 0.0, 4.0],
+        [9.0, 8.0, 4.0, 0.0],
+    ])
+    # row sums 15, 13, 13, 21 over K = 4
+    assert np.allclose(mbr._reduce_risk(D, None, loss="linear"),
+                       [15 / 4, 13 / 4, 13 / 4, 21 / 4])
+    # at eps = 4 the rows have {0,1}, {1,0,4}, {4,0,4}, {4,0} within eps -> counts 2,3,3,2
+    counts = np.array([2, 3, 3, 2])
+    assert np.array_equal((D <= 4.0).sum(1), counts)
+    got = mbr._reduce_risk(D, None, loss="bounded", eps=4.0)
+    assert np.allclose(got, 1.0 - counts / 4.0), "risk == 1 - (neighbour fraction)"
+    assert int(np.argmin(got)) == int(np.argmax(counts)), (
+        "the bounded argmin MAXIMISES the number of neighbours within eps"
+    )
+    ker = mbr._reduce_risk(D, None, loss="kernel", eps=4.0)
+    assert np.allclose(ker, -np.exp(-0.5 * (D / 4.0) ** 2).mean(1))
+    assert ker.max() < 0.0, "the kernel risk is a NEGATED density, so its argmin is a mode"
+    with pytest.raises(ValueError, match="unknown mbr_loss"):
+        mbr._reduce_risk(D, None, loss="huber", eps=1.0)
+    with pytest.raises(ValueError, match="bandwidth"):
+        mbr._reduce_risk(D, None, loss="bounded", eps=None)
+
+
+def test_reduce_risk_linear_is_bit_identical_to_the_merged_expression():
+    """Gate G1: `max|delta risk| == 0.0`, elementwise, weighted and unweighted. Not
+    `approx` — the merged behaviour is `D.mean(axis=1)` and the dispatch must BE it, not
+    agree with it to within a tolerance."""
+    rng = np.random.default_rng(0)
+    D = rng.uniform(0.0, 40.0, (32, 32))
+    assert np.abs(mbr._reduce_risk(D, None, loss="linear") - D.mean(axis=1)).max() == 0.0
+    w = rng.uniform(0.2, 3.0, 32)
+    merged = (D * w[None, :]).sum(axis=1) / w.sum()
+    assert np.abs(mbr._reduce_risk(D, w, loss="linear") - merged).max() == 0.0
+
+
+def test_bandwidth_quantile_excludes_the_zero_pairs():
+    """eps is `Q_gamma` of the POSITIVE off-diagonal distances. The exclusion is not
+    tidiness: `_empty_value` returns exactly 0 for two empty clouds, so the empty clique is
+    invisible to the bandwidth rule while remaining decisive in the neighbour tally — the
+    §8.4 hazard in one line."""
+    D = np.zeros((10, 10))       # rows 0-4 an empty clique: mutual distance EXACTLY 0
+    D[:5, 5:] = 20.0             # ...at a large constant distance from every non-empty draw
+    D[5:, :5] = 20.0
+    assert mbr.bandwidth_quantile(D, 0.10) == pytest.approx(20.0), (
+        "the 50 zero pairs inside the clique are half the matrix and must not set eps"
+    )
+    assert mbr.bandwidth_quantile(np.zeros((4, 4)), 0.10) == 0.0
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_diagnostic_losses_side_channel(batch):
+    """WP4a's containment guarantee: `diagnostic_losses=()` is bit-identical to merged, and
+    a non-empty tuple returns the side channel WITHOUT mutating the returned estimate.
+
+    `.risk` keeps meaning "the achieved mean distance" — it has fourteen consumers, five of
+    which aggregate it across jets, and none of them break loudly if it silently becomes a
+    neighbour deficit."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34, 56], [12, 34], [5, 34, 56], [12, 30, 56]] * 3 + [[], []]
+    base = mbr.mbr_select(model, xf, nx, draws=list(draws), geom=geom, backend="pot")
+    assert isinstance(base, LundPointEstimate)
+
+    out = mbr.mbr_select(model, xf, nx, draws=list(draws), geom=geom, backend="pot",
+                         diagnostic_losses=("bounded", "kernel"))
+    assert isinstance(out, tuple) and len(out) == 2
+    pe, side = out
+    assert pe.risk == base.risk                      # bit-identical, not approx
+    assert [n.cell for n in pe.nodes] == [n.cell for n in base.nodes]
+    assert set(side) >= {"linear", "bounded", "kernel", "eps"}
+    assert side["eps"] > 0.0
+    for k in ("linear", "bounded", "kernel"):
+        assert 0 <= side[k] < len(draws)
+    # the side channel is a side channel: nothing about it reaches the estimate
+    assert pe.cluster_mass is None and pe.cluster_entropy is None
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_empty_clique_dominance(batch):
+    """Gate G8' as an executable regression: at a small eps the bounded loss selects the
+    EMPTY tree, and at an eps above the clique scale it does not.
+
+    This is the MAP degeneracy the README credits MBR with removing *structurally* — the
+    linear loss is immune because an empty cloud pays the full imbalance penalty inside the
+    mean, and the bounded loss reintroduces it because `_empty_value` puts every empty draw
+    at mutual distance exactly 0."""
+    xf, nx, geom = _jet(batch)
+    build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    # ~17% empty, the measured rate; the non-empty draws are deliberately DIVERSE, so no
+    # non-empty candidate has a large neighbourhood at small eps.
+    non_empty = [[c] for c in range(0, 90, 3)][:29]
+    draws = non_empty + [[]] * 6
+    clouds = [mbr.lund_cloud(d, geom, lnkt_cut=0.0) for d in draws]
+    D = mbr.lund_emd_matrix(clouds, clouds, backend="pot")
+    mults = np.array([len(d) for d in draws])
+
+    lin = int(np.argmin(mbr._reduce_risk(D, None, loss="linear")))
+    assert mults[lin] > 0, "the LINEAR loss must never pick the empty tree here"
+
+    small = 0.5 * float(D[D > 0].min())          # below every non-empty separation
+    tiny = int(np.argmin(mbr._reduce_risk(D, None, loss="bounded", eps=small)))
+    assert mults[tiny] == 0, "at a small eps the zero-diameter empty clique wins"
+
+    floor = float(np.quantile(D[D > 0], 0.60))   # an eps floor above the clique scale
+    big = int(np.argmin(mbr._reduce_risk(D, None, loss="bounded", eps=floor)))
+    assert mults[big] > 0, "above the clique scale a non-empty candidate wins again"
+
+
+# ---------------------------------------------------------------------------
+# WP2 — the set-valued prediction, across every family
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+@pytest.mark.parametrize("sel", MODELS, ids=lambda s: s[0].split("=")[1])
+def test_predict_set_returns_genuine_draws_for_every_family(sel, batch):
+    """The cluster layer touches only `D`, so family-agnosticism is a cheap invariant to
+    assert — and every member must be a tree the model actually generated."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(sel), geom).eval()
+    draws = [[12, 34, 56], [12, 34], [5, 34, 56], [12, 30, 56]] * 4 + [[]] * 8
+    ps = model.predict_set(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                           cluster_method="pam", cluster_min_mass=0.05)
+    assert len(ps) == len(ps.masses) == len(ps.radii) >= 1
+    assert ps.masses.sum() <= 1.0 + 1e-9
+    assert list(ps.masses) == sorted(ps.masses, reverse=True)
+    assert ps.top_mass == pytest.approx(ps.masses[0])
+    assert ps.point is ps.members[0]
+    for m, mass in zip(ps.members, ps.masses):
+        assert [n.cell for n in m.nodes] in [list(d) for d in draws]
+        assert m.cluster_mass == pytest.approx(mass)
+        assert m.cluster_entropy == pytest.approx(ps.entropy)
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_predict_set_leaves_the_point_estimate_bit_identical(batch):
+    """The plan's headline claim, at the level a caller can observe: taking a SET changes
+    nothing about the point estimate, because nothing in the cluster layer touches
+    `risk = D.mean(axis=1)`."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34, 56], [12, 34], [5, 34, 56], [12, 30, 56]] * 3
+    before = model.map_or_mbr(xf, nx, draws=list(draws), point_estimator="mbr",
+                              mbr_backend="pot")
+    model.predict_set(xf, nx, draws=list(draws), point_estimator="mbr", mbr_backend="pot",
+                      cluster_method="pam")
+    after = model.map_or_mbr(xf, nx, draws=list(draws), point_estimator="mbr",
+                             mbr_backend="pot")
+    assert after.risk == before.risk
+    assert [n.cell for n in after.nodes] == [n.cell for n in before.nodes]
+    assert before.cluster_mass is None and after.cluster_mass is None
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_predict_set_refuses_a_rectangular_D(batch):
+    """`notebooks/inference_demo.ipynb` sets MBR_N_CANDIDATES = 24, which is exactly the
+    setting that leaves `D` rectangular. Raise rather than silently override: overriding
+    would change the point estimate the caller asked for."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34, 56], [12, 34], [5, 34, 56]] * 3
+    with pytest.raises(ValueError, match="mbr_n_candidates"):
+        model.predict_set(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                          mbr_n_candidates=3, cluster_method="pam")
+
+
+def test_cluster_decode_defaults_are_all_off():
+    """Parity rule: every new switch defaults off with a bit-identical OFF path, and reads
+    through the tolerant `decode_params` backfill so a pre-change checkpoint still loads."""
+    from h2p_rsd_junipr.config import decode_params
+
+    dec = decode_params(load_config(["model=ar_junipr_v2"]))
+    assert dec["cluster_posterior"] is False
+    assert dec["cluster_method"] == "hdbscan"
+    assert dec["cluster_split"] is False
+    assert dec["cluster_min_mass"] == 0.05
+    assert dec["cluster_min_cluster_size"] == 0
+    assert dec["cluster_eps_quantile"] == 0.10
+    assert dec["set_alpha"] == 0.32
+    # ...and an OLD snapshot with no cluster block at all backfills rather than raising
+    from omegaconf import OmegaConf
+
+    old = OmegaConf.create({"decode": {"point_estimator": "mbr"}})
+    assert decode_params(old)["cluster_posterior"] is False

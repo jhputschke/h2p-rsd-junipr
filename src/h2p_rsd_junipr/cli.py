@@ -294,6 +294,21 @@ def cmd_eval(argv) -> int:
             model, val_ds, dm_jets, geometry, device,
             n_jets=exp["closure_jets"], K=exp["n_closure_samples"],
         )
+    if exp["cluster_diagnostics"]:
+        # Needs the K x K matrix, so it needs an MBR decode; with point_estimator="map"
+        # there is no D and the whole table would be NaN. Say so rather than emit one.
+        if str(decode.get("point_estimator", "map")) != "mbr":
+            print("[eval] experiment.cluster_diagnostics=true needs "
+                  "decode.point_estimator=mbr (the cluster layer reads the MBR distance "
+                  "matrix); skipping.")
+        else:
+            from .eval.clusters import run_cluster_diagnostics
+
+            metrics["clusters"] = run_cluster_diagnostics(
+                model, val_ds, dm_jets, geometry, device,
+                K=exp["n_closure_samples"], n_jets=exp["closure_jets"], decode=decode,
+                alpha=float(decode.get("set_alpha", 0.32)),
+            )
     if exp["exposure_diagnostic"]:
         from .eval.exposure import run_exposure
 
@@ -324,6 +339,10 @@ def cmd_eval(argv) -> int:
         out_dir = Path(ckpt).resolve().parent
         save_metrics(metrics, out_dir / "eval_metrics.json")
         figs = plot_calibration(metrics["calibration"], out_dir)
+        if metrics.get("clusters"):
+            from .eval.report import plot_clusters
+
+            figs = figs + plot_clusters(metrics["clusters"], out_dir)
         print(f"\n[eval] wrote {out_dir/'eval_metrics.json'}"
               + (f" and {len(figs)} figure(s)" if figs else ""))
         if mode_audit is not None:

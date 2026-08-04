@@ -14,9 +14,16 @@ from .closure import (
     print_point_estimate,
     run_closure,
 )
+from .clusters import (
+    fit_mass_temperature,
+    reliability,
+    run_cluster_diagnostics,
+    summarise_clusters,
+)
 from .exposure import continue_prob_by_depth, length_marginal, run_exposure
 from .mode_audit import audit_jet, jet_strata, run_mode_audit, summarise_mode_audit
-from .report import plot_calibration, save_metrics
+from .report import plot_calibration, plot_clusters, save_metrics
+from .stability import loss_stability_row, summarise_stability
 from .support import run_support_audit
 from .systematics import generator_spread
 
@@ -39,7 +46,14 @@ __all__ = [
     "jet_strata",
     "cell_region",
     "plot_calibration",
+    "plot_clusters",
     "save_metrics",
+    "run_cluster_diagnostics",
+    "summarise_clusters",
+    "reliability",
+    "fit_mass_temperature",
+    "loss_stability_row",
+    "summarise_stability",
     "run_exposure",
     "length_marginal",
     "continue_prob_by_depth",

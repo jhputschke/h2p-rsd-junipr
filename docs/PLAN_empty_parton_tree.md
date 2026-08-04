@@ -306,6 +306,47 @@ suite (`eval/calibration.py`, SBC/PIT on multiplicity) did **not** flag this —
 are computed against the sampler's own draws, so a uniformly under-confident `q(N|x)` can
 still pass. A dedicated `P(N=0)` reliability check is the missing diagnostic.
 
+## Cross-reference — is the cluster mass vector a viable input to the reject rule?
+
+Recorded here as the exit criterion of
+[`PLAN_PosteriorClusters.md`](PLAN_PosteriorClusters.md) requires, now that its WP1–WP3
+have landed (`inference/clusters.py`, `decode.cluster_posterior`).
+
+**Structurally, yes — and for free.** `inference.mbr._empty_value` returns exactly `0` for
+two empty clouds, so at any `K` the `N = 0` draws form a **zero-diameter clique** at a large
+constant distance from every non-empty draw. Any density method finds it by construction:
+the empty stratum comes back as its own cluster whose radius is `0` and whose mass **is**
+`q(0|x)` — the very quantity the gate thresholds, and the one already measured as
+well-calibrated (AUC ≈ 0.820) while every point estimator mishandled it. `eval/clusters.py`
+reports `G3_empty_mass_vs_q0` for exactly this; a nonzero value there is a metric-convention
+bug rather than a finding about the posterior, and on the arms measured so far it is `0.000`.
+
+**So the substitution is testable, but it is not yet an improvement, for two reasons.**
+
+1. **It changes nothing about the number.** The cluster mass of the `N = 0` stratum is the
+   empirical `P(N = 0)` over the same draws `length_pmf` already histograms — the identity
+   `G3` checks. Routing the gate through the cluster layer would therefore threshold the
+   same value at `K²` EMD solves per jet instead of none. The cluster layer earns its cost
+   on the `N ≥ 1` strata, where there is a partition to find; at `N = 0` it recovers a
+   number that was already available.
+2. **What the gate actually wants is a *calibrated* `q(0|x)`, and the cluster layer does
+   not supply one.** Chow's rule (Chow, *IEEE Trans. Inf. Theory* **16** (1970) 41) is a
+   statement about a posterior probability; `top_mass` is not calibrated until
+   `PLAN_PosteriorClusters.md` WP5 says it is, and with `decode.cluster_split=false` it is
+   biased **high**. The recalibration work item above (§ "Second work item") is the thing
+   that moves this number, and it is independent of clustering.
+
+**Where the cluster layer *does* help the empty-tree decision** is the part the gate cannot
+express at all: `entropy` and `top_mass` distinguish "confidently empty" from "split between
+empty and one soft emission", which is a different jet and currently gets the same answer.
+That is a **reject-with-a-reason** rule rather than a better threshold, and it is the form
+worth prototyping if this is revisited.
+
+**Verdict: viable, currently redundant.** Keep `empty_threshold` reading `length_pmf`. If
+the gate is reworked into the general `argmin` over an explicit loss on `n` (below), the
+cluster mass vector is the natural place to get `q(m|x)` for the `m ≥ 1` terms, and the
+substitution becomes worth its cost.
+
 ## Open questions
 
 - Should the gate be **`P(N=0)` specific, or a general `argmin` over an explicit loss on
