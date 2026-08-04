@@ -201,12 +201,15 @@ def _loaded_omp_runtimes() -> set:
 
     Walks dyld's image list; `realpath` so that a symlinked duplicate counts once.
 
-    **Darwin only, and empty everywhere else — deliberately, not as a stub.** What this
-    counts is runtimes that would make a thread team *fatal*, and that is a macOS
-    phenomenon: two LLVM OpenMP runtimes abort, whereas on Linux GCC's libgomp coexists
-    with the one PyTorch bundles, which is why `_guard_wasserstein_openmp` also returns
-    early there. Enumerating `/proc/self/maps` on Linux would return a number that reads
-    like a hazard and is not one.
+    An inventory, not a verdict: which of these can make a thread team *fatal* is
+    `_wasserstein_omp_conflict`'s call, taken on two snapshots of this set rather than on
+    its size, because a stranger's vendored copy is mapped here too and is harmless.
+
+    **Darwin only, and empty everywhere else — deliberately, not as a stub.** The abort
+    it feeds is a macOS phenomenon: two LLVM OpenMP runtimes abort, whereas on Linux GCC's
+    libgomp coexists with the one PyTorch bundles, which is why `_guard_wasserstein_openmp`
+    also returns early there. Enumerating `/proc/self/maps` on Linux would return paths
+    that read like a hazard and are not one.
 
     It must not RAISE off Darwin either: `_dyld_image_count` is a dyld symbol, so the
     ctypes lookup fails with `undefined symbol` on Linux, and any caller probing the
@@ -239,10 +242,38 @@ _REBUILD_HINT = (
 # only by the guard below, when a duplicate OpenMP runtime makes a team fatal.
 _EMDS_N_JOBS = None
 _OPENMP_GUARDED = False
+# Whether wasserstein's own runtime is the duplicate. None until the guard has run;
+# it is the hazard the guard acts on, and what a test must skip on.
+_OMP_CONFLICT = None
+
+
+def _wasserstein_omp_conflict(before: set, after: set, *, precommitted: bool) -> bool:
+    """Did *wasserstein* pull in a second OpenMP runtime -- as opposed to merely running
+    in a process that happens to hold several?
+
+    ``before``/``after`` bracket the dlopen of wasserstein's OpenMP extension, so
+    ``after - before`` is whatever its ``@rpath/libomp.dylib`` resolved to, and is empty
+    when that resolved to a runtime already mapped.
+
+    Identifying wasserstein's runtime is the point; counting all of them is what this
+    replaces. Third-party wheels vendor private copies -- ``sklearn/.dylibs/libomp.dylib``
+    is one, and POT imports `sklearn` when it is installed, so *every* `import energyflow`
+    maps it. Merely having scikit-learn in the environment therefore took the count from
+    one to two and downgraded a build that was correctly sharing PyTorch's runtime,
+    costing ~11x for a hazard that was not there. A stranger's copy is invisible to
+    wasserstein, whose team is created inside the runtime *it* linked; only a different
+    one under its own rpath can make that team fatal.
+
+    ``precommitted`` covers something having imported the extension before the guard ran:
+    the resolve already happened, so ``after - before`` is empty for the wrong reason and
+    nothing is left but the conservative count."""
+    if precommitted:
+        return len(after) > 1
+    return bool(after - before) and len(after) > 1
 
 
 def _guard_wasserstein_openmp() -> None:
-    """macOS: keep `wasserstein`'s OpenMP off when a *second* runtime is loaded.
+    """macOS: keep `wasserstein`'s OpenMP off when it links a runtime of its own.
 
     PyTorch bundles `torch/lib/libomp.dylib`, and `import energyflow` loads it before
     we get here (energyflow -> POT -> `ot.backend` imports torch). If `wasserstein`'s
@@ -254,9 +285,11 @@ def _guard_wasserstein_openmp() -> None:
     what downgraded OpenMP's own self-explaining "Error #15" abort into that silent
     SIGSEGV, so it is no longer set unless it is the only thing left to try.
 
-    Probe rather than guess: dlopen the OpenMP extension -- which resolves its rpath
-    but starts no parallel region, so loading is safe even though `emds` is not -- and
-    count the runtimes. Which repair is available depends on who got here first:
+    Probe rather than guess: dlopen the OpenMP extension -- which resolves its rpath but
+    starts no parallel region, so loading is safe even though `emds` is not -- bracketed
+    by a snapshot of the mapped runtimes, so the diff names the one *it* linked rather
+    than every one in the process (see `_wasserstein_omp_conflict`). Which repair is
+    available depends on who got here first:
 
       * Nothing has touched the extension yet -> take wasserstein's own documented
         Darwin opt-out (`without_openmp()`), which selects its no-OpenMP build. Clean:
@@ -271,7 +304,7 @@ def _guard_wasserstein_openmp() -> None:
     with one shared runtime, 32.7 single-threaded, 43.1 on the per-pair `emd`. The
     batched path is still worth taking, but a shared runtime is worth ~11x more --
     hence a warning that names the repair rather than a silent degradation."""
-    global _EMDS_N_JOBS, _OPENMP_GUARDED
+    global _EMDS_N_JOBS, _OPENMP_GUARDED, _OMP_CONFLICT
     if _OPENMP_GUARDED or platform.system() != "Darwin":
         return  # Linux: GCC's libgomp coexists with torch's runtime without aborting
     try:
@@ -283,14 +316,19 @@ def _guard_wasserstein_openmp() -> None:
                                  "_wasserstein_omp*.so"))
     if not sos:  # pragma: no cover - no OpenMP build exists, so nothing to guard
         return
+    before = _loaded_omp_runtimes()  # bracket the dlopen: the diff is wasserstein's own
     try:
         ctypes.CDLL(sos[0], mode=ctypes.RTLD_LOCAL)  # resolve its libomp; no OMP init
     except OSError:  # pragma: no cover - an unloadable extension fails at first use
         return
     _OPENMP_GUARDED = True
-    if len(_loaded_omp_runtimes()) <= 1:
-        return  # one runtime -> the OpenMP-parallel `emds` is safe, and ~11x faster
-    if wconfig._CAN_SET_OPENMP:
+    precommitted = not wconfig._CAN_SET_OPENMP  # extension already imported by someone
+    _OMP_CONFLICT = _wasserstein_omp_conflict(
+        before, _loaded_omp_runtimes(), precommitted=precommitted
+    )
+    if not _OMP_CONFLICT:
+        return  # shares the mapped runtime -> the parallel `emds` is safe, and ~11x faster
+    if not precommitted:
         wconfig.without_openmp()  # no extension loaded yet: pick the no-OpenMP build
         warnings.warn(
             "Two OpenMP runtimes are loaded (PyTorch's bundled libomp and the one "

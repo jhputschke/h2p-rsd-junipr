@@ -217,8 +217,9 @@ def test_batched_emds_never_runs_multithreaded_on_duplicate_openmp():
         pytest.skip("duplicate-runtime abort is a Darwin phenomenon; libgomp coexists "
                     "with torch's runtime on Linux and the guard no-ops there")
     mbr._import_ef()
-    if len(mbr._loaded_omp_runtimes()) <= 1:
-        pytest.skip("single OpenMP runtime: the parallel path is safe here")
+    if not mbr._OMP_CONFLICT:
+        pytest.skip("wasserstein shares an already-mapped runtime (or brought the only "
+                    "one): the parallel path is safe here")
     from wasserstein import _wasserstein as wext
 
     assert not wext.cvar.COMPILED_WITH_OPENMP or mbr._EMDS_N_JOBS == 1, (
@@ -239,6 +240,35 @@ def test_loaded_omp_runtimes_is_total_across_platforms():
             "off Darwin this must be empty: what it counts is runtimes that make a "
             "thread team fatal, and that is a macOS phenomenon"
         )
+
+
+def test_a_third_party_libomp_does_not_downgrade_a_shared_build():
+    """The guard must identify *wasserstein's* runtime, not count every runtime loaded.
+
+    scikit-learn's macOS wheel vendors `sklearn/.dylibs/libomp.dylib`, and POT imports
+    sklearn whenever it is installed -- so every `import energyflow` maps a second runtime
+    that wasserstein never touches. Counting took that from one to two and switched a build
+    correctly sharing PyTorch's libomp to the single-threaded one, paying ~11x for a
+    segfault that could not happen. Pure set logic, so it runs off Darwin too."""
+    torch_omp, sk_omp, conda_omp = "/t/torch/libomp.dylib", "/t/sk/libomp.dylib", "/t/libomp.dylib"
+
+    # The regression: a stranger's copy was already mapped, and wasserstein added nothing.
+    assert not mbr._wasserstein_omp_conflict(
+        {torch_omp, sk_omp}, {torch_omp, sk_omp}, precommitted=False
+    )
+    # The real hazard: the dlopen resolved to a libomp that was not already there.
+    assert mbr._wasserstein_omp_conflict(
+        {torch_omp}, {torch_omp, conda_omp}, precommitted=False
+    )
+    # Sharing torch's runtime, and being the only runtime, are both safe.
+    assert not mbr._wasserstein_omp_conflict({torch_omp}, {torch_omp}, precommitted=False)
+    assert not mbr._wasserstein_omp_conflict(set(), {conda_omp}, precommitted=False)
+    # Pre-committed: the resolve already happened, so the diff is empty for the wrong
+    # reason and only the conservative count is left.
+    assert mbr._wasserstein_omp_conflict(
+        {torch_omp, sk_omp}, {torch_omp, sk_omp}, precommitted=True
+    )
+    assert not mbr._wasserstein_omp_conflict({torch_omp}, {torch_omp}, precommitted=True)
 
 
 @pytest.mark.skipif(not EF_OK, reason="energyflow solver unavailable")
