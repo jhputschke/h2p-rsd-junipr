@@ -354,13 +354,14 @@ from h2p_rsd_junipr.inference.clusters import (
     set_size_for,
     support_radii,
 )
-from h2p_rsd_junipr.inference.length import learned_min_emissions
+from h2p_rsd_junipr.inference.length import learned_min_emissions, quantile_floor
 from h2p_rsd_junipr.inference.mbr import (
     _reduce_risk,
     bandwidth_quantile,
     lund_cloud,
     lund_emd_matrix,
     posterior_distances,
+    stratified_medoid,
 )
 from h2p_rsd_junipr.models.base import build_model
 from h2p_rsd_junipr.train.checkpoint import load_for_inference
@@ -378,6 +379,7 @@ C_POST  = "#199e70"    # posterior draw       -- aqua   (slot 3), dashed
 C_SET0  = "#9a4fc4"    # top-mass exemplar    -- violet (slot 4)
 C_BEST  = "#b8a11f"    # oracle best member   -- ochre  (slot 5), never a headline
 C_GATE  = "#0f8c9e"    # gated exemplar       -- teal   (slot 6)
+C_NFIRST = "#c44f8a"   # N-first medoid       -- magenta (slot 7)
 # Cluster membership inside ONE jet. Categorical, not sequential: cluster ids are labels,
 # and a sequential ramp would suggest an ordering the partition does not carry.
 C_CLUSTER = ["#9a4fc4", "#199e70", "#eb6834", "#2a78d6", "#b8a11f", "#c44f8a"]
@@ -852,17 +854,19 @@ def pe_coords(pe):
     return np.array([[n.ln_invDelta, n.ln_kt, n.ln_z, n.psi] for n in pe.nodes], dtype=float)
 
 
-SERIES = ("truth", "rsd", "map", "mbr", "mbr_gated", "set0", "set0_gated", "setbest",
-          "post")
+SERIES = ("truth", "rsd", "map", "mbr", "mbr_gated", "mbr_n", "mbr_n_gated",
+          "set0", "set0_gated", "setbest", "post")
 # Everything differenced against truth. `setbest` is in the list but is fenced off in every
 # summary table: it uses the truth to CHOOSE the member, so it measures whether the set is
 # worth reporting, not how well the model did.
-MODELS = ("rsd", "map", "mbr", "mbr_gated", "set0", "set0_gated", "setbest", "post")
-HEADLINE = ("rsd", "mbr", "mbr_gated", "set0", "set0_gated")   # quotable
+MODELS = ("rsd", "map", "mbr", "mbr_gated", "mbr_n", "mbr_n_gated", "set0",
+          "set0_gated", "setbest", "post")
+HEADLINE = ("rsd", "mbr", "mbr_gated", "mbr_n", "mbr_n_gated", "set0", "set0_gated")
 # Which baseline each estimator's RMS ratio is taken against. GATED against GATED: a gated
 # estimator measured against an ungated one would fold "the gate helped" into a number
 # billed as "the set helped".
-RATIO_REF = {"mbr": "rsd", "mbr_gated": "rsd", "set0": "mbr", "set0_gated": "mbr_gated"}
+RATIO_REF = {"mbr": "rsd", "mbr_gated": "rsd", "set0": "mbr", "set0_gated": "mbr_gated",
+             "mbr_n": "mbr", "mbr_n_gated": "mbr_gated"}
 STYLE = {
     "truth":   (C_TRUTH, "-",  r"truth $y$ (parton)"),
     "rsd":     (C_RSD_E, "-",  r"plain RSD $x$ (hadron)"),
@@ -871,13 +875,17 @@ STYLE = {
     "set0":    (C_SET0,  "-",  r"top-mass exemplar $\hat y_{(0)}$"),
     "set0_gated": (C_GATE, "-", r"gated exemplar (empty decided by $\tau$)"),
     "mbr_gated": (C_MBR,  "--", r"MBR medoid, gated"),
+    "mbr_n":   (C_NFIRST, "-",  r"N-first medoid $\hat y_{N}$"),
+    "mbr_n_gated": (C_NFIRST, "--", r"N-first medoid, gated"),
     "setbest": (C_BEST,  ":",  r"best member (ORACLE)"),
     "post":    (C_POST,  "--", r"posterior draw"),
 }
 MARKER = {"truth": "o", "rsd": "x", "map": "*", "mbr": "D", "mbr_gated": "d",
-          "set0": "P", "set0_gated": "X", "setbest": "v", "post": "s"}
+          "mbr_n": "^", "mbr_n_gated": "<", "set0": "P", "set0_gated": "X",
+          "setbest": "v", "post": "s"}
 MSIZE  = {"truth": 8.0, "rsd": 7.0, "map": 13.0, "mbr": 5.5, "mbr_gated": 5.5,
-          "set0": 8.0, "set0_gated": 8.0, "setbest": 6.0, "post": 4.5}
+          "mbr_n": 7.0, "mbr_n_gated": 7.0, "set0": 8.0, "set0_gated": 8.0,
+          "setbest": 6.0, "post": 4.5}
 
 
 @torch.inference_mode()
@@ -932,8 +940,25 @@ def estimate_jet(i, rng=None, k_draws=None, with_cloud=False):
     # the SAME NUMBER, so the fix is to compare it to the frozen tau instead
     # (docs/PLAN_empty_parton_tree.md). `members` is untouched; only the recommendation moves.
     j_empty = next((j for j, m in enumerate(members) if m.multiplicity == 0), None)
-    q0 = float(model.length_pmf(xf, nx, mults=mults.tolist())[0])
+    pmf = np.asarray(model.length_pmf(xf, nx, mults=mults.tolist()), dtype=float)
+    q0 = float(pmf[0])
     gate_fired = bool(EMPTY_THRESHOLD > 0.0 and q0 >= EMPTY_THRESHOLD)
+
+    # --- N-first (stratified) MBR, docs/PLAN_StratifiedMBR.md --------------------
+    # N from the calibrated marginal (the median = the Bayes estimator under L=|n-m|),
+    # shape from the medoid WITHIN that stratum. Everything below is another reduction
+    # over the same D: zero EMD calls.
+    n_hat = int(quantile_floor(pmf, 0.5))
+    win_n, risk_n, n_used = stratified_medoid(D, mults, n_hat)
+    mbrn = model.describe_cells(xf, nx, draws[win_n], coords_by_draw[win_n])
+    mbrn.risk, mbrn.estimator = float(risk_n), "mbr_n"
+    # Two controls that separate WHAT the estimator changes:
+    #   win_m -- de-smearing ALONE: the same N the medoid already chose, expectation
+    #            restricted to that stratum. The difference d_mbr - d_mbr_nmed is what
+    #            conditioning buys with no new information.
+    #   win_t -- the ORACLE N: the ceiling of the N channel given this shape rule, so
+    #            d_mbr_n - d_mbr_ntrue prices what a better length head could still buy.
+    win_m, _rm, _nm = stratified_medoid(D, mults, int(mults[win]))
     if EMPTY_THRESHOLD <= 0.0:
         j_gated = 0          # no frozen tau -> no gate -> identical to set0, by construction
     elif gate_fired:
@@ -948,6 +973,9 @@ def estimate_jet(i, rng=None, k_draws=None, with_cloud=False):
     y = np.asarray(item["yraw"].numpy(), dtype=float)
     tc = lund_cloud([row for row in y], geom, **CLOUD_KW)
     d_to_truth = lund_emd_matrix([tc], clouds, **EMD_KW, geom=geom)[0]
+    # the ORACLE-N control: same shape rule, N handed the right answer. Truth-based, so it
+    # lives here rather than with the truth-free block above.
+    win_t, _rt, nt_used = stratified_medoid(D, mults, int(len(y)))
     d_ex = np.array([d_to_truth[e] for e in cs.exemplars], dtype=float)
     j_best = int(np.argmin(d_ex)) if d_ex.size else -1
     j_truth = assign_truth(d_ex, support_radii(D, cs.labels, cs.exemplars))
@@ -971,6 +999,9 @@ def estimate_jet(i, rng=None, k_draws=None, with_cloud=False):
         # the `set0_gated` vs `mbr` ratio conflates "the gate helped" with "the set helped".
         "mbr_gated": (np.zeros((0, 4)) if (EMPTY_THRESHOLD > 0.0 and gate_fired)
                       else pe_coords(mbr)),
+        "mbr_n": pe_coords(mbrn),
+        "mbr_n_gated": (np.zeros((0, 4)) if (EMPTY_THRESHOLD > 0.0 and gate_fired)
+                        else pe_coords(mbrn)),
         "setbest": pe_coords(members[j_best]) if j_best >= 0 else np.zeros((0, 4)),
         "post": (np.asarray(coords_by_draw[pick].cpu().double().numpy()).reshape(-1, 4)
                  if pick >= 0 and coords_by_draw[pick] is not None else np.zeros((0, 4))),
@@ -982,6 +1013,20 @@ def estimate_jet(i, rng=None, k_draws=None, with_cloud=False):
         "empty_gate_fired": gate_fired,
         "gated_index": int(j_gated),
         "gate_moved": bool(j_gated != 0),
+        # --- the N-first estimator and its controls (PLAN_StratifiedMBR WP1) -------
+        "n_true": int(len(y)),
+        "n_hat": int(n_hat),
+        "n_used": int(n_used),
+        "n_hat_realized": bool(n_used == n_hat),
+        "stratum_size": int(np.sum(mults == n_used)),
+        "risk_n": float(risk_n),
+        "n_medoid": int(mults[win]),
+        "ntrue_populated": bool(nt_used == len(y)),
+        # the conditional N decision: the median AFTER the gate has said "non-empty".
+        # Measured, not shipped -- it differs from the plain median only when q0 is sizable.
+        "n_hat_cond": int(quantile_floor(
+            (lambda p: p / p.sum() if p.sum() > 0 else p)(
+                np.concatenate([[0.0], pmf[1:]])), 0.5)),
         # --- the three per-jet scalars (WP3) ---------------------------------
         "top_mass": float(cs.top_mass),
         "entropy": float(cs.entropy),
@@ -1009,6 +1054,10 @@ def estimate_jet(i, rng=None, k_draws=None, with_cloud=False):
         # generated (a sampler problem), and the partition simply being finer than the
         # truth's neighbourhood (a method artifact -- more clusters means tighter supports).
         # The nearest DRAW is method-free and separates them.
+        "d_mbr_n": float(d_to_truth[win_n]),
+        "d_mbr_nmed": float(d_to_truth[win_m]),
+        "d_mbr_ntrue": float(d_to_truth[win_t]),
+        "d_oracle_stratum": float(d_to_truth[mults == n_used].min()),
         "d_nearest_draw": float(d_to_truth.min()),
         "d_median_draw": float(np.median(d_to_truth)),
         # A truth-free ALTERNATIVE ranking: the exemplar of the cluster the linear medoid
@@ -1316,6 +1365,8 @@ for s in SERIES:
             "mbr": "headline: the Frechet median",
             "set0": "headline: the top-mass exemplar (mass argmax)",
             "mbr_gated": "headline: the medoid under the SAME gate (the fair baseline)",
+            "mbr_n": "headline: N-first -- calibrated median N, then the medoid WITHIN it",
+            "mbr_n_gated": "headline: the same, under the gate",
             "set0_gated": "headline: the same set, emptiness decided by the frozen tau",
             "setbest": "ORACLE -- diagnostic only, never a result",
             "post": "scale reference, not a competitor"}[s]
@@ -1706,7 +1757,8 @@ _g = np.array([r["gate_moved"] for r in ROWS])
 _f = np.array([r["empty_gate_fired"] for r in ROWS])
 _e0 = np.array([r["empty_cluster"] == 0 for r in ROWS])
 _n0 = {s: float(np.mean([len(a) == 0 for a in RAW[s]])) for s in
-       ("truth", "mbr", "mbr_gated", "set0", "set0_gated", "setbest", "post")}
+       ("truth", "mbr", "mbr_gated", "mbr_n", "mbr_n_gated", "set0", "set0_gated",
+        "setbest", "post")}
 
 if EMPTY_THRESHOLD <= 0.0:
     print("no frozen tau was read, so there is no gate and set0_gated == set0 exactly.")
@@ -1720,7 +1772,8 @@ else:
     print()
     _mm_truth = float(np.mean([len(a) for a in RAW["truth"]]))
     print(f"  {'series':<12}{'P(n=0)':>9}{'vs truth':>10}{'mean mult':>11}{'vs truth':>10}")
-    for s in ("truth", "mbr", "mbr_gated", "set0", "set0_gated", "setbest", "post"):
+    for s in ("truth", "mbr", "mbr_gated", "mbr_n", "mbr_n_gated", "set0", "set0_gated",
+              "setbest", "post"):
         mm = float(np.mean([len(a) for a in RAW[s]]))
         d0 = "" if s == "truth" else f"{_n0[s] - _n0['truth']:>+10.3f}"
         dm = "" if s == "truth" else f"{mm - _mm_truth:>+10.3f}"
@@ -1740,7 +1793,7 @@ else:
     # disagree about which jets are empty, so those means would be over different jets and
     # the comparison would be partly a comparison of subsets. Condition on the jets where
     # TRUTH and every compared series are all non-empty, so the rows are identical.
-    _cmp = ("truth", "mbr", "mbr_gated", "set0", "set0_gated")
+    _cmp = ("truth", "mbr", "mbr_gated", "mbr_n", "mbr_n_gated", "set0", "set0_gated")
     _both = np.ones(len(RAW["truth"]), dtype=bool)
     for s in _cmp:
         _both &= np.array([len(a) > 0 for a in RAW[s]])
@@ -2195,6 +2248,168 @@ print(f"  -> G2 {'>=' if G2 >= 0.90 else '<'} 0.90; "
 
 # ---------------------------------------------------------------------------
 md(r"""
+### 9b. Does deciding $N$ first help? — the pre-registered decision table
+
+`mbr` minimises a mean distance over **every** multiplicity stratum at once, and the EMD's
+mass-imbalance term charges $\sim R|W_a - W_b|$ across strata — so the medoid is pulled
+toward whatever $N$ is most populous and can land between strata, representing none. §9
+measures the cost: the medoid is 2.349 from truth against a 1.476 oracle over exemplars,
+and 83% of the resolvable ambiguity is *between* $N$ strata.
+
+`mbr_n` splits the decode at that seam, using each channel where it is trustworthy:
+
+$$
+\hat n = Q_{0.5}\!\left(q(N\mid x)\right),
+\qquad
+\hat y = \arg\min_{|h| = \hat n}\ \frac{1}{|S|}\sum_{k \in S} d(h, y^{(k)}),
+\quad S = \{k : |y^{(k)}| = \hat n\}.
+$$
+
+Stage 1 is the Bayes estimator under $L(n,m) = |n-m|$ — the "general argmin over an
+explicit loss on $n$" that [`PLAN_empty_parton_tree.md`](../docs/PLAN_empty_parton_tree.md)
+deferred, with the empty gate as its $n=0$ special case. Stage 2 is pure shape: within a
+stratum every pair carries equal total weight, so the imbalance term drops out.
+
+**Two controls separate what the estimator changes**, and both are free (another reduction
+over the same $D$):
+
+- **stratified at $N$(medoid)** — de-smearing *alone*: the same $N$ the medoid already
+  chose, expectation restricted. `d_mbr − d_mbr_nmed` is what conditioning buys with **no
+  new information**.
+- **stratified at $n_\mathrm{true}$** — the oracle ceiling of the $N$ channel given this
+  shape rule, so `d_mbr_n − d_mbr_ntrue` prices what a better length head could still buy.
+
+**The ship gate, fixed before this cell was ever run** (docs/PLAN_StratifiedMBR.md WP1).
+`mbr_n` becomes the recommended decode iff **all three** hold:
+
+1. the jet-bootstrap 95% CI on the paired $\Delta = d_\mathrm{mbr} - d_{\mathrm{mbr}\_n}$
+   **excludes 0**;
+2. §6's RMS-vs-plain-RSD ratios for `mbr_n` are **no worse than `mbr`'s within their CIs**
+   on $\ln(1/\Delta R)$ and $\ln k_t$ — the failure mode that disqualified the top-mass
+   exemplar (1.112 / 1.141 on identical rows);
+3. §6b's multiplicity marginals for `mbr_n_gated` are no worse than `mbr_gated`'s.
+
+A $\Delta$ that is **flat** across the `strata_differ` split says the gain is de-smearing,
+not $N$ information — reportable either way, and it would point the follow-up at the metric
+rather than at the length head.
+""")
+
+code(r'''
+# `_nf_`-prefixed throughout: section 11 binds `_ok` to an index array, and the artifact
+# cell in section 12 reads these back AFTER it has run.
+_nf_all = [r for r in ROWS if np.isfinite(r["d_mbr"]) and np.isfinite(r["d_mbr_n"])]
+_nf_multi = [r for r in _nf_all if r["n_clusters"] >= 2]
+# Same expression section 9 uses: a split BETWEEN N strata is a different physical claim
+# from a split WITHIN one, and only the second is shape ambiguity.
+_nf_diff = [r for r in _nf_multi if r["n_second"] >= 0 and r["n_top"] != r["n_second"]]
+_nf_same = [r for r in _nf_multi if r["n_second"] >= 0 and r["n_top"] == r["n_second"]]
+
+
+def _nf_col(rs, key):
+    v = [r[key] for r in rs if np.isfinite(r.get(key, np.nan))]
+    return float(np.mean(v)) if v else float("nan")
+
+
+print("SELECTION-RULE LADDER -- mean d(truth), by subset")
+print(f"  {'rule':<38}{'all':>9}{'multi':>9}{'differ':>9}{'same-N':>9}   truth-free?")
+_rows = [
+    ("global medoid (mbr)", "d_mbr", "yes"),
+    ("stratified at N(medoid)", "d_mbr_nmed", "yes  <- de-smearing ALONE"),
+    ("N-first (mbr_n)", "d_mbr_n", "yes  <- the claim"),
+    ("top-mass exemplar (set0)", "d_top", "yes"),
+    ("stratified at n_true", "d_mbr_ntrue", "NO -- oracle N"),
+    ("min over the decided stratum", "d_oracle_stratum", "NO -- oracle shape"),
+    ("closest exemplar", "d_best", "NO -- oracle"),
+]
+for lab, key, free in _rows:
+    print(f"  {lab:<38}" + "".join(f"{_nf_col(rs, key):>9.3f}"
+                                   for rs in (_nf_all, _nf_multi, _nf_diff, _nf_same)) + f"   {free}")
+print()
+print(f"  de-smearing alone   d_mbr - d_mbr_nmed = "
+      f"{_nf_col(_nf_all, 'd_mbr') - _nf_col(_nf_all, 'd_mbr_nmed'):+.3f}")
+print(f"  the N decision      d_mbr_nmed - d_mbr_n = "
+      f"{_nf_col(_nf_all, 'd_mbr_nmed') - _nf_col(_nf_all, 'd_mbr_n'):+.3f}")
+print(f"  residual N error    d_mbr_n - d_mbr_ntrue = "
+      f"{_nf_col(_nf_all, 'd_mbr_n') - _nf_col(_nf_all, 'd_mbr_ntrue'):+.3f}"
+      f"   (what a better length head could still buy)")
+''')
+
+code(r'''
+print("THE N DECISION ITSELF")
+_nf_ntrue = np.array([r["n_true"] for r in ROWS])
+_nf_cands = {"n_hat (median q(N|x))": np.array([r["n_hat"] for r in ROWS]),
+          "N(medoid)": np.array([r["n_medoid"] for r in ROWS]),
+          "N(set0)": np.array([len(a) for a in RAW["set0"]]),
+          "N(MAP)": np.array([len(a) for a in RAW["map"]]),
+          "N(posterior draw)": np.array([len(a) for a in RAW["post"]])}
+print(f"  {'rule':<24}{'P(n = n_true)':>15}{'<|n - n_true|>':>16}   (L1 is the loss the")
+print(f"  {'':<24}{'':>15}{'':>16}    median is Bayes for)")
+for lab, v in _nf_cands.items():
+    print(f"  {lab:<24}{float(np.mean(v == _nf_ntrue)):>15.3f}{float(np.mean(np.abs(v - _nf_ntrue))):>16.3f}")
+_nf_real = np.array([r["n_hat_realized"] for r in ROWS])
+_cond = np.array([r["n_hat_cond"] for r in ROWS])
+_nh = _nf_cands["n_hat (median q(N|x))"]
+print(f"\n  n_hat realized in the pool on {_nf_real.mean():.3%} of jets"
+      f"   (1.000 expected: the median of a histogram pmf always is)")
+print(f"  the CONDITIONAL median (gate said non-empty) agrees with it on "
+      f"{float(np.mean(_cond == _nh)):.3f} of jets")
+print(f"  mean stratum size {np.mean([r['stratum_size'] for r in ROWS]):.1f} of "
+      f"{K_DRAWS} draws   -- the support the shape decode gets to choose from")
+''')
+
+code(r'''
+def _nf_boot(rs, a="d_mbr", b="d_mbr_n", n_boot=N_BOOT, seed=SEED):
+    """Jet-level bootstrap on the PAIRED difference. Paired because both estimators are
+    read off the same D for the same jet, so the per-jet difference removes the jet-to-jet
+    spread that would otherwise swamp it."""
+    d = np.array([r[a] - r[b] for r in rs
+                  if np.isfinite(r.get(a, np.nan)) and np.isfinite(r.get(b, np.nan))])
+    if d.size < MIN_CI_JETS:
+        return float(np.mean(d)) if d.size else float("nan"), float("nan"), float("nan"), d.size
+    rng = np.random.default_rng(seed)
+    vals = [float(d[rng.integers(0, d.size, d.size)].mean()) for _ in range(n_boot)]
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    return float(d.mean()), float(lo), float(hi), int(d.size)
+
+
+print("SHIP GATE (pre-registered in the markdown above, before this cell was first run)")
+print(f"  {'subset':<26}{'n':>6}{'mean delta':>12}{'95% CI':>22}   verdict")
+_nf_verdict = {}
+for lab, rs in (("all jets", _nf_all), ("multi-cluster", _nf_multi),
+                ("...top-2 differ in N", _nf_diff), ("...top-2 same N", _nf_same)):
+    m, lo, hi, n = _nf_boot(rs)
+    ok = np.isfinite(lo) and lo > 0.0
+    _nf_verdict[lab] = ok
+    ci = f"[{lo:+.3f}, {hi:+.3f}]" if np.isfinite(lo) else f"(n={n} < {MIN_CI_JETS})"
+    # A CI entirely BELOW zero also excludes zero -- it just excludes it the other way.
+    # Saying "brackets 0" there would report a significant loss as a null result, which is
+    # the one misreading this table must not enable.
+    if not np.isfinite(lo):
+        verdict = "not scored"
+    elif lo > 0.0:
+        verdict = "EXCLUDES 0 -- mbr_n is CLOSER"
+    elif hi < 0.0:
+        verdict = "EXCLUDES 0 -- mbr_n is FARTHER"
+    else:
+        verdict = "brackets 0"
+    print(f"  {lab:<26}{n:>6}{m:>+12.3f}{ci:>22}   {verdict}")
+print("  delta = d(medoid) - d(mbr_n); POSITIVE means the N-first estimator is closer to")
+print("  truth. Criterion (i) is the 'all jets' row excluding 0.")
+print()
+_nf_g0 = float(np.mean([r["d_mbr"] - r["d_mbr_n"] for r in _nf_multi])) if _nf_multi else float("nan")
+print(f"  as a fraction of the 0.603 real-information component on multi-cluster jets: "
+      f"{_nf_g0 / 0.603:.2f}x")
+print("  (mbr_n makes ONE selection, so it gets none of the 0.592 order-statistic share")
+print("   an oracle-over-exemplars enjoys -- this fraction is the honest yardstick.)")
+print()
+print("  Criterion (ii) -- section 6's RMS ratios vs plain RSD -- and (iii) -- section 6b's")
+print("  marginals -- are read off those sections; all three must hold for mbr_n to become")
+print("  the recommended decode. Any failure leaves it available and documented as")
+print("  measured-not-recommended, which is a result rather than a retreat.")
+''')
+
+# ---------------------------------------------------------------------------
+md(r"""
 ## 10. Loss stability — a diagnostic, and explicitly **not** a systematic
 
 The WP4a columns, computed on the same `D` at zero additional EMD cost. What they settle:
@@ -2304,31 +2519,33 @@ code(r'''
 # the guarantee on assignment -- reporting a coverage that cannot fail for the one reason
 # it most needs to. `fit_set_threshold` reads non-finite as "never covered".
 _scores = np.array([r["cum_mass_to_truth"] for r in ROWS], dtype=float)
-_ok = np.arange(len(ROWS))
-if _ok.size >= 20:
-    _half = _ok.size // 2
-    _cal, _test = _ok[:_half], _ok[_half:]
-    CONF = fit_set_threshold(_scores[_cal], alpha=SET_ALPHA)
-    _cov, _sz = [], []
-    for i in _test:
+# `_cf_`-prefixed: section 9b's rows are still live here and are read again
+# by the artifact cell below.
+_cf_idx = np.arange(len(ROWS))
+if _cf_idx.size >= 20:
+    _cf_half = _cf_idx.size // 2
+    _cf_cal, _cf_test = _cf_idx[:_cf_half], _cf_idx[_cf_half:]
+    CONF = fit_set_threshold(_scores[_cf_cal], alpha=SET_ALPHA)
+    _cf_cov, _cf_sz = [], []
+    for i in _cf_test:
         k = set_size_for(ROWS[i]["masses"], CONF["value"])
-        _sz.append(k)
-        _cov.append(bool(0 <= ROWS[i]["truth_cluster"] < k))
+        _cf_sz.append(k)
+        _cf_cov.append(bool(0 <= ROWS[i]["truth_cluster"] < k))
     from h2p_rsd_junipr.eval.calibration import wilson_interval
 
-    _lo, _hi = wilson_interval(int(np.sum(_cov)), len(_cov))
-    CONF["coverage"] = float(np.mean(_cov))
+    _lo, _hi = wilson_interval(int(np.sum(_cf_cov)), len(_cf_cov))
+    CONF["coverage"] = float(np.mean(_cf_cov))
     CONF["coverage_wilson95"] = [_lo, _hi]
-    CONF["mean_set_size"] = float(np.mean(_sz))
-    CONF["n_calibration"] = int(_cal.size)
-    CONF["n_test"] = int(_test.size)
+    CONF["mean_set_size"] = float(np.mean(_cf_sz))
+    CONF["n_calibration"] = int(_cf_cal.size)
+    CONF["n_test"] = int(_cf_test.size)
     print(f"conformal set at alpha = {SET_ALPHA:g}  (nominal coverage "
           f"{1 - SET_ALPHA:.2f}, MARGINAL over jets)")
     print(f"  threshold on accumulated mass : {CONF['value']:.3f}"
-          f"   (fitted on {_cal.size} jets, exact = "
+          f"   (fitted on {_cf_cal.size} jets, exact = "
           f"{CONF['fitted_under']['finite_sample_exact']})")
     print(f"  out-of-sample coverage        : {CONF['coverage']:.3f} "
-          f"[{_lo:.3f}, {_hi:.3f}]  on {_test.size} jets")
+          f"[{_lo:.3f}, {_hi:.3f}]  on {_cf_test.size} jets")
     print(f"  mean set size                 : {CONF['mean_set_size']:.2f} clusters")
     print(f"  gate G7: {'PASS' if _hi >= 1 - SET_ALPHA else 'FAIL'} "
           f"-- the Wilson band {'contains' if _hi >= 1 - SET_ALPHA else 'excludes'} "
@@ -2354,7 +2571,7 @@ if _ok.size >= 20:
         print("     Only a nearest/median ratio near 1 indicts the sampler.")
 else:
     CONF = None
-    print(f"only {_ok.size} jets have an assigned truth -- too few to calibrate a threshold")
+    print(f"only {_cf_idx.size} jets have an assigned truth -- too few to calibrate a threshold")
 ''')
 
 # ---------------------------------------------------------------------------
@@ -2402,13 +2619,35 @@ if WRITE_ARTIFACTS:
             "G7_conformal": CONF,
             "G9_selection_bias": (float(_d_split.mean()) if _d_split.size else None),
         },
+        "n_first": {
+            "ladder": {k: {lab: _nf_col(rs, k) for lab, rs in
+                           (("all", _nf_all), ("multi", _nf_multi), ("differ", _nf_diff),
+                            ("same_N", _nf_same))}
+                       for k in ("d_mbr", "d_mbr_nmed", "d_mbr_n", "d_top",
+                                 "d_mbr_ntrue", "d_oracle_stratum", "d_best")},
+            "delta_ci": {lab: _nf_boot(rs) for lab, rs in
+                         (("all", _nf_all), ("multi", _nf_multi), ("differ", _nf_diff),
+                          ("same_N", _nf_same))},
+            "n_accuracy": {lab: {"exact": float(np.mean(v == _nf_ntrue)),
+                                 "mean_abs": float(np.mean(np.abs(v - _nf_ntrue)))}
+                           for lab, v in _nf_cands.items()},
+            "n_hat_realized_rate": float(_nf_real.mean()),
+            "mean_stratum_size": float(np.mean([r["stratum_size"] for r in ROWS])),
+            "ship_gate_criterion_i": bool(_nf_verdict.get("all jets", False)),
+            "note": "criteria (ii) RMS-vs-RSD and (iii) the 6b marginals are read off "
+                    "those sections; all three must hold for mbr_n to be recommended",
+        },
         "stability": STAB,
         "residuals": {f"{key}|{slab}|{s}": v for (key, slab, s), v in TABLE.items()},
         "confidence_stratified": {
             f"{scalar}|{key}": rows for (scalar, key), rows in CONF_TABLE.items()
         },
     }
-    out = save_metrics(METRICS, (REPO / CKPT_PATH).parent / "per_jet_clusters.json")
+    # K-suffixed off the default, so a budget arm can never clobber the K=200 record the
+    # gate verdicts were read from (docs/PLAN_StratifiedMBR.md WP2).
+    _name = ("per_jet_clusters.json" if K_DRAWS == 200
+             else f"per_jet_clusters_K{K_DRAWS}.json")
+    out = save_metrics(METRICS, (REPO / CKPT_PATH).parent / _name)
     print(f"wrote {out.relative_to(REPO)}")
 else:
     print("WRITE_ARTIFACTS = False -- nothing written")

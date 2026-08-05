@@ -394,6 +394,15 @@ class ExperimentConfig:
     tarp_null_reps: int = 0            # WP-D.2: Monte-Carlo reps for the TARP null band at
     #                                    the run's own (n_jets, alpha grid). 0 keeps the
     #                                    analytic 1.36/sqrt(n) floor alone.
+    coverage_null_reps: int = 0        # docs/PLAN_StratifiedMBR.md WP4: pseudo-truths per
+    #                                    jet for `coverage_68`'s OWN null. The leading-cell
+    #                                    HPD-68 is built from K DRAWS, so it misses cells
+    #                                    with p < 1/K that a calibrated truth still lands
+    #                                    in — the statistic can read below 0.68 for a
+    #                                    perfect model. This draws M extra held-out draws
+    #                                    per jet and scores them as truths under the same
+    #                                    construction, giving the reference the raw number
+    #                                    has never had. 0 == off; ~20 is plenty.
     tarp_stratify: bool = False        # WP-D.2: TARP additionally per Lund quadrant
     cluster_diagnostics: bool = False  # docs/PLAN_PosteriorClusters.md WP6: per-jet
     #                                    n_clusters / top_mass / entropy / truth_in_top, the
@@ -699,6 +708,7 @@ _EXPERIMENT_DEFAULTS: dict = {
     "exposure_diagnostic": False,
     "support_audit": False,
     "tarp_null_reps": 0,
+    "coverage_null_reps": 0,
     "tarp_stratify": False,
     "mode_audit": False,
     "cluster_diagnostics": False,

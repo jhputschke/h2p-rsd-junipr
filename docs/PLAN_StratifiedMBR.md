@@ -1,6 +1,10 @@
 # PLAN — N-first (stratified) MBR, and three measurement work packages
 
-Status: **proposed** (approved for implementation; measurement gates pre-registered below).
+Status: **complete. WP-1 FAILS its own ship gate and is not recommended**; WP-2, WP-3 and
+WP-4 landed. The estimator ships as an available `decode.point_estimator` value, documented
+as measured-not-recommended. §1a is the WP-1 verdict, §1b the K=1000 arm — which confirms
+the verdict is budget-independent and turns up a hyperparameter-scaling artifact that
+contaminates gate G6.
 Follows directly from the 600-jet / K=200 gate run recorded in
 `PLAN_PosteriorClusters.md` (implementation-note tables) and answers the open question of
 `PLAN_empty_parton_tree.md` ("should the gate be a general argmin over an explicit loss on
@@ -42,6 +46,76 @@ clean:
 - `_qn_importance_weights` is constant within a stratum, so `mbr_resample_to_qn` composes
   as an **exact no-op** — the stratified estimator is the exact form of the correction
   that knob approximates.
+
+---
+
+## 1a. RESULT — `mbr_n` is significantly WORSE than the medoid
+
+600 held-out jets, K = 200, `v1_contstop_s0`, hdbscan, energyflow on cuda.
+
+**Ship-gate criterion (i) fails, and in the wrong direction.** `Δ = d(medoid) − d(mbr_n)`,
+jet-level paired bootstrap:
+
+| subset | n | mean Δ | 95% CI | verdict |
+|---|---:|---:|---|---|
+| all jets | 600 | **−0.083** | [−0.128, −0.039] | excludes 0 — `mbr_n` is **farther** |
+| multi-cluster | 450 | −0.080 | [−0.127, −0.030] | excludes 0 — farther |
+| …top-2 differ in N | 390 | −0.067 | [−0.116, −0.019] | excludes 0 — farther |
+| …top-2 same N | 60 | −0.163 | [−0.344, +0.015] | brackets 0 |
+
+Criteria (ii) and (iii) *pass* — RMS-vs-medoid 1.003 / 0.999 / 1.024 on ln(1/ΔR), ln kt,
+ln z, and the gated marginals are the best of any estimator (`mbr_n` mean multiplicity
+1.407 against truth's 1.442). The shape is fine; the *selection* is worse. All three must
+hold, so the gate fails.
+
+**Both components are negative — the hypothesis fails in two independent places:**
+
+| | Δ |
+|---|---:|
+| de-smearing alone (same N as the medoid, expectation restricted) | −0.043 |
+| the N decision (calibrated median vs the medoid's own N) | −0.040 |
+
+1. **Restricting the expectation hurts.** The cross-stratum distances are inflated by the
+   imbalance term, but they are **not noise** — they still carry shape information, and
+   dropping them costs more than the smearing did. The effective support also falls from
+   200 draws to a mean stratum of 92. The premise that the imbalance term is a pure
+   nuisance to be conditioned away is wrong.
+2. **The calibrated median is no better at picking N than the medoid already was:**
+   `P(n̂ = n_true) = 0.448` against `P(N_medoid = n_true) = 0.443`
+   (mean `|n − n_true|` 0.618 vs 0.630). The premise that the medoid picks N badly and a
+   calibrated marginal would fix it is also wrong.
+
+### What the run does establish — and it is the more useful result
+
+| rule | mean d(truth) | truth-free? |
+|---|---:|---|
+| global medoid | 2.349 | yes |
+| stratified at N(medoid) | 2.392 | yes |
+| **`mbr_n`** | 2.432 | yes |
+| top-mass exemplar | 2.715 | yes |
+| **stratified at n_true** | **1.661** | **no — oracle N** |
+| closest exemplar | 1.476 | no — oracle |
+
+**Knowing the true N would buy 0.688 of the medoid's 2.349** — the largest single lever
+measured anywhere in this line of work, and larger than the whole 0.603 information
+component the cluster partition carries. No truth-free rule reaches it, because `q(N|x)` is
+right on only 45% of jets.
+
+That sharpens, and partly corrects, the reading recorded in
+[`PLAN_PosteriorClusters.md`](PLAN_PosteriorClusters.md): `q(N|x)` is **calibrated but not
+sharp**. It has the right rate and the right ranking (G4 ratio 0.977, `q(0|x)` AUC 0.824)
+while being wrong about *which* N on more than half the jets. The 0.770 residual is
+information the model does not have — not information the decode is failing to use.
+
+**So the next lever is more information about N — conditioning, architecture, training —
+not a better decision rule over the existing posterior.** Three decode-layer selection
+rules have now been measured against the medoid (mass argmax, medoid's-cluster, N-first)
+and all three lose. That is a sufficient basis to stop looking there.
+
+**What stays.** `point_estimator="mbr_n"` remains available and documented as
+measured-not-recommended; `mbr` stays the recommended decode. The negative result is worth
+more than the estimator would have been: it converts "the medoid smears across strata" from
+a plausible mechanism into a measured non-problem, and it prices the N channel.
 
 ---
 
@@ -172,6 +246,83 @@ Tests 1–2 are pure numpy (CI fast tier); model-facing ones POT-gated per exist
 
 ---
 
+## 1b. RESULT — WP-2, the K=1000 arm (gate G5)
+
+600 jets at K = 1000, same arm and decode, **13.2 min** on cuda (the K² block is 25× the
+K = 200 one). Artifact: `per_jet_clusters_K1000.json`.
+
+**The conclusions are budget-independent. That is the point of the arm.**
+
+| | K=200 | K=1000 |
+|---|---:|---:|
+| `mbr_n` Δ, all jets | −0.083 [−0.128, −0.039] | **−0.084 [−0.135, −0.030]** |
+| `P(n̂ = n_true)` | 0.4483 | **0.4483** |
+| stratified at n_true (the N lever) | 1.661 | **1.668** |
+| global medoid | 2.349 | 2.329 |
+| G2 medoid-in-dominant | 0.468 | 0.472 |
+
+`mbr_n`'s failure is not a small-sample artifact, and the 0.745 N-channel headroom is a
+property of the model rather than of the budget — `P(n̂ = n_true)` is identical to four
+decimal places at 5× the draws. **`q(N|x)` is calibrated but not sharp, and no amount of
+sampling fixes that.**
+
+**What K does buy — the silhouette question is answered:**
+
+| | K=200 | K=1000 |
+|---|---:|---:|
+| silhouette precondition holds | 46.2% | **66.3%** |
+| G2′ gain vs the null (all multi) | +0.603 ± 0.048 | **+0.676 ± 0.049** |
+| `<n_clusters>` | 4.89 | 3.95 |
+| d(truth, nearest draw) / pool scale | 0.092 | **0.074** |
+| MC error on a mass at m = 0.6 | 0.035 | 0.015 |
+
+So the "unresolvable half" at K = 200 was **partly budget**: two thirds of jets have
+resolvable structure at K = 1000, the partition carries *more* real information, and it
+fragments less (fewer, better-supported clusters). The set-valued layer is better at
+K = 1000 on every measure that describes the partition itself.
+
+### An unexpected finding: the cluster hyperparameters do not transfer across K
+
+`cluster_min_cluster_size = 0` resolves to `max(5, ceil(0.05·K))` — **10 draws at K = 200,
+50 at K = 1000**. HDBSCAN's notion of a cluster therefore demands a much denser region as K
+grows, and more of the pool falls to noise:
+
+| | K=200 | K=1000 |
+|---|---:|---:|
+| residual (noise + sub-threshold) mass | 0.284 | **0.362** |
+| truth unassigned by the exemplar rule | 35.7% | **43.5%** |
+| G6 ECE (tempered) | 0.0395 | 0.0526 |
+| G6 slope | 1.12 | 0.43 |
+| G6 Brier resolution | 0.0785 | 0.0267 |
+
+**The G6 degradation is confounded and must not be read as "the masses got worse".** G6 is
+computed on the *assigned* jets only, and the assignment rule rejects 43.5% at K = 1000
+against 35.7% at K = 200 — while the pool actually brackets the truth **better**
+(nearest-draw ratio 0.074 vs 0.092). More of the posterior is labelled noise, so more truths
+sit near an unclustered draw and are ruled outside every exemplar's support; the surviving
+subset G6 scores is more selected, and its calibration degrades for that reason.
+
+This is the same exemplar-rule artifact WP-3 was built for, now shown to contaminate **G6**
+as well as G7 — and to get *worse* with budget, which is the opposite of what a budget arm
+is usually expected to show. Two consequences:
+
+- **`coverage_pool` (WP-3) is the right instrument at any K**, and the K = 1000 arm is the
+  strongest evidence for it: the model's support improved while the exemplar rule's verdict
+  got worse.
+- **A K comparison at fixed `cluster_min_mass` is not a clean control.** Re-running
+  K = 1000 with `cluster_min_cluster_size` pinned to 10 (the K = 200 absolute value) would
+  separate "more draws" from "coarser clustering". Not done here, and G6's cross-K row
+  should be treated as unscored until it is.
+
+**G5 verdict.** The per-jet paired criterion ("`top_mass` and `entropy` agree within their
+binomial error on ≥ 90% of jets") is **not computable from these artifacts** — the notebook
+records aggregates, not per-jet rows. What is measurable is that the aggregate scalars move
+in ways fully explained by the granularity change above (`entropy` 1.417 → 1.143 with
+`<n_clusters>` 4.89 → 3.95), so the plan's fallback applies: **quote the K = 1000 tier**,
+and do not mix tiers in one table.
+
+---
+
 ## WP-2 — K=1000 budget arm (gate G5)
 
 - Notebook §12: artifact filename stays `per_jet_clusters.json` at the default K and
@@ -183,6 +334,68 @@ Tests 1–2 are pure numpy (CI fast tier); model-facing ones POT-gated per exist
   vs 46.2%; the G5 criterion (`top_mass`/`entropy` agree within their binomial error on
   ≥ 90% of jets); G2′ gain + the oracle-gap decomposition at K=1000; `mbr_n` vs medoid at
   K=1000.
+
+## 1c. RESULT — WP-3 and WP-4 on a full eval run
+
+600 jets, K = 200, `v1_contstop_s0`, via `h2p-rsd-junipr eval` with
+`experiment.cluster_diagnostics=true experiment.coverage_null_reps=20`. Artifact:
+`eval_metrics_wp34.json` (the arm's own `eval_metrics.json` was preserved).
+
+### WP-4 — `coverage_68` is NOT evidence of over-confidence. The deficit is the statistic.
+
+| | value | on |
+|---|---:|---|
+| `coverage_68` | **0.546** [0.502, 0.589] | 502 jets |
+| **its own null** (model as truth, same K-draw HPD) | **0.553** [0.543, 0.563] | 8 841 pseudo-truths |
+| difference | −0.007 | — |
+
+**The observed coverage sits inside the null's interval**, and the null is tight. A
+*perfect* model scores **0.553** under this construction, not 0.68: the empirical HPD-68
+built from K = 200 draws cannot contain cells of probability below 1/200, and a calibrated
+truth still lands in them. The entire 0.68 → 0.55 gap is the estimator.
+
+**This corrects a conclusion carried in several places**, including
+`PROD_TEST_v1_RESULTS.md` §1 ("the joint tree posterior is measurably too narrow … *and the
+leading-cell coverage says the same thing*"), its G4 regional clause, and my own earlier
+readings in this session. It is the same class of error v1 itself caught in SBC-on-N — a
+mid-rank statistic on a 7-valued discrete N scored against a *continuous* χ²(9) null — and
+it went unnoticed for the same reason: the reference was assumed rather than simulated.
+
+**What still stands.** TARP is a separate statistic with its own MC null recomputed at
+n = 2000, and its finding — the explicit-`q(N|x)` arms are too narrow, both continue/stop
+arms pass — is untouched, as is the `narrow_soft` PIT attribution. What falls away is the
+*corroboration* leading-cell coverage was supplying, which means the joint-narrowness case
+now rests on TARP and the PIT cross alone.
+
+**Scope of the null.** It is drawn at the same K as the statistic it explains — it must
+share the estimator's handicap — so it is specific to `n_closure_samples = 200` and does
+not transfer to another budget. Quote it with its K.
+
+### WP-3 — same sets, two coverage rules, 0.617 vs 0.793
+
+| rule | coverage |
+|---|---:|
+| exemplar support (`assign_truth`) | **0.617** [0.577, 0.655] |
+| pool resolution (`pool_covered`) | **0.793** |
+| nominal (α = 0.32) | 0.680 |
+
+The conformal set's mean size is 4.94 against `<n_clusters>` ≈ 5, so the emitted prefix is
+essentially the full set — the two rows are the *same sets* judged two ways. Under the
+exemplar rule G7's ceiling is 0.617 (= 1 − the 38.3% unassigned rate) and the nominal 0.68
+is unreachable; at the pool's own nearest-neighbour scale the same sets cover **0.793**, and
+0.68 becomes reachable with margin.
+
+That converts §1's inference into a direct measurement: **G7's failure is the reporting
+rule, not the model's support.** Supporting numbers: `pool_bound` = 0.630 against a mean
+nearest-draw distance of 0.294, so the bound is ~2× the pool's own resolution — loose enough
+to be fair, tight enough that 20.7% of truths still fall outside it. The residual 0.207 is a
+real support gap and is not explained away.
+
+Both rules stay reported. They measure different things — "is the truth inside the region
+this exemplar represents" versus "did the pool put a draw near the truth at all" — and the
+exemplar rule's failure remains on the record rather than being tuned away.
+
+---
 
 ## WP-3 — pool-based coverage beside G7
 

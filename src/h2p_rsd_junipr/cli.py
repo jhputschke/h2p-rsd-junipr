@@ -286,6 +286,7 @@ def cmd_eval(argv) -> int:
         tarp=exp["tarp"], tarp_refs=exp["tarp_refs"], tarp_reference=exp["tarp_reference"],
         mbr_kwargs=mbr_kwargs_from_decode(decode),
         tarp_null_reps=exp["tarp_null_reps"], tarp_stratify=exp["tarp_stratify"],
+        coverage_null_reps=exp["coverage_null_reps"],
     )
     if exp["support_audit"]:
         from .eval.support import run_support_audit
@@ -297,10 +298,10 @@ def cmd_eval(argv) -> int:
     if exp["cluster_diagnostics"]:
         # Needs the K x K matrix, so it needs an MBR decode; with point_estimator="map"
         # there is no D and the whole table would be NaN. Say so rather than emit one.
-        if str(decode.get("point_estimator", "map")) != "mbr":
+        if str(decode.get("point_estimator", "map")) not in ("mbr", "mbr_n"):
             print("[eval] experiment.cluster_diagnostics=true needs "
-                  "decode.point_estimator=mbr (the cluster layer reads the MBR distance "
-                  "matrix); skipping.")
+                  "decode.point_estimator=mbr (or mbr_n) -- the cluster layer reads the "
+                  "MBR distance matrix; skipping.")
         else:
             from .eval.clusters import run_cluster_diagnostics
 

@@ -79,6 +79,21 @@ the joint tree posterior is measurably too narrow (`ECP(0.68) = 0.635` against 0
 signed deviation −0.016), and the leading-cell coverage says the same thing
 (0.53, 95% Wilson [0.51, 0.56] on 1 676 jets).
 
+> **CORRECTION (2026-08-05, docs/PLAN_StratifiedMBR.md §1c).** The last clause does not
+> survive. `coverage_68` was scored against a nominal 0.68 that the statistic **cannot
+> reach even for a perfect model**: the empirical HPD-68 is built from K draws and cannot
+> contain cells of probability below 1/K, which a calibrated truth still visits. Simulated
+> on this arm — the model as its own truth, same construction, 8 841 pseudo-truths — the
+> null is **0.553 [0.543, 0.563]**, and the observed 0.546 [0.502, 0.589] sits inside it.
+> The leading-cell deficit is the estimator, and it corroborates nothing.
+>
+> This is the same error §1 catches in SBC-on-N one row above (a mid-rank statistic on a
+> 7-valued discrete N against a *continuous* χ²(9) null) — assumed reference, not simulated
+> one — and the G4 regional clause below inherits it. **TARP is unaffected**: it has its own
+> MC null recomputed at n = 2000, so the joint-narrowness finding stands on TARP and the
+> `narrow_soft` PIT attribution alone. Re-read every "leading-cell coverage" row in this
+> document against 0.553, not 0.68; `experiment.coverage_null_reps > 0` computes it.
+
 ### 1.1 The ⟨N⟩ deficit was a selection effect and a mispairing
 
 | population | jets | ⟨N⟩ truth | ⟨N⟩ posterior | ratio | signed bias |

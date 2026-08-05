@@ -79,6 +79,10 @@ class LundPointEstimate:
     #                  (the caller labels it; `describe_cells` is a scoring helper, not an
     #                  estimator, and leaving the default keeps its printed form unchanged)
     #   "mbr"        — the minimum-Bayes-risk medoid; `.risk` is set
+    #   "mbr_n"      — the N-first (stratified) medoid: N decided from the calibrated
+    #                  q(N|x), shape by the medoid WITHIN that stratum. `.risk` is set and
+    #                  is the WITHIN-STRATUM mean distance, not the global one — the two
+    #                  are different numbers and this label is what keeps them apart
     #   "empty_gate" — `q(N=0|x) >= tau` fired BEFORE any shape decode, so no estimator ran
     #   "cluster"    — a posterior-cluster exemplar; `.cluster_mass` is set
     estimator: str = "map"
@@ -108,7 +112,7 @@ class LundPointEstimate:
     # rather than falling back to "MAP" — a label that is merely unrecognised is a smaller
     # problem than one that is confidently wrong.
     _ESTIMATOR_LABEL = {
-        "map": "MAP", "mbr": "MBR",
+        "map": "MAP", "mbr": "MBR", "mbr_n": "MBR-N (stratified)",
         "empty_gate": "EMPTY-GATED", "cluster": "cluster-exemplar",
     }
 
@@ -143,6 +147,8 @@ class LundPointEstimate:
         # which is the estimator working rather than collapsing.
         why = {
             "map": "MAP is immediate stop",
+            "mbr_n": "the posterior median multiplicity is 0 — the N decision itself "
+                     "answered empty, before any shape was chosen",
             "mbr": "the posterior is empty-dominated, so the medoid is empty — no floor "
                    "was clamped",
             "empty_gate": "decided by the empty gate, not by a shape decode",

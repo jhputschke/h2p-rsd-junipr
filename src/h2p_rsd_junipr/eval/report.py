@@ -69,15 +69,15 @@ def inert_decode_keys(model, decode: dict) -> list[dict]:
         for k in ("beam_width", "topk_cells", "length_penalty"):
             add(k, why)
 
-    if str(decode.get("point_estimator", "map")) != "mbr":
-        why = "point_estimator != 'mbr'; no OT backend is imported"
+    if str(decode.get("point_estimator", "map")) not in ("mbr", "mbr_n"):
+        why = "point_estimator is neither 'mbr' nor 'mbr_n'; no OT backend is imported"
         for k in sorted(k for k in decode if k.startswith("mbr_")):
             add(k, why)
         # The cluster layer reads the MBR distance matrix, so without an MBR decode there
         # is no D and every cluster_* knob is inert for the same reason.
         for k in sorted(k for k in decode if k.startswith("cluster_")) + ["set_alpha"]:
-            add(k, "point_estimator != 'mbr'; the cluster layer has no distance matrix "
-                   "to read")
+            add(k, "point_estimator is neither 'mbr' nor 'mbr_n'; the cluster layer has "
+                   "no distance matrix to read")
     elif not bool(decode.get("cluster_posterior", False)):
         for k in sorted(k for k in decode if k.startswith("cluster_")
                         and k != "cluster_posterior") + ["set_alpha"]:

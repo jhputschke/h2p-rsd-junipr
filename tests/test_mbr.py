@@ -774,3 +774,227 @@ def test_cluster_decode_defaults_are_all_off():
 
     old = OmegaConf.create({"decode": {"point_estimator": "mbr"}})
     assert decode_params(old)["cluster_posterior"] is False
+
+
+# ---------------------------------------------------------------------------
+# N-first (stratified) MBR — docs/PLAN_StratifiedMBR.md WP1
+#
+# `mbr_select` minimises a mean over EVERY multiplicity stratum at once, and the EMD's
+# imbalance term charges ~R|W_a - W_b| across strata — so the medoid is pulled toward
+# whatever N is most populous and can represent none of them. The stratified estimator
+# decides N from the calibrated q(N|x) and takes the medoid WITHIN that stratum.
+# ---------------------------------------------------------------------------
+def _strata_fixture():
+    """A `D` whose GLOBAL medoid is in a stratum the N decision will not choose.
+
+    mults = [0, 0, 2, 2, 2, 3]. Row 5 (the lone N=3 draw) sits 3 from everything, so it
+    has the smallest global mean (2.5) and `mbr_select` would take it. Within the N=2
+    stratum the sub-block is [[0,2,4],[2,0,3],[4,3,0]] with row means [2, 5/3, 7/3], so
+    the conditional medoid is draw 3. The two answers differ — which is the whole point."""
+    D = np.array([
+        [0.0, 0.0, 8.0, 8.0, 8.0, 3.0],
+        [0.0, 0.0, 8.0, 8.0, 8.0, 3.0],
+        [8.0, 8.0, 0.0, 2.0, 4.0, 3.0],
+        [8.0, 8.0, 2.0, 0.0, 3.0, 3.0],
+        [8.0, 8.0, 4.0, 3.0, 0.0, 3.0],
+        [3.0, 3.0, 3.0, 3.0, 3.0, 0.0],
+    ])
+    return D, np.array([0, 0, 2, 2, 2, 3])
+
+
+def test_stratified_medoid_against_a_hand_computed_matrix():
+    D, mults = _strata_fixture()
+    assert np.allclose(D, D.T), "the fixture must be a distance matrix"
+    # the global reduction picks the N=3 draw...
+    assert int(np.argmin(mbr._reduce_risk(D, None, loss="linear"))) == 5
+    # ...and the stratified one never can, at n_hat = 2
+    win, risk, n_used = mbr.stratified_medoid(D, mults, 2)
+    assert (win, n_used) == (3, 2)
+    assert risk == pytest.approx(5.0 / 3.0)
+    # the reduction IS the sub-block row mean, to the exactness convention of gate G1
+    sub = D[np.ix_([2, 3, 4], [2, 3, 4])]
+    assert np.abs(mbr._reduce_risk(sub, None, loss="linear") - sub.mean(axis=1)).max() == 0.0
+    # the empty stratum is a zero-diameter clique -> risk exactly 0
+    assert mbr.stratified_medoid(D, mults, 0) == (0, 0.0, 0)
+
+
+def test_stratified_medoid_weights_are_a_no_op_when_they_come_from_qn():
+    """`_qn_importance_weights` assigns ONE weight per multiplicity, so within a stratum it
+    is constant and cancels out of the weighted mean. This estimator is the exact form of
+    the correction `mbr_resample_to_qn` approximates by reweighting — assert it rather than
+    leave it as a docstring claim."""
+    D, mults = _strata_fixture()
+    base = mbr.stratified_medoid(D, mults, 2)
+    w = np.array([0.3, 0.3, 2.7, 2.7, 2.7, 1.1])      # constant within each stratum
+    got = mbr.stratified_medoid(D, mults, 2, w=w)
+    # The SELECTION is what must not move; the risk agrees to float precision but not
+    # bit-for-bit, because the weighted branch is `(D*w).sum(1)/w.sum()` rather than
+    # `D.mean(1)` — a different summation order for the same quantity.
+    assert (got[0], got[2]) == (base[0], base[2])
+    assert got[1] == pytest.approx(base[1])
+    # a genuinely per-draw weight IS applied, so the knob is not silently ignored
+    w2 = np.array([1.0, 1.0, 1.0, 1e-6, 1.0, 1.0])    # starve the winner
+    assert mbr.stratified_medoid(D, mults, 2, w=w2)[0] != base[0]
+
+
+def test_stratified_medoid_falls_back_to_the_nearest_populated_stratum():
+    """An unrealised median is a legitimate runtime state for an explicit-`q(N|x)` family
+    (exact softmax vs a finite pool), so it degrades rather than raising — and it degrades
+    INSIDE the realised support, never to the global medoid that would reintroduce the
+    smearing on exactly the most N-ambiguous jets."""
+    D, mults = _strata_fixture()                        # present {0: 2, 2: 3, 3: 1}
+    assert mbr.stratified_medoid(D, mults, 1)[2] == 2, "tie |1-0|=|1-2| -> larger mass"
+    assert mbr.stratified_medoid(D, mults, 5)[2] == 3, "nearest populated below"
+    assert mbr.stratified_medoid(D, mults, 4)[2] == 3
+    # equal mass at equal distance -> smaller n, for determinism
+    even = np.array([0, 0, 2, 2])
+    assert mbr._nearest_populated(even, 1) == 0
+
+
+def test_stratified_medoid_guards():
+    D, mults = _strata_fixture()
+    with pytest.raises(ValueError, match="mbr_n_candidates"):
+        mbr.stratified_medoid(D[:4], mults, 2)             # rectangular
+    with pytest.raises(ValueError, match="mults has"):
+        mbr.stratified_medoid(D, mults[:3], 2)
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_stratified_is_a_no_op_when_there_is_nothing_to_stratify(batch):
+    """The structural anchor: with every draw at one multiplicity the stratum IS the pool,
+    so the estimator must return the same tree and a BIT-IDENTICAL risk as `mbr_select`."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34], [5, 9], [40, 41], [7, 12], [30, 56]]   # all N = 2
+    a = mbr.mbr_select(model, xf, nx, draws=list(draws), geom=geom, backend="pot")
+    b = mbr.mbr_select_stratified(model, xf, nx, draws=list(draws), geom=geom, backend="pot")
+    assert [n.cell for n in a.nodes] == [n.cell for n in b.nodes]
+    assert a.risk == b.risk                                   # not approx
+    assert a.estimator == "mbr" and b.estimator == "mbr_n"
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_stratified_leaves_mbr_select_bit_identical(batch):
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34, 56]] * 4 + [[5, 9]] * 5 + [[]] * 3
+    before = mbr.mbr_select(model, xf, nx, draws=list(draws), geom=geom, backend="pot")
+    mbr.mbr_select_stratified(model, xf, nx, draws=list(draws), geom=geom, backend="pot")
+    after = mbr.mbr_select(model, xf, nx, draws=list(draws), geom=geom, backend="pot")
+    assert after.risk == before.risk
+    assert [n.cell for n in after.nodes] == [n.cell for n in before.nodes]
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_stratified_selects_the_median_stratum_and_labels_itself(batch):
+    """The end-to-end claim: the returned tree's multiplicity IS the posterior median, not
+    whatever the global mean distance preferred."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    # median N = 2 (5 of 12 draws at N=2 with 4 below), but the lone N=3 draw is central
+    draws = [[]] * 4 + [[12, 34]] * 5 + [[12, 34, 56]] * 3
+    pe = mbr.mbr_select_stratified(model, xf, nx, draws=list(draws), geom=geom, backend="pot")
+    assert pe.estimator == "mbr_n"
+    assert pe.multiplicity == 2, "the N decision is the calibrated median, not the medoid's"
+    assert pe.risk is not None and np.isfinite(pe.risk)
+    assert pe.pretty().startswith("MBR-N (stratified) groomed shower")
+    assert [n.cell for n in pe.nodes] in [list(d) for d in draws]     # H = {pool}
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_stratified_carries_its_own_sampled_coordinates(batch):
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34], [5, 9], [40, 41]] * 2
+    coords = [model.sample_coordinates(xf, nx, d) for d in draws]
+    pe = mbr.mbr_select_stratified(model, xf, nx, draws=list(draws), geom=geom,
+                                   backend="pot", coords_by_draw=coords)
+    assert pe.coords_source == "sample"
+    win = [list(d) for d in draws].index([n.cell for n in pe.nodes])
+    for t, n in enumerate(pe.nodes):
+        for j, got in enumerate((n.ln_invDelta, n.ln_kt, n.ln_z, n.psi)):
+            assert got == pytest.approx(float(coords[win][t, j]), abs=1e-5)
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_stratified_empty_median_answers_the_empty_tree(batch):
+    """With the gate off and an empty-dominated posterior the median IS 0, and the honest
+    answer is the empty tree at risk exactly 0 — the empty clique has zero diameter."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[]] * 8 + [[12, 34]] * 2
+    pe = mbr.mbr_select_stratified(model, xf, nx, draws=draws, geom=geom, backend="pot")
+    assert pe.multiplicity == 0 and pe.risk == pytest.approx(0.0)
+    assert pe.estimator == "mbr_n"
+    assert "the N decision itself" in pe.pretty()
+    from h2p_rsd_junipr.inference.clusters import assert_ancestral_draws
+
+    with pytest.raises(ValueError, match="ANCESTRAL"):
+        assert_ancestral_draws([pe])
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_stratified_rejects_a_candidate_cap(batch):
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34], [5, 9], [40, 41]] * 2
+    with pytest.raises(ValueError, match="mbr_n_candidates"):
+        mbr.mbr_select_stratified(model, xf, nx, draws=draws, geom=geom, backend="pot",
+                                  n_candidates=3)
+    with pytest.raises(ValueError, match="draws"):
+        mbr.mbr_select_stratified(model, xf, nx, geom=geom, backend="pot",
+                                  D=np.zeros((6, 6)))
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+@pytest.mark.parametrize("sel", MODELS, ids=lambda s: s[0].split("=")[1])
+def test_map_or_mbr_dispatches_mbr_n_for_every_family(sel, batch):
+    """`point_estimator="mbr_n"` is a new VALUE on the existing knob, so it reaches every
+    family through the same dispatch — and the empty gate still runs BEFORE it."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(sel), geom).eval()
+    draws = [[12, 34, 56]] * 4 + [[5, 9]] * 5 + [[]] * 3
+    pe = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr_n", mbr_backend="pot")
+    assert isinstance(pe, LundPointEstimate) and pe.estimator == "mbr_n"
+    assert pe.multiplicity == len(pe.nodes)
+    assert np.isfinite(pe.logprob) and pe.risk is not None
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_the_empty_gate_is_stage_0_of_the_stratified_decode(batch):
+    """The gate runs BEFORE dispatch, so it wins over the N decision when it fires.
+
+    Pinned on a continue/stop family deliberately: there `length_pmf` IS the histogram of
+    these draws, so `q(0|x)` is the empty fraction and the gate is exercised. A family with
+    an explicit `q(N|x)` head reads its own softmax instead, which an untrained head puts
+    almost nowhere near 0 — the gate not firing there is the head talking, not a bug."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[]] * 9 + [[12, 34]]
+    assert not hasattr(model, "n_head"), "this test needs the sampler-histogram family"
+
+    gated = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr_n",
+                             mbr_backend="pot", empty_threshold=0.5)
+    assert gated.estimator == "empty_gate" and gated.multiplicity == 0
+    # ...and with the gate off the N decision reaches the same answer on its own, by the
+    # median rather than by tau — the two stages agree here, which is why the composition
+    # is safe: any sensible tau is below 0.5, so a gate that does NOT fire implies
+    # q(0|x) < 0.5 and the median cannot be 0.
+    ungated = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr_n",
+                               mbr_backend="pot")
+    assert ungated.estimator == "mbr_n" and ungated.multiplicity == 0
+
+
+def test_mbr_n_is_recognised_by_every_point_estimator_consumer():
+    """Six call sites tested `point_estimator == "mbr"` exactly; a new value that any of
+    them missed would silently drop the MBR series, mark live knobs inert, or lose the
+    serving draw-reuse."""
+    from h2p_rsd_junipr.eval.report import inert_decode_keys
+
+    class _Stub:
+        cont_head = object()
+
+    dec = {"point_estimator": "mbr_n", "mbr_backend": "pot", "mbr_R": 8.485,
+           "cluster_posterior": True, "set_alpha": 0.32}
+    inert = {e["key"] for e in inert_decode_keys(_Stub(), dec)}
+    assert not (inert & {"mbr_backend", "mbr_R"}), "mbr_* knobs are LIVE under mbr_n"

@@ -434,7 +434,7 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
                     verbose=True, pit_coords=False, stratify_regions=False, tarp=False,
                     tarp_refs=100, tarp_reference="pooled", mbr_kwargs=None, seed=0,
                     min_region_n=30, draws_by_jet=None, tarp_null_reps=0,
-                    tarp_stratify=False):
+                    tarp_stratify=False, coverage_null_reps=0):
     """SBC / PIT / coverage on held-out jets, plus the opt-in WP2 additions.
 
     With `pit_coords=stratify_regions=tarp=False` (the defaults) the returned dict is
@@ -453,6 +453,7 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
     pool as well. Default None is today's behaviour exactly."""
     ranks = []
     coverage_hits = []
+    coverage_null_hits = []      # WP4: the same statistic with the MODEL as the truth
     pit_values = []
     regions: list[str | None] = []
     covered_regions: list[str | None] = []
@@ -489,6 +490,28 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
             hpd = set(int(c) for c in vals[order][:k68])
             coverage_hits.append(1.0 if ly in hpd else 0.0)
             covered_regions.append(cell_region(ly, geometry))
+            if coverage_null_reps:
+                # The statistic's OWN null: score held-out draws from the SAME posterior
+                # as pseudo-truths, through the identical HPD construction above. Under
+                # model == truth a calibrated statistic returns 0.68; anything lower is
+                # the estimator, not the model. The HPD is built from K draws, so it
+                # cannot contain a cell of probability < 1/K that a genuine draw still
+                # visits — that loss is exactly what this measures, and it is why
+                # "0.53 vs 0.68" cannot be read as over-confidence on its own.
+                #
+                # Drawn inside `fork_rng`, so this DIAGNOSTIC cannot change which draws
+                # the next jet gets. Without it the switch is not additive: every key
+                # that already existed moves, and a switch that perturbs the statistic it
+                # exists to explain is worse than no switch. Same discipline as
+                # `PosteriorModel.decode_generator` (tests/test_shared_draws.py), reached
+                # here through the RNG state because `sample_batch` takes no generator.
+                with torch.random.fork_rng(devices=([xf.device] if xf.device.type == "cuda"
+                                                    else []), enabled=True):
+                    extra = model.sample_batch(xf, nx, int(coverage_null_reps))
+                for d in extra:
+                    lp = leading_emission_cell(d, geometry)
+                    if lp is not None:
+                        coverage_null_hits.append(1.0 if lp in hpd else 0.0)
 
     ranks = np.array(ranks)
     hist, _ = np.histogram(ranks, bins=n_rank_bins, range=(0.0, 1.0))
@@ -514,6 +537,26 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
         "coverage_68_consistent": bool(cov_lo <= 0.68 <= cov_hi) if cov_hits.size else False,
         "n_jets": int(n_jets),
     }
+    if coverage_null_reps:
+        nul = np.array(coverage_null_hits, dtype=float)
+        n_lo, n_hi = wilson_interval(nul.sum(), nul.size)
+        metrics["coverage_68_null"] = float(nul.mean()) if nul.size else float("nan")
+        metrics["coverage_68_null_ci"] = [n_lo, n_hi]
+        metrics["n_coverage_null"] = int(nul.size)
+        # The comparison that matters is coverage vs its OWN null, not vs the nominal 0.68.
+        metrics["coverage_68_vs_null"] = (
+            float(metrics["coverage_68"] - metrics["coverage_68_null"])
+            if nul.size and cov_hits.size else float("nan"))
+        metrics["coverage_68_null_explains_deficit"] = (
+            bool(n_lo <= metrics["coverage_68"] <= n_hi) if nul.size and cov_hits.size
+            else None)
+        metrics["coverage_68_null_note"] = (
+            "the empirical HPD-68 is built from K draws and cannot contain a cell of "
+            "probability < 1/K, so it under-covers even a PERFECT model. Read "
+            "coverage_68 against this null, not against 0.68: inside the null's interval "
+            "means the deficit is the statistic; below it means the posterior really is "
+            "too narrow."
+        )
     if verbose:
         print("\nposterior calibration (SBC / PIT / coverage):")
         print(f"  SBC rank-uniformity chi^2 ({n_rank_bins} bins) = {metrics['sbc_chi2_uniform']:.2f}"
@@ -525,6 +568,17 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
               f"  95% Wilson [{cov_lo:.2f}, {cov_hi:.2f}] on {cov_hits.size:d} jets"
               f"   (target 0.68 —"
               f" {'inside' if metrics['coverage_68_consistent'] else 'OUTSIDE'} the interval)")
+        if coverage_null_reps:
+            ex = metrics["coverage_68_null_explains_deficit"]
+            print(f"      ...against its OWN null (the model as truth, same K-draw HPD): "
+                  f"{metrics['coverage_68_null']:.3f} "
+                  f"[{metrics['coverage_68_null_ci'][0]:.2f}, "
+                  f"{metrics['coverage_68_null_ci'][1]:.2f}] on "
+                  f"{metrics['n_coverage_null']} pseudo-truths")
+            print("      -> the deficit is "
+                  + ("THE STATISTIC (an HPD from K draws misses cells with p < 1/K); "
+                     "compare to the null, not to 0.68" if ex else
+                     "REAL: below even the null, so the posterior is genuinely too narrow"))
         if not getattr(model, "exact_likelihood", True):
             print("  NOTE: this family reports a SURROGATE log_prob (exact_likelihood=False);"
                   " the SBC/PIT/coverage above are sampling-based and still valid, its NLL is not.")

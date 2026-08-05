@@ -840,7 +840,7 @@ The serving layer reads the checkpoint's decode config. Source:
 | `length_temperature` | `1.0` | posterior + point estimate | post-hoc scalar temperature on the multiplicity logits; `1` = off |
 | `length_tilt` | `0.0` | posterior + point estimate | companion term **linear in n** on the same logits — what actually moves mass between short and long trees; `0` = off |
 | `empty_threshold` | `0.0` | point estimate | **emptiness ceiling**: answer the empty tree when `q(N=0\|x) >= τ`, before any shape decode; `0` = off |
-| `point_estimator` | `"map"` | point estimate | `map` (beam-search joint mode) or `mbr` (minimum-Bayes-risk tree; §10 MBR) |
+| `point_estimator` | `"map"` | point estimate | `map` (beam-search joint mode), `mbr` (minimum-Bayes-risk tree; §10 MBR) or `mbr_n` (**N-first**: N from the calibrated `q(N\|x)` median, shape from the medoid *within* that stratum; §10) |
 | `mbr_backend` | `"pot"` | MBR | OT backend: `pot` (default, self-contained) / `energyflow` (reference) / `surrogate` (fast χ²) |
 | `mbr_n_candidates` | `0` | MBR | `0` = every draw is a candidate; `k>0` = only the first `k` (asymmetric MBR, faster) |
 | `mbr_lnkt_cut` | `null` | MBR | drop emissions below this `ln k_t`; `null` inherits `geometry.ln_kt_range[0]` (the region cut) |
@@ -1556,6 +1556,68 @@ reporting. `map_estimate` is unchanged — it is still the staged mode decode �
 estimator for a loss nobody is measuring (Stahlberg & Byrne, arXiv:1908.10090; Eikema &
 Aziz, arXiv:2005.10283). The decode headline is MBR; the population headline is the
 decode-free posterior series.
+
+### `point_estimator="mbr_n"` — decide N first, then the shape
+
+`mbr` minimises a mean distance over **every** multiplicity stratum at once. The
+perturbative-Lund EMD carries a mass-imbalance term, so a draw of multiplicity `m` pays
+`~R|W_a − W_b|` against every draw of a different `m` — the medoid is pulled toward
+whatever `N` is most populous, and can land between strata representing none of them. On
+the 600-jet `K=200` arm that leaves it **2.349** from truth while the closest cluster
+exemplar is **1.476**, with **83% of the resolvable posterior ambiguity being between-N**.
+
+`mbr_n` splits the decode at that seam, using each channel where it is trustworthy:
+
+```
+    n_hat  = Q_0.5( q(N|x) )                      # calibrated on this family
+    y_hat  = argmin_{h : |h| = n_hat}  mean_{k : |y_k| = n_hat} d(h, y_k)
+```
+
+Stage 1 is the Bayes estimator under `L(n, m) = |n − m|` — which is why this is also the
+"general argmin over an explicit loss on n" that
+[`PLAN_empty_parton_tree.md`](PLAN_empty_parton_tree.md) deferred, with the empty gate as
+its `n = 0` special case. Stage 2 is pure shape: within a stratum every pair has equal
+total weight, so the imbalance term drops out of the reduction entirely.
+
+**Cost: zero additional EMD calls** — it is another reduction over the `D` that `mbr`
+already builds. It requires `mbr_n_candidates == 0` (restricting both the candidates and
+the expectation to one stratum needs the row and column indices to agree) and raises
+otherwise.
+
+**Composition with the empty gate.** `decode.empty_threshold` is stage 0 and runs *before*
+dispatch in `map_or_mbr`, so it is not duplicated inside the estimator. The interaction is
+benign: any sensible τ is below 0.5, so "the gate did not fire" implies `q(0|x) < 0.5` and
+the median cannot be 0 on the gated path. With the gate off, a median of 0 honestly returns
+the empty tree at risk exactly 0 (the empty clique has zero diameter).
+
+**`.risk` is the WITHIN-STRATUM mean** — the achieved risk of the decision that produced
+the tree, which is the only meaning `.risk` has. It is a *different number* from `mbr`'s
+global mean, and `LundPointEstimate.estimator == "mbr_n"` is the provenance that keeps the
+two from being averaged together. `mbr_resample_to_qn` composes as an exact no-op:
+`_qn_importance_weights` assigns one weight per multiplicity, constant within a stratum —
+this estimator is the exact form of the correction that knob approximates.
+
+**When the median is unrealised** (an explicit-`q(N|x)` family whose exact softmax median
+falls on a multiplicity the finite pool lacks): the nearest populated stratum by
+`|n − n_hat|`, ties to the larger pool mass then the smaller `n`. It never raises (an
+unrealised median is a runtime state, not a misconfiguration) and never falls back to the
+global medoid, which would reintroduce the smearing on exactly the most N-ambiguous jets.
+For a continue/stop family the question does not arise: `length_pmf` *is* the draw
+histogram, so the median is realised by construction.
+
+**Status: measured, and NOT recommended — `mbr` stays the default.** On 600 held-out jets
+at `K=200` it is *significantly farther* from truth than the plain medoid: Δ = −0.083, 95%
+CI [−0.128, −0.039]. Its residual RMS is fine (1.003 / 0.999 / 1.024 vs the medoid) and its
+multiplicity marginals are the best of any estimator — the shape is right, the *selection*
+is worse. Both components lose: restricting the expectation costs −0.043 (cross-stratum
+distances are inflated by the imbalance term but are not noise), and the calibrated median
+picks N no better than the medoid already does (0.448 vs 0.443 exact).
+
+The same measurement prices what would help: stratifying at the **true** N gives 1.661
+against 2.349, so `q(N|x)` is **calibrated but not sharp** — right rate and ranking, wrong
+about which N on more than half the jets. Use this knob to reproduce that measurement, not
+as a production decode. Full table in
+[`PLAN_StratifiedMBR.md`](PLAN_StratifiedMBR.md) §1a.
 
 ### `cluster_posterior` — a set of explanations instead of one tree
 
