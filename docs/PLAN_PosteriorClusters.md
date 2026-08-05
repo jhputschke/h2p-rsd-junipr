@@ -180,6 +180,13 @@ path is bit-identical to today. Builds on the merged `PLAN_MBR_PerturbativeLund.
 > selection rules in a row (mass argmax, medoid's-cluster, N-first) all lose to plain
 > centrality.
 
+> **G7's ceiling is the reporting rule, now measured rather than inferred** (WP-3,
+> docs/PLAN_StratifiedMBR.md §1c). On the same sets: exemplar-support coverage **0.617**
+> [0.577, 0.655], pool-resolution coverage **0.793**, nominal 0.680. The conformal prefix
+> averages 4.94 clusters against `<n_clusters>` ≈ 5, so these are the same sets judged two
+> ways — and only the partition-dependent rule fails. A residual 20.7% is a real support
+> gap and is not explained away.
+
 > **The scalars predict the set's error and not the medoid's.** Most- over least-confident
 > RMS ratio: `set0` 0.729 / 0.792 / 0.964 across ln(1/ΔR), ln kt, ln z; `mbr` 0.906 / 1.080
 > / 1.110. That is the right direction — they describe the cluster `set0` came from.

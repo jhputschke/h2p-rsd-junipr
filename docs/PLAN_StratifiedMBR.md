@@ -335,6 +335,68 @@ and do not mix tiers in one table.
   ≥ 90% of jets); G2′ gain + the oracle-gap decomposition at K=1000; `mbr_n` vs medoid at
   K=1000.
 
+## 1c. RESULT — WP-3 and WP-4 on a full eval run
+
+600 jets, K = 200, `v1_contstop_s0`, via `h2p-rsd-junipr eval` with
+`experiment.cluster_diagnostics=true experiment.coverage_null_reps=20`. Artifact:
+`eval_metrics_wp34.json` (the arm's own `eval_metrics.json` was preserved).
+
+### WP-4 — `coverage_68` is NOT evidence of over-confidence. The deficit is the statistic.
+
+| | value | on |
+|---|---:|---|
+| `coverage_68` | **0.546** [0.502, 0.589] | 502 jets |
+| **its own null** (model as truth, same K-draw HPD) | **0.553** [0.543, 0.563] | 8 841 pseudo-truths |
+| difference | −0.007 | — |
+
+**The observed coverage sits inside the null's interval**, and the null is tight. A
+*perfect* model scores **0.553** under this construction, not 0.68: the empirical HPD-68
+built from K = 200 draws cannot contain cells of probability below 1/200, and a calibrated
+truth still lands in them. The entire 0.68 → 0.55 gap is the estimator.
+
+**This corrects a conclusion carried in several places**, including
+`PROD_TEST_v1_RESULTS.md` §1 ("the joint tree posterior is measurably too narrow … *and the
+leading-cell coverage says the same thing*"), its G4 regional clause, and my own earlier
+readings in this session. It is the same class of error v1 itself caught in SBC-on-N — a
+mid-rank statistic on a 7-valued discrete N scored against a *continuous* χ²(9) null — and
+it went unnoticed for the same reason: the reference was assumed rather than simulated.
+
+**What still stands.** TARP is a separate statistic with its own MC null recomputed at
+n = 2000, and its finding — the explicit-`q(N|x)` arms are too narrow, both continue/stop
+arms pass — is untouched, as is the `narrow_soft` PIT attribution. What falls away is the
+*corroboration* leading-cell coverage was supplying, which means the joint-narrowness case
+now rests on TARP and the PIT cross alone.
+
+**Scope of the null.** It is drawn at the same K as the statistic it explains — it must
+share the estimator's handicap — so it is specific to `n_closure_samples = 200` and does
+not transfer to another budget. Quote it with its K.
+
+### WP-3 — same sets, two coverage rules, 0.617 vs 0.793
+
+| rule | coverage |
+|---|---:|
+| exemplar support (`assign_truth`) | **0.617** [0.577, 0.655] |
+| pool resolution (`pool_covered`) | **0.793** |
+| nominal (α = 0.32) | 0.680 |
+
+The conformal set's mean size is 4.94 against `<n_clusters>` ≈ 5, so the emitted prefix is
+essentially the full set — the two rows are the *same sets* judged two ways. Under the
+exemplar rule G7's ceiling is 0.617 (= 1 − the 38.3% unassigned rate) and the nominal 0.68
+is unreachable; at the pool's own nearest-neighbour scale the same sets cover **0.793**, and
+0.68 becomes reachable with margin.
+
+That converts §1's inference into a direct measurement: **G7's failure is the reporting
+rule, not the model's support.** Supporting numbers: `pool_bound` = 0.630 against a mean
+nearest-draw distance of 0.294, so the bound is ~2× the pool's own resolution — loose enough
+to be fair, tight enough that 20.7% of truths still fall outside it. The residual 0.207 is a
+real support gap and is not explained away.
+
+Both rules stay reported. They measure different things — "is the truth inside the region
+this exemplar represents" versus "did the pool put a draw near the truth at all" — and the
+exemplar rule's failure remains on the record rather than being tuned away.
+
+---
+
 ## WP-3 — pool-based coverage beside G7
 
 - `inference/clusters.py: pool_coverage_bound(D)` — the pool's own resolution scale
