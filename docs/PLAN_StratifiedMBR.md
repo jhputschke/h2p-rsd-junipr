@@ -1,9 +1,10 @@
 # PLAN — N-first (stratified) MBR, and three measurement work packages
 
-Status: **implemented; WP-1 FAILS its own ship gate and is not recommended.** The
-estimator ships as an available `decode.point_estimator` value, documented as
-measured-not-recommended. WP-3 and WP-4 landed. The measurement is in §1a below, and it
-relocates the problem rather than solving it.
+Status: **complete. WP-1 FAILS its own ship gate and is not recommended**; WP-2, WP-3 and
+WP-4 landed. The estimator ships as an available `decode.point_estimator` value, documented
+as measured-not-recommended. §1a is the WP-1 verdict, §1b the K=1000 arm — which confirms
+the verdict is budget-independent and turns up a hyperparameter-scaling artifact that
+contaminates gate G6.
 Follows directly from the 600-jet / K=200 gate run recorded in
 `PLAN_PosteriorClusters.md` (implementation-note tables) and answers the open question of
 `PLAN_empty_parton_tree.md` ("should the gate be a general argmin over an explicit loss on
@@ -242,6 +243,83 @@ printed ranking.
    keys under `"mbr_n"`.
 
 Tests 1–2 are pure numpy (CI fast tier); model-facing ones POT-gated per existing style.
+
+---
+
+## 1b. RESULT — WP-2, the K=1000 arm (gate G5)
+
+600 jets at K = 1000, same arm and decode, **13.2 min** on cuda (the K² block is 25× the
+K = 200 one). Artifact: `per_jet_clusters_K1000.json`.
+
+**The conclusions are budget-independent. That is the point of the arm.**
+
+| | K=200 | K=1000 |
+|---|---:|---:|
+| `mbr_n` Δ, all jets | −0.083 [−0.128, −0.039] | **−0.084 [−0.135, −0.030]** |
+| `P(n̂ = n_true)` | 0.4483 | **0.4483** |
+| stratified at n_true (the N lever) | 1.661 | **1.668** |
+| global medoid | 2.349 | 2.329 |
+| G2 medoid-in-dominant | 0.468 | 0.472 |
+
+`mbr_n`'s failure is not a small-sample artifact, and the 0.745 N-channel headroom is a
+property of the model rather than of the budget — `P(n̂ = n_true)` is identical to four
+decimal places at 5× the draws. **`q(N|x)` is calibrated but not sharp, and no amount of
+sampling fixes that.**
+
+**What K does buy — the silhouette question is answered:**
+
+| | K=200 | K=1000 |
+|---|---:|---:|
+| silhouette precondition holds | 46.2% | **66.3%** |
+| G2′ gain vs the null (all multi) | +0.603 ± 0.048 | **+0.676 ± 0.049** |
+| `<n_clusters>` | 4.89 | 3.95 |
+| d(truth, nearest draw) / pool scale | 0.092 | **0.074** |
+| MC error on a mass at m = 0.6 | 0.035 | 0.015 |
+
+So the "unresolvable half" at K = 200 was **partly budget**: two thirds of jets have
+resolvable structure at K = 1000, the partition carries *more* real information, and it
+fragments less (fewer, better-supported clusters). The set-valued layer is better at
+K = 1000 on every measure that describes the partition itself.
+
+### An unexpected finding: the cluster hyperparameters do not transfer across K
+
+`cluster_min_cluster_size = 0` resolves to `max(5, ceil(0.05·K))` — **10 draws at K = 200,
+50 at K = 1000**. HDBSCAN's notion of a cluster therefore demands a much denser region as K
+grows, and more of the pool falls to noise:
+
+| | K=200 | K=1000 |
+|---|---:|---:|
+| residual (noise + sub-threshold) mass | 0.284 | **0.362** |
+| truth unassigned by the exemplar rule | 35.7% | **43.5%** |
+| G6 ECE (tempered) | 0.0395 | 0.0526 |
+| G6 slope | 1.12 | 0.43 |
+| G6 Brier resolution | 0.0785 | 0.0267 |
+
+**The G6 degradation is confounded and must not be read as "the masses got worse".** G6 is
+computed on the *assigned* jets only, and the assignment rule rejects 43.5% at K = 1000
+against 35.7% at K = 200 — while the pool actually brackets the truth **better**
+(nearest-draw ratio 0.074 vs 0.092). More of the posterior is labelled noise, so more truths
+sit near an unclustered draw and are ruled outside every exemplar's support; the surviving
+subset G6 scores is more selected, and its calibration degrades for that reason.
+
+This is the same exemplar-rule artifact WP-3 was built for, now shown to contaminate **G6**
+as well as G7 — and to get *worse* with budget, which is the opposite of what a budget arm
+is usually expected to show. Two consequences:
+
+- **`coverage_pool` (WP-3) is the right instrument at any K**, and the K = 1000 arm is the
+  strongest evidence for it: the model's support improved while the exemplar rule's verdict
+  got worse.
+- **A K comparison at fixed `cluster_min_mass` is not a clean control.** Re-running
+  K = 1000 with `cluster_min_cluster_size` pinned to 10 (the K = 200 absolute value) would
+  separate "more draws" from "coarser clustering". Not done here, and G6's cross-K row
+  should be treated as unscored until it is.
+
+**G5 verdict.** The per-jet paired criterion ("`top_mass` and `entropy` agree within their
+binomial error on ≥ 90% of jets") is **not computable from these artifacts** — the notebook
+records aggregates, not per-jet rows. What is measurable is that the aggregate scalars move
+in ways fully explained by the granularity change above (`entropy` 1.417 → 1.143 with
+`<n_clusters>` 4.89 → 3.95), so the plan's fallback applies: **quote the K = 1000 tier**,
+and do not mix tiers in one table.
 
 ---
 
