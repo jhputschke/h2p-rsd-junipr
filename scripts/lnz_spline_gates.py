@@ -1,32 +1,37 @@
-"""Score gate G3 for the RQ-spline `ln z` head (docs/PLAN_lnz_spline_head.md §3).
+"""Score the spline work packages (docs/PLAN_lnz_spline_head.md §3, §6, §7).
 
-The measurement the plan pre-registered: does a monotone rational-quadratic spline on the
-soft-drop interval close the `ln z` PIT failure that `lnz_support="physical"` halved and
-left significant on every v1 seed?
+Three questions, three verdicts, one script — because they are read off the same arms and
+splitting them would let the seed sets drift apart.
 
-    G3 CLOSES iff  KS < its own 1.36/sqrt(n) critical value on EVERY seed
-                   AND the `ln_z x wide_soft` cell falls below 1.0x its own critical value.
+**G3 (ln z)** — the original pre-registered gate:
 
-Both clauses are pre-registered, and both are checked here rather than eyeballed. A
-two-of-three pass is a partial result and is reported as one — the plan says so in advance
-precisely because "the best seed closes it" is the reading a failed gate invites.
+    CLOSES iff  the `ln z` PIT KS is below its own 1.36/sqrt(n) critical value on EVERY
+                seed AND the `ln_z x wide_soft` bulk cell is below 1.0x its own.
 
-Three guards ride along, because a coordinate fix can buy the PIT by spending something
-else:
-  * the support audit must stay at 0.0000% soft-drop and z > 1/2 violations — the property
-    v1's WP-A bought, which this change must not spend;
-  * held-out NLL must not worsen beyond the control's own seed spread;
-  * TARP and `pit_ks_max` are reported beside G3, so a narrower joint is visible.
+Scored over the `spline_s*` arms. §7.2a added seeds 3-5 for a specific reason: three seeds
+cannot distinguish "one marginal seed" from "a 1-in-3 failure rate", and the first run
+landed 2/3 with the third missing by 4%.
 
-Controls are the v1 arms themselves: `runs/prod_test_v1/v1_base_s{0,1,2}` are the SAME
-preset and the SAME seeds with the truncated-normal head, already trained and evaluated,
-and the spline is bit-identical off its switch (tests/test_lnz_spline.py). Nothing is
-re-run to produce them.
+**G3-dv (§7.1)** — the same gate on the coordinate that became binding once `ln z` was
+fixed. Scored over the `dvspline_*` arms, which carry BOTH splines, so it requires `dv`
+*and* `ln z` to pass: fixing one by breaking the other is not a result.
+
+**K sensitivity (§7.2b)** — `spline_k16_s2` against `spline_s2`: is the marginal seed's 4%
+miss expressiveness or variance? Reported, never used to pick K. Tuning `K` against G3
+across all seeds would make the gate circular, exactly as a closure-tuned bandwidth would
+have made G7 circular.
+
+Guards ride along on every arm, because a PIT improvement can be bought with something
+else: the support audit must stay at 0.0000%, held-out NLL must not worsen beyond the
+control's seed spread, and TARP / `pit_ks_max` / `d(MBR)` are reported beside the verdicts.
+
+Controls are the arms that differ by exactly one thing — `v1_base_s*` for the `ln z`
+spline, and the `ln z`-spline arm itself for the `dv` spline, so each row prices its own
+intervention rather than the accumulated stack.
 
 Run (after `run_lnz_spline.sh` and `eval_prod_test_v1.sh --run-root runs/lnz_spline`):
 
     python scripts/lnz_spline_gates.py
-    python scripts/lnz_spline_gates.py --run-root runs/lnz_spline --out docs/…
 """
 
 from __future__ import annotations
@@ -44,17 +49,23 @@ if str(REPO / "src") not in sys.path:
 
 from h2p_rsd_junipr.eval.report import save_metrics  # noqa: E402
 
-# arm -> its control arm. Seed to seed, family to family: a spline arm compared against a
-# different seed would price the seed spread as if it were the intervention.
-PAIRS = {
-    "spline_s0": "v1_base_s0",
-    "spline_s1": "v1_base_s1",
-    "spline_s2": "v1_base_s2",
-    "contstop_spline_s0": "v1_contstop_s0",
+# arm -> (control arm, control root key, group). The control is the arm differing by
+# exactly ONE thing, so every row prices its own intervention: `v1_base_s*` for the ln z
+# spline, and the ln z-spline arm itself for the dv spline stacked on top of it.
+ARMS: dict[str, tuple[str | None, str, str]] = {
+    "spline_s0": ("v1_base_s0", "control", "lnz"),
+    "spline_s1": ("v1_base_s1", "control", "lnz"),
+    "spline_s2": ("v1_base_s2", "control", "lnz"),
+    "spline_s3": (None, "control", "lnz"),
+    "spline_s4": (None, "control", "lnz"),
+    "spline_s5": (None, "control", "lnz"),
+    "dvspline_s0": ("spline_s0", "run", "dv"),
+    "dvspline_s1": ("spline_s1", "run", "dv"),
+    "dvspline_s2": ("spline_s2", "run", "dv"),
+    "spline_k16_s2": ("spline_s2", "run", "k16"),
+    "contstop_spline_s0": ("v1_contstop_s0", "control", "transfer"),
 }
-# The pre-registered gate runs on these three only. `contstop_spline_s0` is a transfer
-# check on the fielded family and is reported separately, never folded into the verdict.
-GATE_ARMS = ("spline_s0", "spline_s1", "spline_s2")
+COORDS = ("du", "dv", "ln_z", "psi")
 
 
 def _get(d, path, default=None):
@@ -73,150 +84,163 @@ def find_metrics(root: Path, arm: str) -> Path | None:
 
 def critical(n) -> float:
     """The KS statistic's own 95% critical value. It differs per cell because n does —
-    which is the whole reason the region cross is read as a RATIO and never as a raw KS
-    (`eval/report.py` draws it that way for the same reason)."""
+    which is why the region cross is read as a RATIO and never as a raw KS."""
     return 1.36 / math.sqrt(float(n)) if n else float("nan")
 
 
 def best_val_nll(root: Path, arm: str) -> float | None:
-    """The arm's best held-out NLL/jet, read from its TRAINING log.
-
-    `eval_metrics.json` does not carry it — the eval reports closure and calibration, not
-    the objective — so the grid log is the record. Both sides of every pair are
-    `lnz_support="physical"` densities on the same `(u, v, ln z, psi)` box (the spline
-    integrates to 1 over it, `tests/test_lnz_spline.py`), so this comparison is
-    legitimate; the one that is not is across `lnz_support`, which nothing here does."""
+    """The arm's best held-out NLL/jet, from its TRAINING log — `eval_metrics.json` does
+    not carry it. Every arm compared here is an `lnz_support="physical"` density on the
+    same `(u, v, ln z, psi)` box, so the comparison is legitimate; the one that would not
+    be is across `lnz_support`, which nothing here does."""
     log = root / "logs" / f"{arm}.log"
     if not log.is_file():
         return None
-    # The line continues past the number ("... = 3.846. checkpoints in runs/..."), so it
-    # is matched rather than split on.
     hits = re.findall(r"best val NLL/jet = ([0-9.]+?)\.?(?:\s|$)", log.read_text())
     return float(hits[-1]) if hits else None
 
 
 def read_arm(path: Path) -> dict:
-    """The G3 numbers and the three guards, from one `eval_metrics.json`."""
     m = json.loads(path.read_text())
     cal = m.get("calibration", {})
-    lnz = _get(cal, "pit_coords.coords.ln_z", {}) or {}
-    cell = _get(cal, "pit_coords_by_region.ln_z.wide_soft", {}) or {}
     post = _get(m, "support_audit.posterior", {}) or {}
-    return {
-        "path": str(path),
-        "ln_z_ks": lnz.get("ks"),
-        "ln_z_n": lnz.get("n"),
-        "ln_z_ratio": (lnz["ks"] / critical(lnz["n"])) if lnz.get("n") else None,
-        "wide_soft_ks": cell.get("ks"),
-        "wide_soft_n": cell.get("n"),
-        "wide_soft_ratio": (cell["ks"] / critical(cell["n"])) if cell.get("n") else None,
+    out = {"path": str(path)}
+    for c in COORDS:
+        e = _get(cal, f"pit_coords.coords.{c}", {}) or {}
+        out[f"{c}_ks"] = e.get("ks")
+        out[f"{c}_ratio"] = (e["ks"] / critical(e["n"])) if e.get("n") else None
+    for c in ("ln_z", "dv"):
+        cell = _get(cal, f"pit_coords_by_region.{c}.wide_soft", {}) or {}
+        out[f"{c}_bulk_ratio"] = (cell["ks"] / critical(cell["n"])) if cell.get("n") else None
+    out.update({
         "pit_ks_max": cal.get("pit_coords_ks_max"),
         "tarp_max_dev": _get(cal, "tarp.tarp_max_dev"),
         "tarp_null_p95": _get(cal, "tarp.null_band.p95"),
         "tarp_passes_g7": _get(cal, "tarp.tarp_passes_g7"),
-        # the WP-A property this change must not spend
         "soft_drop_viol": post.get("soft_drop"),
         "z_above_half_viol": post.get("z_above_half"),
         "dlund_mbr": _get(m, "closure.dlund_mbr"),
-        "coverage_68": _get(m, "closure.coverage_68"),
-    }
+    })
+    return out
 
 
 def fmt(x, spec=".4f", dash="—"):
     return dash if x is None else format(x, spec)
 
 
+def verdict(rows: dict, arms: list[str], clauses: list[tuple[str, str]]) -> dict:
+    """`n/N` per clause, and CLOSED only when every clause holds on every scored arm."""
+    scored = [a for a in arms if a in rows]
+    tally = {}
+    for label, key in clauses:
+        vals = [rows[a]["spline"].get(key) for a in scored]
+        tally[label] = (sum(1 for v in vals if v is not None and v < 1.0), len(scored))
+    closes = bool(scored) and all(n == d for n, d in tally.values())
+    return {
+        "arms_scored": scored,
+        "clauses": {k: f"{n}/{d}" for k, (n, d) in tally.items()},
+        "verdict": ("CLOSED" if closes else
+                    "PARTIAL" if any(n for n, _ in tally.values()) else "NOT CLOSED"),
+        "closes": closes,
+    }
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run-root", default="runs/lnz_spline")
     p.add_argument("--control-root", default="runs/prod_test_v1")
-    p.add_argument("--out", default=None, help="where to write the JSON (default beside the run)")
+    p.add_argument("--out", default=None)
     args = p.parse_args(argv)
 
     root, croot = REPO / args.run_root, REPO / args.control_root
-    rows = {}
-    for arm, control in PAIRS.items():
-        a_path, c_path = find_metrics(root, arm), find_metrics(croot, control)
+    rows: dict[str, dict] = {}
+    for arm, (control, where, group) in ARMS.items():
+        a_path = find_metrics(root, arm)
         if a_path is None:
-            print(f"[gates] {arm}: no eval_metrics.json under {root / arm} — skipped")
             continue
-        spline, ctrl = read_arm(a_path), (read_arm(c_path) if c_path else None)
+        spline = read_arm(a_path)
         spline["nll"] = best_val_nll(root, arm)
-        if ctrl is not None:
-            ctrl["nll"] = best_val_nll(croot, control)
-        rows[arm] = {"control_arm": control, "spline": spline, "control": ctrl}
+        ctrl = None
+        if control:
+            c_root = croot if where == "control" else root
+            c_path = find_metrics(c_root, control)
+            if c_path:
+                ctrl = read_arm(c_path)
+                ctrl["nll"] = best_val_nll(c_root, control)
+        rows[arm] = {"control_arm": control, "group": group, "spline": spline,
+                     "control": ctrl}
     if not rows:
         print("[gates] nothing to score: run the grid and the eval first.")
         return 2
 
-    # ---- G3, the pre-registered gate -----------------------------------------
-    print("\n" + "=" * 96)
-    print("gate G3 — the `ln z` PIT, spline vs the truncated normal it replaces")
-    print(f"{'arm':<22}{'KS':>9}{'crit':>9}{'ratio':>9}   |{'control KS':>12}{'ratio':>9}"
-          f"   |{'bulk cell':>11}{'was':>8}")
-    print("-" * 96)
+    # ---- the per-coordinate PIT, which is what every gate here reads ----------
+    print("\n" + "=" * 100)
+    print("per-coordinate PIT, as a ratio to each coordinate's OWN critical value (>1 fails)")
+    print(f"{'arm':<20}{'group':<10}" + "".join(f"{c:>9}" for c in COORDS)
+          + f"{'ln_z bulk':>11}{'dv bulk':>10}")
+    print("-" * 100)
     for arm, r in rows.items():
-        s, c = r["spline"], r["control"] or {}
-        tag = arm + ("" if arm in GATE_ARMS else "  (transfer)")
-        print(f"{tag:<22}{fmt(s['ln_z_ks']):>9}{fmt(critical(s['ln_z_n'])):>9}"
-              f"{fmt(s['ln_z_ratio'], '.2f'):>8}x   |{fmt(c.get('ln_z_ks')):>12}"
-              f"{fmt(c.get('ln_z_ratio'), '.2f'):>8}x   |"
-              f"{fmt(s['wide_soft_ratio'], '.2f'):>10}x{fmt(c.get('wide_soft_ratio'), '.2f'):>7}x")
-    print("=" * 96)
+        s = r["spline"]
+        print(f"{arm:<20}{r['group']:<10}"
+              + "".join(f"{fmt(s[f'{c}_ratio'], '.2f'):>8}x" for c in COORDS)
+              + f"{fmt(s['ln_z_bulk_ratio'], '.2f'):>10}x{fmt(s['dv_bulk_ratio'], '.2f'):>9}x")
+    print("=" * 100)
 
-    scored = [rows[a] for a in GATE_ARMS if a in rows]
-    marg = [r["spline"]["ln_z_ratio"] for r in scored]
-    bulk = [r["spline"]["wide_soft_ratio"] for r in scored]
-    n_marg = sum(1 for v in marg if v is not None and v < 1.0)
-    n_bulk = sum(1 for v in bulk if v is not None and v < 1.0)
-    closes = len(scored) == len(GATE_ARMS) and n_marg == len(scored) and n_bulk == len(scored)
-    verdict = ("CLOSED" if closes else
-               "PARTIAL" if (n_marg or n_bulk) else "NOT CLOSED")
-    print(f"\nG3 verdict: **{verdict}** — marginal PIT below its critical value on "
-          f"{n_marg}/{len(scored)} seeds, the `ln_z x wide_soft` bulk cell on "
-          f"{n_bulk}/{len(scored)}.")
-    print("   (the gate needs BOTH clauses on ALL seeds; anything else is reported as "
-          "partial, per the plan)")
+    lnz_arms = [a for a, r in rows.items() if r["group"] == "lnz"]
+    dv_arms = [a for a, r in rows.items() if r["group"] == "dv"]
+    g3 = verdict(rows, lnz_arms, [("ln z marginal", "ln_z_ratio"),
+                                  ("ln_z x wide_soft", "ln_z_bulk_ratio")])
+    g3dv = verdict(rows, dv_arms, [("dv marginal", "dv_ratio"),
+                                   ("dv x wide_soft", "dv_bulk_ratio"),
+                                   ("ln z marginal (must not regress)", "ln_z_ratio")])
+    for name, v in (("G3    (ln z spline)", g3), ("G3-dv (§7.1, dv spline)", g3dv)):
+        if not v["arms_scored"]:
+            continue
+        print(f"\n{name}: **{v['verdict']}**  on {len(v['arms_scored'])} seeds "
+              f"({', '.join(v['arms_scored'])})")
+        for k, frac in v["clauses"].items():
+            print(f"     {k:<36} below its critical value on {frac}")
 
-    # ---- the three guards -----------------------------------------------------
-    print("\n" + "=" * 96)
+    # ---- §7.2b: K sensitivity, reported and never used to choose K ------------
+    k16 = rows.get("spline_k16_s2")
+    if k16 and k16["control"]:
+        a, b = k16["spline"], k16["control"]
+        print("\n§7.2b  K sensitivity on the marginal seed (K=16 vs K=8, seed 2):")
+        print(f"     ln z  {fmt(b['ln_z_ratio'], '.2f')}x -> {fmt(a['ln_z_ratio'], '.2f')}x"
+              f"     bulk  {fmt(b['ln_z_bulk_ratio'], '.2f')}x -> "
+              f"{fmt(a['ln_z_bulk_ratio'], '.2f')}x"
+              f"     NLL  {fmt(b['nll'], '.3f')} -> {fmt(a['nll'], '.3f')}")
+        print("     (reported, NOT used to select K — a K tuned against G3 makes the gate "
+              "circular)")
+
+    # ---- the guards ----------------------------------------------------------
+    print("\n" + "=" * 100)
     print("guards — what a PIT improvement must not have been bought with")
-    print(f"{'arm':<22}{'soft-drop':>11}{'z>1/2':>9}{'pit_ks_max':>12}{'TARP':>9}"
-          f"{'null p95':>10}{'val NLL':>9}{'d(MBR)':>9}")
-    print("-" * 96)
+    print(f"{'arm':<20}{'soft-drop':>11}{'z>1/2':>9}{'pit_ks_max':>12}{'TARP':>9}"
+          f"{'G7':>6}{'val NLL':>10}{'d(MBR)':>9}")
+    print("-" * 100)
     for arm, r in rows.items():
-        for label, blk in (("", r["spline"]), ("  control", r["control"])):
+        for label, blk in ((arm, r["spline"]), (f"  vs {r['control_arm']}", r["control"])):
             if blk is None:
                 continue
-            name = (arm if not label else f"  vs {r['control_arm']}")
-            print(f"{name:<22}{fmt(blk['soft_drop_viol'], '.5f'):>11}"
-                  f"{fmt(blk['z_above_half_viol'], '.5f'):>9}"
-                  f"{fmt(blk['pit_ks_max']):>12}{fmt(blk['tarp_max_dev'], '.4f'):>9}"
-                  f"{fmt(blk['tarp_null_p95'], '.4f'):>10}{fmt(blk.get('nll'), '.4f'):>9}"
-                  f"{fmt(blk['dlund_mbr'], '.4f'):>9}")
-    print("=" * 96)
-
+            print(f"{label:<20}{fmt(blk['soft_drop_viol'], '.5f'):>11}"
+                  f"{fmt(blk['z_above_half_viol'], '.5f'):>9}{fmt(blk['pit_ks_max']):>12}"
+                  f"{fmt(blk['tarp_max_dev'], '.4f'):>9}"
+                  f"{('yes' if blk['tarp_passes_g7'] else 'no'):>6}"
+                  f"{fmt(blk.get('nll'), '.3f'):>10}{fmt(blk['dlund_mbr'], '.4f'):>9}")
+    print("=" * 100)
     leaked = [a for a, r in rows.items()
               if (r["spline"]["soft_drop_viol"] or 0) > 0
               or (r["spline"]["z_above_half_viol"] or 0) > 0]
-    print("support guard: " + ("HELD — 0.0000% soft-drop and z > 1/2 violations on every arm"
-                               if not leaked else f"LEAKED on {leaked}"))
+    print("support guard: " + ("HELD — 0.0000% on every arm" if not leaked
+                               else f"LEAKED on {leaked}"))
 
     out = Path(args.out) if args.out else root / "lnz_spline_gates.json"
-    save_metrics({
-        "plan": "docs/PLAN_lnz_spline_head.md",
-        "gate_arms": list(GATE_ARMS),
-        "verdict": {
-            "G3": verdict,
-            "closes": bool(closes),
-            "marginal_below_crit": f"{n_marg}/{len(scored)}",
-            "bulk_cell_below_crit": f"{n_bulk}/{len(scored)}",
-            "support_guard_held": not leaked,
-        },
-        "arms": rows,
-    }, out)
+    save_metrics({"plan": "docs/PLAN_lnz_spline_head.md",
+                  "G3": g3, "G3_dv": g3dv,
+                  "support_guard_held": not leaked, "arms": rows}, out)
     print(f"\n[gates] wrote {out}")
-    return 0 if closes else 1
+    return 0 if (g3["closes"] and g3dv["closes"]) else 1
 
 
 if __name__ == "__main__":
