@@ -662,6 +662,85 @@ def _reduce_risk(D, w=None, *, loss: str = "linear", eps=None) -> np.ndarray:
     return -num / den if loss == "kernel" else 1.0 - num / den
 
 
+def stratified_medoid(D, mults, n_hat, *, w=None) -> tuple[int, float, int]:
+    """The Frechet medoid of ONE multiplicity stratum (docs/PLAN_StratifiedMBR.md WP1).
+
+    `argmin` over the rows of ``D[stratum, stratum]`` with
+    ``stratum = {k : mults[k] == n_used}`` — the candidate set *and* the expectation are
+    both restricted, which is what distinguishes this from `_reduce_risk` (which varies the
+    per-pair loss and always keeps every column). Returns
+    ``(win_idx, risk, n_used)`` with `win_idx` a **global** draw index.
+
+    **Why restrict the expectation.** The perturbative-Lund EMD carries a mass-imbalance
+    term, so a draw of multiplicity `m` pays `~R|W_a - W_b|` against every draw of a
+    different multiplicity. The global medoid therefore minimises a mean over *all* strata
+    and can sit in the wrong one, or between two — measured on 600 held-out jets, that
+    smearing is what leaves the linear medoid 2.349 from truth while the closest cluster
+    exemplar is 1.476, with 83% of the resolvable posterior ambiguity being between-N.
+    Conditioning on `N` removes the imbalance term from the reduction entirely: within a
+    stratum every pair has equal total weight, so what is left is pure shape.
+
+    **`w` is an exact no-op here when it comes from `_qn_importance_weights`,** which
+    assigns one weight per multiplicity — constant within a stratum, so it cancels out of
+    the weighted mean. That is not a coincidence: this estimator is the exact form of the
+    correction `decode.mbr_resample_to_qn` approximates by reweighting. It is still
+    accepted and applied, for a caller with genuinely per-draw weights.
+
+    Zero EMD calls: `D` is already built. Pure NumPy — no model, no torch."""
+    D = np.asarray(D, dtype=float)
+    if D.ndim != 2 or D.shape[0] != D.shape[1]:
+        raise ValueError(
+            f"stratified_medoid needs a square K x K distance matrix, got {D.shape}. With "
+            f"mbr_n_candidates != 0 the row indices are not the column indices, so "
+            f"restricting both to one stratum is undefined — reset the candidate cap."
+        )
+    m = np.asarray(mults, dtype=int).reshape(-1)
+    if m.size != D.shape[0]:
+        raise ValueError(f"mults has {m.size} entries for a {D.shape[0]}-draw matrix")
+    if m.size == 0:
+        raise ValueError("stratified_medoid needs at least one draw")
+
+    n_used = _nearest_populated(m, int(n_hat))
+    idx = np.flatnonzero(m == n_used)
+    sub = D[np.ix_(idx, idx)]
+    ws = None if w is None else np.asarray(w, dtype=float).reshape(-1)[idx]
+    # The uniform branch is literally `sub.mean(axis=1)` — the same expression, and the
+    # same exactness convention, as `_reduce_risk`'s linear path.
+    risk = _reduce_risk(sub, ws, loss="linear")
+    best = int(np.argmin(risk))
+    return int(idx[best]), float(risk[best]), int(n_used)
+
+
+def _nearest_populated(mults, n_hat: int) -> int:
+    """`n_hat` if the pool realises it, else the nearest multiplicity that it does.
+
+    The median of a *histogram* pmf is always realised — `quantile_floor` returns the
+    smallest n with `cdf(n) >= alpha`, which forces `pmf[n] > 0` — so on a continue/stop
+    family, whose `length_pmf` IS the draw histogram, this never fires. It exists for a
+    family with an EXPLICIT `q(N|x)` head, where an exact softmax median can fall on a
+    multiplicity the finite pool happens not to contain.
+
+    Nearest by `|n - n_hat|`, ties to the larger pool mass (the posterior's own vote
+    between two equidistant strata), then to the smaller `n` for determinism.
+
+    **Not a raise:** an unrealised median is a legitimate runtime state, not a
+    misconfiguration — the repo raises for non-metric or rectangular `D` and degrades with
+    a note for data states (`_qn_importance_weights` falls back to uniform; a degenerate
+    `D` becomes one zero-radius cluster). **And not the global medoid:** that would
+    silently revert to the estimator this one exists to replace, on precisely the jets
+    where the length belief and the sampler disagree — the most N-ambiguous ones, where
+    the smearing it removes is worst. Staying inside the realised support is the same
+    `H = {pool}` discipline `mbr_cluster_set` applies to the empty stratum."""
+    m = np.asarray(mults, dtype=int).reshape(-1)
+    present, counts = np.unique(m, return_counts=True)
+    if np.any(present == int(n_hat)):
+        return int(n_hat)
+    # |n - n_hat| is the L1 loss whose Bayes estimator is the median, so "nearest
+    # populated" is that same decision restricted to the answers the pool can give.
+    order = np.lexsort((present, -counts, np.abs(present - int(n_hat))))
+    return int(present[order[0]])
+
+
 # ---------------------------------------------------------------------------
 # The estimator
 # ---------------------------------------------------------------------------
@@ -758,6 +837,91 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
         r = _reduce_risk(D, w, loss=loss, eps=eps) if eps > 0 else np.full(len(cand_idx), np.nan)
         side[loss] = cand_idx[int(np.argmin(r))] if eps > 0 else win_idx
     return pe, side
+
+
+# ---------------------------------------------------------------------------
+# N-first (stratified) MBR — docs/PLAN_StratifiedMBR.md WP1
+# ---------------------------------------------------------------------------
+def mbr_select_stratified(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
+                          lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
+                          norm=False, periodic_phi=False, phi_col=-1, backend="pot",
+                          resample_to_qn=False, coords_by_draw=None, n_quantile=0.5,
+                          D=None):
+    """Two-stage point estimate: decide **N** from the calibrated marginal, then the
+    **conditional medoid** within that stratum (`decode.point_estimator="mbr_n"`).
+
+        n_hat = Q_0.5(q(N|x))        # the Bayes estimator under L(n,m) = |n - m|
+        y_hat = argmin_{h : |h| = n_hat}  mean_{k : |y_k| = n_hat} d(h, y_k)
+
+    A **sibling** of `mbr_select`, not a mode of it: `mbr_select` keeps its own contract
+    (`.risk` = the achieved mean distance over all K draws) and its G1 bit-identity
+    untouched, the same separation `mbr_cluster_set` has.
+
+    **Why.** `mbr_select` minimises a mean over every stratum at once, and the EMD's
+    mass-imbalance term charges `~R|W_a - W_b|` across strata — so the medoid is pulled
+    toward whatever multiplicity is most populous and can land between strata,
+    representing none. On the 600-jet K=200 arm that leaves it 2.349 from truth against a
+    1.476 oracle over cluster exemplars, with **83% of the resolvable ambiguity between
+    N strata** and `q(N|x)` itself calibrated (G4 ratio 0.977; SBC-on-N at the 88th
+    percentile of its own null). Deciding N by the calibrated marginal and the shape by
+    within-stratum centrality uses each channel where it is trustworthy.
+
+    This is also `docs/PLAN_empty_parton_tree.md`'s deferred "general argmin over an
+    explicit loss on n", concretely: `L = |n - m|` gives the median, and the empty gate is
+    its `n = 0` special case.
+
+    **Composition with the empty gate.** Stage 0 is `models.base.map_or_mbr`'s
+    `decode.empty_threshold`, which runs *before* dispatch — it is deliberately not
+    duplicated here, or the config path would gate twice. The interaction is benign: any
+    sensible tau is below 0.5, so "the gate did not fire" implies `q(0|x) < 0.5` and the
+    median cannot be 0 on the gated path. With the gate off a median of 0 honestly returns
+    the empty medoid, at risk exactly 0.0 (the empty clique has zero diameter).
+
+    `.risk` is the **within-stratum** mean — the achieved risk of the decision that
+    produced this tree, which is the only meaning `.risk` has. It is a different number
+    from `mbr_select`'s global mean, and `estimator="mbr_n"` is the provenance that keeps
+    the two from being averaged together.
+
+    Pass `D=` (with the `draws` that produced it) when the caller already built the matrix
+    and no EMD is solved at all."""
+    from .length import quantile_floor
+
+    if D is None:
+        draws, _clouds, cand_idx, D = posterior_distances(
+            model, xf, nx, draws=draws, geom=geom, n_samples=n_samples,
+            n_candidates=n_candidates, lnkt_cut=lnkt_cut, weight=weight, coords=coords,
+            R=R, beta=beta, norm=norm, periodic_phi=periodic_phi, phi_col=phi_col,
+            backend=backend,
+        )
+        if not cand_idx:  # no draws at all -> honest empty tree (reflects the posterior)
+            pe = model.describe_cells(xf, nx, [])
+            pe.risk, pe.estimator = 0.0, "mbr_n"
+            return pe
+    elif draws is None:
+        raise ValueError("mbr_select_stratified(D=...) also needs the `draws` that produced it")
+    if n_candidates:
+        raise ValueError(
+            f"mbr_select_stratified requires mbr_n_candidates == 0 (a square K x K "
+            f"matrix), got {n_candidates}: restricting both the candidates and the "
+            f"expectation to one stratum needs the row and column indices to agree."
+        )
+
+    mults = np.array([len(d) for d in draws], dtype=int)
+    # Reuses the draws rather than sampling again — the `learned_min_emissions(mults=)`
+    # pattern. For a continue/stop family this pmf IS the histogram of these draws, so the
+    # median is realised by construction and `_nearest_populated` never fires.
+    pmf = model.length_pmf(xf, nx, mults=mults.tolist())
+    n_hat = int(quantile_floor(pmf, float(n_quantile)))
+    w = _qn_importance_weights(model, xf, nx, draws) if resample_to_qn else None
+    win_idx, risk, n_used = stratified_medoid(D, mults, n_hat, w=w)
+
+    win_coords = None
+    if coords_by_draw is not None and win_idx < len(coords_by_draw):
+        win_coords = coords_by_draw[win_idx]
+    pe = model.describe_cells(xf, nx, draws[win_idx], win_coords)
+    pe.risk = float(risk)
+    pe.estimator = "mbr_n"
+    return pe
 
 
 # ---------------------------------------------------------------------------

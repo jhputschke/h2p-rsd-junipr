@@ -22,7 +22,9 @@ from .mbr import (
     mbr_cluster_set,
     mbr_kwargs_from_decode,
     mbr_select,
+    mbr_select_stratified,
     posterior_distances,
+    stratified_medoid,
 )
 from .mode_audit import (
     RESOLUTION_RADII,
@@ -57,6 +59,8 @@ __all__ = [
     "lund_emd",
     "lund_emd_matrix",
     "mbr_select",
+    "mbr_select_stratified",
+    "stratified_medoid",
     "mbr_kwargs_from_decode",
     "posterior_distances",
     "bandwidth_quantile",

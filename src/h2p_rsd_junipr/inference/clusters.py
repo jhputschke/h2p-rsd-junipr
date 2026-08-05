@@ -696,8 +696,8 @@ def assert_ancestral_draws(estimates, *, where: str = "an aggregate pushforward"
         est = getattr(pe, "estimator", "map")
         if est == "cluster" or getattr(pe, "cluster_mass", None) is not None:
             bad.append(f"[{k}] cluster exemplar")
-        elif est == "mbr" or getattr(pe, "risk", None) is not None:
-            bad.append(f"[{k}] MBR medoid")
+        elif est in ("mbr", "mbr_n") or getattr(pe, "risk", None) is not None:
+            bad.append(f"[{k}] {'stratified ' if est == 'mbr_n' else ''}MBR medoid")
         elif est == "empty_gate":
             bad.append(f"[{k}] gate-decided empty tree (no risk, no mass — still a decision)")
     if bad:

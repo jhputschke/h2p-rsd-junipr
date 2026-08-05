@@ -67,7 +67,7 @@ def predict(model, geometry, device, x_seq, decode: dict | None = None) -> dict:
     nx = torch.tensor([xf.shape[1]], device=device)
     draws = model.sample_batch(xf, nx, int(dec.get("n_posterior_samples", 200)))
     mults = np.array([len(d) for d in draws])
-    is_mbr = str(dec.get("point_estimator", "map")) == "mbr"
+    is_mbr = str(dec.get("point_estimator", "map")) in ("mbr", "mbr_n")
     alpha = float(dec.get("length_floor_quantile", 0.0))
     if not is_mbr and alpha > 0.0:  # learned per-jet floor reuses the draws (no double-sample)
         dec["min_emissions"] = learned_min_emissions(

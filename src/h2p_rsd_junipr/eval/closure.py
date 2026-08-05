@@ -162,7 +162,8 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     across sections makes their comparisons exactly PAIRED, and makes the run not
     bit-comparable to one that re-sampled per section."""
     dec = dict(decode or {})
-    want_mbr = str(dec.get("point_estimator", "map")) == "mbr"
+    # Either MBR variant produces the same series: a drawn tree selected off the same D.
+    want_mbr = str(dec.get("point_estimator", "map")) in ("mbr", "mbr_n")
     # The edit family's emergent-alignment readout (docs/PLAN_EditTransducer.md). Gated on
     # the model exposing it, so every other family's metric dict is untouched.
     edit_summary = getattr(model, "edit_summary", None)
@@ -545,7 +546,7 @@ def print_point_estimate(model, val_ds, val_jets, geometry, device, n_samples=50
     `run_closure`'s `p_empty_pred` had just counted as empty, and the two halves of one
     `eval` disagreed (docs/PLAN_prod_test_v0.md check 7)."""
     dec = dict(decode or {})
-    want_mbr = str(dec.get("point_estimator", "map")) == "mbr"
+    want_mbr = str(dec.get("point_estimator", "map")) in ("mbr", "mbr_n")
     item = val_ds[0]
     xf = item["xf"].unsqueeze(0).to(device)
     nx = torch.tensor([item["nx"]], device=device)

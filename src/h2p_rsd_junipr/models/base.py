@@ -286,12 +286,23 @@ class PosteriorModel(nn.Module, ABC):
                 # an MBR decode that answered empty reported itself as a MAP.
                 gated.estimator = "empty_gate"
                 return gated
-        if str(decode.get("point_estimator", "map")) == "mbr":
+        est = str(decode.get("point_estimator", "map"))
+        if est == "mbr":
             from ..inference.mbr import mbr_kwargs_from_decode, mbr_select
 
             return mbr_select(self, xf, nx, draws=draws, geom=self.geometry,
                               coords_by_draw=coords_by_draw,
                               **mbr_kwargs_from_decode(decode))
+        if est == "mbr_n":
+            # N-first (stratified) MBR, docs/PLAN_StratifiedMBR.md: N from the calibrated
+            # q(N|x) median, shape from the medoid WITHIN that stratum. It sits AFTER the
+            # empty gate above deliberately -- the gate is stage 0 of the same two-stage
+            # decode, and duplicating it inside the estimator would gate twice.
+            from ..inference.mbr import mbr_kwargs_from_decode, mbr_select_stratified
+
+            return mbr_select_stratified(self, xf, nx, draws=draws, geom=self.geometry,
+                                         coords_by_draw=coords_by_draw,
+                                         **mbr_kwargs_from_decode(decode))
         return self.map_estimate(xf, nx, **decode)
 
     def predict_set(self, xf, nx, *, draws=None, coords_by_draw=None, D=None,

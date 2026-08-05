@@ -427,10 +427,15 @@ the cluster layer's point summary as well as the point estimator's.
 
 ## Open questions
 
-- Should the gate be **`P(N=0)` specific, or a general `argmin` over an explicit loss on
-  `n`**? The general form `n̂ = argmin_n Σ_m q(m|x) L(n, m)` subsumes it (`L` asymmetric at
-  `n=0` recovers the threshold) and would also fix the mode bias at `n ≥ 1`. Larger change;
-  the gate is the minimal fix for the observed failure.
+- ~~Should the gate be **`P(N=0)` specific, or a general `argmin` over an explicit loss on
+  `n`**?~~ **Answered, and implemented.** The general form
+  `n̂ = argmin_n Σ_m q(m|x) L(n, m)` at `L(n, m) = |n − m|` is the posterior **median**,
+  and `decode.point_estimator="mbr_n"` (docs/PLAN_StratifiedMBR.md) is that estimator with
+  a conditional-medoid shape decode behind it: N by the calibrated marginal, then the
+  Fréchet medoid *within* that stratum. It does fix the mode bias at `n ≥ 1` — that is the
+  whole of stage 1 — and this gate remains its `n = 0` special case, running first and
+  unchanged (a τ below 0.5 and a non-firing gate together imply the median is not 0, so the
+  two stages cannot disagree).
 - **Does the empty rate depend on pT?** It should — softer jets groom away more. If so, τ
   must be fitted per window, and `PLAN_ProductionAssessment.md` §7's pT windows are the
   natural place to measure it.
