@@ -146,6 +146,24 @@ path is bit-identical to today. Builds on the merged `PLAN_MBR_PerturbativeLund.
 > partition knows something; neither mass nor medoid-membership extracts it. Whether any
 > truth-free rule can is open, and it is the sharpest remaining question about this layer.
 
+> **A §2 premise does not hold on this arm, and G6 measured it rather than inheriting it.**
+> §2 lists "the joint tree posterior is over-confident (v1 TARP)" as the binding constraint
+> on the whole deliverable. On `v1_contstop_s0` that is not what v1 found: `PROD_TEST_v1`
+> locates the joint narrowness in **the multiplicity factorization**, and reports that all
+> six explicit-`q(N|x)` arms fail G7 while **both continue/stop arms pass** — this arm is
+> continue/stop. Its `q(N|x)` marginal is calibrated on every statistic that has a null
+> (G4 ratio 0.977; SBC-on-N at the 88th percentile of its *own* simulated null, the χ²(9)
+> reference being wrong for a 7-valued discrete N; `q(0|x)` scale ratio 1.026 with Brier
+> reliability 1.5e-4). The fitted length recalibration (T = 1.265, tilt = −0.111) was
+> evaluated and **correctly not applied** — it moves the `q(0|x)` ratio from 1.026 to 0.871
+> and the reliability from 1.5e-4 to 8.5e-4, i.e. it degrades what it was meant to fix.
+>
+> The consequence for this layer is a good one: with `q(N|x)` calibrated, the fact that
+> **83% of the resolvable cluster splits differ in N** is the posterior *correctly*
+> representing multiplicity ambiguity, not a miscalibration the clustering is picking up.
+> There is no sharpening that would collapse it, and G6's own result (ECE 0.040) says the
+> mass vector inherits that calibration rather than the assumed over-confidence.
+
 > **The scalars predict the set's error and not the medoid's.** Most- over least-confident
 > RMS ratio: `set0` 0.729 / 0.792 / 0.964 across ln(1/ΔR), ln kt, ln z; `mbr` 0.906 / 1.080
 > / 1.110. That is the right direction — they describe the cluster `set0` came from.
