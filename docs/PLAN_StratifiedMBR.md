@@ -1,6 +1,9 @@
 # PLAN — N-first (stratified) MBR, and three measurement work packages
 
-Status: **proposed** (approved for implementation; measurement gates pre-registered below).
+Status: **implemented; WP-1 FAILS its own ship gate and is not recommended.** The
+estimator ships as an available `decode.point_estimator` value, documented as
+measured-not-recommended. WP-3 and WP-4 landed. The measurement is in §1a below, and it
+relocates the problem rather than solving it.
 Follows directly from the 600-jet / K=200 gate run recorded in
 `PLAN_PosteriorClusters.md` (implementation-note tables) and answers the open question of
 `PLAN_empty_parton_tree.md` ("should the gate be a general argmin over an explicit loss on
@@ -42,6 +45,76 @@ clean:
 - `_qn_importance_weights` is constant within a stratum, so `mbr_resample_to_qn` composes
   as an **exact no-op** — the stratified estimator is the exact form of the correction
   that knob approximates.
+
+---
+
+## 1a. RESULT — `mbr_n` is significantly WORSE than the medoid
+
+600 held-out jets, K = 200, `v1_contstop_s0`, hdbscan, energyflow on cuda.
+
+**Ship-gate criterion (i) fails, and in the wrong direction.** `Δ = d(medoid) − d(mbr_n)`,
+jet-level paired bootstrap:
+
+| subset | n | mean Δ | 95% CI | verdict |
+|---|---:|---:|---|---|
+| all jets | 600 | **−0.083** | [−0.128, −0.039] | excludes 0 — `mbr_n` is **farther** |
+| multi-cluster | 450 | −0.080 | [−0.127, −0.030] | excludes 0 — farther |
+| …top-2 differ in N | 390 | −0.067 | [−0.116, −0.019] | excludes 0 — farther |
+| …top-2 same N | 60 | −0.163 | [−0.344, +0.015] | brackets 0 |
+
+Criteria (ii) and (iii) *pass* — RMS-vs-medoid 1.003 / 0.999 / 1.024 on ln(1/ΔR), ln kt,
+ln z, and the gated marginals are the best of any estimator (`mbr_n` mean multiplicity
+1.407 against truth's 1.442). The shape is fine; the *selection* is worse. All three must
+hold, so the gate fails.
+
+**Both components are negative — the hypothesis fails in two independent places:**
+
+| | Δ |
+|---|---:|
+| de-smearing alone (same N as the medoid, expectation restricted) | −0.043 |
+| the N decision (calibrated median vs the medoid's own N) | −0.040 |
+
+1. **Restricting the expectation hurts.** The cross-stratum distances are inflated by the
+   imbalance term, but they are **not noise** — they still carry shape information, and
+   dropping them costs more than the smearing did. The effective support also falls from
+   200 draws to a mean stratum of 92. The premise that the imbalance term is a pure
+   nuisance to be conditioned away is wrong.
+2. **The calibrated median is no better at picking N than the medoid already was:**
+   `P(n̂ = n_true) = 0.448` against `P(N_medoid = n_true) = 0.443`
+   (mean `|n − n_true|` 0.618 vs 0.630). The premise that the medoid picks N badly and a
+   calibrated marginal would fix it is also wrong.
+
+### What the run does establish — and it is the more useful result
+
+| rule | mean d(truth) | truth-free? |
+|---|---:|---|
+| global medoid | 2.349 | yes |
+| stratified at N(medoid) | 2.392 | yes |
+| **`mbr_n`** | 2.432 | yes |
+| top-mass exemplar | 2.715 | yes |
+| **stratified at n_true** | **1.661** | **no — oracle N** |
+| closest exemplar | 1.476 | no — oracle |
+
+**Knowing the true N would buy 0.688 of the medoid's 2.349** — the largest single lever
+measured anywhere in this line of work, and larger than the whole 0.603 information
+component the cluster partition carries. No truth-free rule reaches it, because `q(N|x)` is
+right on only 45% of jets.
+
+That sharpens, and partly corrects, the reading recorded in
+[`PLAN_PosteriorClusters.md`](PLAN_PosteriorClusters.md): `q(N|x)` is **calibrated but not
+sharp**. It has the right rate and the right ranking (G4 ratio 0.977, `q(0|x)` AUC 0.824)
+while being wrong about *which* N on more than half the jets. The 0.770 residual is
+information the model does not have — not information the decode is failing to use.
+
+**So the next lever is more information about N — conditioning, architecture, training —
+not a better decision rule over the existing posterior.** Three decode-layer selection
+rules have now been measured against the medoid (mass argmax, medoid's-cluster, N-first)
+and all three lose. That is a sufficient basis to stop looking there.
+
+**What stays.** `point_estimator="mbr_n"` remains available and documented as
+measured-not-recommended; `mbr` stays the recommended decode. The negative result is worth
+more than the estimator would have been: it converts "the medoid smears across strata" from
+a plausible mechanism into a measured non-problem, and it prices the N channel.
 
 ---
 

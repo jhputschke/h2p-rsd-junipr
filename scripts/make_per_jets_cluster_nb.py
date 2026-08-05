@@ -2381,8 +2381,18 @@ for lab, rs in (("all jets", _nf_all), ("multi-cluster", _nf_multi),
     ok = np.isfinite(lo) and lo > 0.0
     _nf_verdict[lab] = ok
     ci = f"[{lo:+.3f}, {hi:+.3f}]" if np.isfinite(lo) else f"(n={n} < {MIN_CI_JETS})"
-    print(f"  {lab:<26}{n:>6}{m:>+12.3f}{ci:>22}   "
-          f"{'EXCLUDES 0' if ok else 'brackets 0' if np.isfinite(lo) else 'not scored'}")
+    # A CI entirely BELOW zero also excludes zero -- it just excludes it the other way.
+    # Saying "brackets 0" there would report a significant loss as a null result, which is
+    # the one misreading this table must not enable.
+    if not np.isfinite(lo):
+        verdict = "not scored"
+    elif lo > 0.0:
+        verdict = "EXCLUDES 0 -- mbr_n is CLOSER"
+    elif hi < 0.0:
+        verdict = "EXCLUDES 0 -- mbr_n is FARTHER"
+    else:
+        verdict = "brackets 0"
+    print(f"  {lab:<26}{n:>6}{m:>+12.3f}{ci:>22}   {verdict}")
 print("  delta = d(medoid) - d(mbr_n); POSITIVE means the N-first estimator is closer to")
 print("  truth. Criterion (i) is the 'all jets' row excluding 0.")
 print()

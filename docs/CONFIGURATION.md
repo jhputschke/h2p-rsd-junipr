@@ -1605,11 +1605,19 @@ global medoid, which would reintroduce the smearing on exactly the most N-ambigu
 For a continue/stop family the question does not arise: `length_pmf` *is* the draw
 histogram, so the median is realised by construction.
 
-**Status: measured, not yet recommended.** See
-[`PLAN_StratifiedMBR.md`](PLAN_StratifiedMBR.md) for the pre-registered ship gate — it
-becomes the recommended decode only if its paired distance-to-truth advantage over `mbr`
-excludes zero *and* its residual RMS is no worse than `mbr`'s (the failure mode that
-disqualified the top-mass cluster exemplar).
+**Status: measured, and NOT recommended — `mbr` stays the default.** On 600 held-out jets
+at `K=200` it is *significantly farther* from truth than the plain medoid: Δ = −0.083, 95%
+CI [−0.128, −0.039]. Its residual RMS is fine (1.003 / 0.999 / 1.024 vs the medoid) and its
+multiplicity marginals are the best of any estimator — the shape is right, the *selection*
+is worse. Both components lose: restricting the expectation costs −0.043 (cross-stratum
+distances are inflated by the imbalance term but are not noise), and the calibrated median
+picks N no better than the medoid already does (0.448 vs 0.443 exact).
+
+The same measurement prices what would help: stratifying at the **true** N gives 1.661
+against 2.349, so `q(N|x)` is **calibrated but not sharp** — right rate and ranking, wrong
+about which N on more than half the jets. Use this knob to reproduce that measurement, not
+as a production decode. Full table in
+[`PLAN_StratifiedMBR.md`](PLAN_StratifiedMBR.md) §1a.
 
 ### `cluster_posterior` — a set of explanations instead of one tree
 

@@ -164,6 +164,22 @@ path is bit-identical to today. Builds on the merged `PLAN_MBR_PerturbativeLund.
 > There is no sharpening that would collapse it, and G6's own result (ECE 0.040) says the
 > mass vector inherits that calibration rather than the assumed over-confidence.
 
+> **Follow-up (docs/PLAN_StratifiedMBR.md): a fourth selection rule was measured and also
+> loses.** `mbr_n` — N from the calibrated `q(N|x)` median, then the medoid *within* that
+> stratum — is **significantly farther** from truth than the plain medoid: Δ = −0.083,
+> 95% CI [−0.128, −0.039] on 600 jets. Both of its components are negative: restricting the
+> expectation costs −0.043 (the cross-stratum distances are inflated by the imbalance term
+> but are not noise), and the calibrated median picks N no better than the medoid already
+> does (`P(n̂ = n_true)` 0.448 vs 0.443).
+>
+> The same run prices the channel that *does* matter: **stratifying at the TRUE N gives
+> 1.661 against the medoid's 2.349**, a 0.688 lever larger than the whole 0.603 information
+> component above. `q(N|x)` is therefore **calibrated but not sharp** — right rate, right
+> ranking, wrong on which N for more than half the jets. That is information the model does
+> not have, not information the decode is failing to use, and it is why three decode-layer
+> selection rules in a row (mass argmax, medoid's-cluster, N-first) all lose to plain
+> centrality.
+
 > **The scalars predict the set's error and not the medoid's.** Most- over least-confident
 > RMS ratio: `set0` 0.729 / 0.792 / 0.964 across ln(1/ΔR), ln kt, ln z; `mbr` 0.906 / 1.080
 > / 1.110. That is the right direction — they describe the cluster `set0` came from.
