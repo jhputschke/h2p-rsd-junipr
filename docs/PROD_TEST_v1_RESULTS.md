@@ -363,6 +363,25 @@ The region × coordinate cross localises it: `ln_z × wide_soft` at **2.16×** i
 value on 2 671 emissions, with every other scored cell below 1.02×. `wide_soft` holds 94%
 of the emissions, so this is a mismatch in the bulk rather than in a corner.
 
+> **Update, 2026-08-05 — the escalation was built and measured.**
+> `docs/PLAN_lnz_spline_head.md` §6. `model.lnz_head="spline"`, same preset, same seeds,
+> same data:
+>
+> | arm | KS | ×crit | was | `ln_z × wide_soft` | was |
+> |---|---:|---:|---:|---:|---:|
+> | `spline_s0` | 0.0120 | **0.47×** | 2.07× | **0.48×** | 2.16× |
+> | `spline_s1` | 0.0163 | **0.64×** | 1.05× | **0.75×** | 1.17× |
+> | `spline_s2` | 0.0266 | **1.04×** | 1.84× | **1.04×** | 1.91× |
+> | `contstop_spline_s0` | 0.0268 | 1.05× | 1.89× | 1.08× | 1.95× |
+>
+> **G3 is PARTIAL**: both clauses hold on 2 of 3 seeds, seed 2 misses by 4% (p = 0.035).
+> Held-out NLL improves on every arm (−0.041 to −0.078 nat against a 0.020 control seed
+> spread), `pit_ks_max` improves on every arm, and the support audit stays at 0.00000%.
+> The residual **moved**: `dv` is now the binding coordinate at 1.04–1.12× on all three
+> seeds. The sentence above — "a truncation cannot fix a shape mismatch inside the
+> interval" — applies verbatim to `du`/`dv`, and that is the next work package rather than
+> the joint-density escalation.
+
 ### 4.3 G4 — N marginal: the ⟨N⟩ clause passes, the coverage clause fails
 
 `⟨N⟩_post/⟨N⟩_truth` = 1.0075 / 0.9939 / 0.9866, comfortably inside `[0.95, 1.05]`, with

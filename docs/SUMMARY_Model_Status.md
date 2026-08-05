@@ -7,10 +7,12 @@ number links back to a primary record; nothing here is a new measurement.
 
 Primary records: `PROD_TEST_v0_RESULTS.md`, `PROD_TEST_v1_RESULTS.md`,
 `PROD_TEST_edit_RESULTS.md`, `PLAN_PosteriorClusters.md` (implementation notes),
-`PLAN_StratifiedMBR.md` §1a–§1d, `PLAN_NCeilingProbe.md` §A, and the run artifacts under
+`PLAN_StratifiedMBR.md` §1a–§1d, `PLAN_NCeilingProbe.md` §A,
+`PLAN_lnz_spline_head.md` §6, and the run artifacts under
 `runs/prod_test_v1/v1_contstop_s0/…/` (`per_jet_clusters.json`,
-`per_jet_clusters_K1000.json`, `eval_metrics_wp34.json`) and
-`runs/n_ceiling_probe/20260805-122832/n_ceiling_probe.json`.
+`per_jet_clusters_K1000.json`, `eval_metrics_wp34.json`),
+`runs/n_ceiling_probe/20260805-122832/n_ceiling_probe.json` and
+`runs/lnz_spline/lnz_spline_gates.json`.
 
 ---
 
@@ -123,6 +125,30 @@ multiplicity information `x` carries.
 | **The oracle lever is real and unreachable** | oracle-N **1.721**, medoid **2.349**, Δ **+0.629** [+0.514, +0.752]; the probe's own n̂ fed to `stratified_medoid` gives **−0.062** [−0.123, −0.001] | at ~45% accuracy, *deciding* N is worse than *not* deciding it — the 55% wrong pay more than the 45% right win |
 | **Sanity: same jets, same decode** | d(medoid) recorded 2.3489 → re-measured **2.3495** (0.03%) | the comparison is against the right population; the 0.448 → 0.458 shift is the statistic's own K-draw MC noise (6 jets of 600) |
 
+### 2.5 The RQ-spline `ln z` head (`PLAN_lnz_spline_head.md` §6, `model.lnz_head="spline"`)
+
+v1's other open lever, built and measured. A monotone rational-quadratic spline (Durkan et
+al., arXiv:1906.04032) on the soft-drop interval, replacing the truncated normal's
+`(mean, sigma)`. 3 seeds at the v1 budget plus a continue/stop transfer arm; controls are
+the v1 arms themselves, same preset and same seeds.
+
+| arm | `ln z` KS | ×crit | was | bulk cell | was | val NLL | Δ | TARP G7 |
+|---|---:|---:|---:|---:|---:|---:|---:|:---:|
+| `spline_s0` | 0.0120 | **0.47×** | 2.07× | **0.48×** | 2.16× | 3.846 | **−0.078** | no → **yes** |
+| `spline_s1` | 0.0163 | **0.64×** | 1.05× | **0.75×** | 1.17× | 3.861 | **−0.043** | no → **yes** |
+| `spline_s2` | 0.0266 | 1.04× | 1.84× | 1.04× | 1.91× | 3.860 | **−0.064** | no → no |
+| `contstop_spline_s0` *(transfer)* | 0.0268 | 1.05× | 1.89× | 1.08× | 1.95× | 3.739 | **−0.041** | yes → yes |
+
+| finding | evidence | consequence |
+|---|---|---|
+| **G3 is PARTIAL, not closed** | both pre-registered clauses hold on 2/3 seeds; seed 2 misses by 4% (KS p = 0.035) | a 1.6–4.4× improvement on every seed, and still a fail by the rule written in advance. Reported as partial |
+| **The first change to improve likelihood AND calibration together** | NLL −0.041 to −0.078 nat on 4/4 arms against a control seed spread of **0.020**; `pit_ks_max` better on 4/4 | every earlier intervention moved one or neither. Worth fielding on its own numbers |
+| **The support closure was not spent** | 0.00000% below soft drop and above `z = ½` on every arm — by construction, since the spline maps the interval onto itself | v1's WP-A property is preserved, not traded |
+| **The residual MOVED to `dv`** | `dv` now fails on all three seeds (1.10× / 1.04× / 1.12×) and `dv × wide_soft` sits at ~1.0×, while `ln z` is 0.47–1.04× | `du`/`dv` are truncated normals on bounded intervals too; the same fix applies verbatim. **This is the next work package** |
+| **TARP moved, mostly the right way** | `v1_base` s0/s1 cross below the null band (0.0415 → 0.0215, 0.0350 → 0.0265 vs p95 0.0275) and now pass G7; s2 worsens (0.0335 → 0.0400) | the coordinate density was contributing to the joint narrowness too — the factorization was not the only cause. 2/3 with a contrary seed is **suggestive, not a verdict** |
+| **d(MBR) is marginally worse on 4/4** | +0.0047, +0.0113, +0.0091, +0.0031 vs a control seed spread of 0.018 | small and inside the spread in magnitude, but consistently signed. The MBR metric runs on `lnDR_lnkt` and cannot see `ln z`, so a better `ln z` can only perturb which trees are drawn |
+| **A design the measurement rejected** | composing the spline on a *learnable* truncated normal is non-identifiable: `lnz_mean` → −533 on an interval of [−2.303, −0.693], `F_TN` saturated on 100% of emissions, val NLL 4.19 → 19.2 at epoch 4 | the base must be parameter-free. Recorded in `distributions.py` and pinned by a regression test so the appealing-but-broken construction is not re-proposed |
+
 ---
 
 ## 3. The overall conclusion
@@ -132,8 +158,11 @@ aux A/B, the flat encoder probe), **the decode layer is now exhausted** (three
 selection rules lost to the plain medoid at two budgets; the gate composition works; the
 bounded loss is structurally unsafe), **and the length channel is not under-extracting**
 (§2.4: a discriminative probe on `(x, aux)` ties `q(N|x)` on identical jets while beating
-both trivial predictors). Which leaves the coordinate density as the one place a model
-change still has a measured target.
+both trivial predictors). That left the coordinate density as the one place a model change
+still had a measured target — and §2.5 has now cashed part of it: splining `ln z` improves
+the likelihood *and* the calibration together, the first intervention here to do both. It
+also relocated the defect rather than removing it, which is what §4.2 is now organised
+around.
 
 **The recommended per-jet product today:**
 - point estimate: **the MBR medoid**, with the frozen-τ empty gate (`decode.empty_threshold`);
@@ -147,7 +176,8 @@ change still has a measured target.
 | lever | size | status |
 |---|---|---|
 | **N channel** | ~0.63 EMD (oracle-N 1.72 vs medoid 2.35) | **CLOSED as a lever** (§2.4). The discriminative probe ties `q(N\|x)` on identical jets (p = 0.91) while beating both trivial predictors and sitting on a flat learning curve — no evidence that `x` carries more N information than the model already extracts. The lever is *real* (the oracle keeps its +0.63) and *unreachable*: at 45% accuracy an N decision is worse than none. It is now a **product**, not a target — the calibrated ambiguity of the set layer is the honest way to report N. |
-| **ln z shape** | 2.16× critical PIT in the quadrant holding 94% of emissions | **OPEN — and now the only priced model-side lever.** The RQ-spline head, pre-authorized in v1 §4.4, fired, never built; written up as `PLAN_lnz_spline_head.md`. Then the joint coordinate density if the spline does not close it (`ln z = u + v − ln p_T,sum` holds exactly, so independence-given-cell is violated by a kinematic identity). |
+| **ln z shape** | was 2.16× critical PIT in the quadrant holding 94% of emissions | **SPENT, and it paid — partially** (§2.5). The RQ-spline head is built, trained and measured: `ln z` falls to 0.47–1.04×, NLL improves on every seed, support unchanged. G3 is **PARTIAL** (2/3 seeds), and the residual moved to `dv`. |
+| **`du`/`dv` shape** *(new, exposed by §2.5)* | `dv` at 1.04–1.12× on all three seeds; `dv × wide_soft` at ~1.0× in the same bulk quadrant | **OPEN — and now the priced model-side lever.** Same defect, same fix, same generic primitive: `du`/`dv` are truncated normals on *constant* bounded intervals, which is strictly simpler than the case already built. `PLAN_lnz_spline_head.md` §7.1. |
 
 **Explicit stop-signs** (measured dead ends — do not respend effort here):
 - new selection rules over the existing posterior (three straight losses);
@@ -198,11 +228,31 @@ The probe's verdict re-orders everything below it. Two consequences drive the li
 
 ### 4.2 Model extensions (pre-authorized, in order)
 
-1. **RQ-spline ln z head** — `model.lnz_head = "truncnorm" | "spline"` (Durkan et al.,
-   arXiv:1906.04032) on the same soft-drop interval, bit-identical off path, 3-seed
-   training at the v1 budget, G3 PIT re-test against the recorded 1.05–2.07× numbers.
-   The cheaper of the two fired escalations, it does not disturb the factorization, and it
-   is now **the only priced model-side lever left**. Plan: `PLAN_lnz_spline_head.md`.
+0. ~~**RQ-spline ln z head**~~ — **done** (§2.5, `PLAN_lnz_spline_head.md` §6). G3 PARTIAL,
+   NLL better on every seed, support unchanged, residual moved to `dv`.
+
+1. **Spline the `du`/`dv` heads — the same fix on what is now the binding coordinate.**
+   The trigger fired the moment `ln z` was fixed: `dv` fails on all three seeds at
+   1.04–1.12× and `dv × wide_soft` sits at ~1.0× in the bulk quadrant. The argument is
+   the one that authorized the `ln z` work verbatim — a two-parameter truncated normal is
+   being asked to carry a shape it cannot — and the machinery is already generic:
+   `rq_interval_{logpdf,cdf,icdf,sample}` take any `(lo, hi)`, and for `du`/`dv` those are
+   the *constant* `±half_u` / `±half_v` rather than cell-conditional, so it is strictly
+   simpler than the case already built. A `model.offset_head` flag, the same four dispatch
+   points, the same parity discipline. **Pre-register the same gate before running it**,
+   and expect the residual to move again — that is what happened here.
+
+2. **Settle seed 2 rather than argue about it** (`PLAN_lnz_spline_head.md` §7.2). Either
+   seeds 3–5 at the same budget — 3 seeds cannot tell "one marginal seed" from "a 1-in-3
+   failure rate" — or `lnz_spline_bins=16` on seed 2 alone, a 15-minute test of whether the
+   4% miss is expressiveness or variance. `K = 8` was chosen, never fitted. **Do not** tune
+   `K` against G3 across all seeds afterwards; that makes the gate circular.
+
+3. **A 3-seed continue/stop spline arm**, to settle §2.5's TARP finding. Two of three
+   explicit-`q(N|x)` seeds crossed below the null band once the coordinate density
+   improved, which says the factorization was not the only contributor to the joint
+   narrowness — but one seed moved the other way, and the fielded family has a single arm.
+   This is the cheapest way to turn a suggestive result into a statement.
 2. ~~**Length-channel improvement**~~ — **withdrawn.** It was gated on 4.1(1) showing
    headroom; it did not. All three options are dead for a specific reason and each is worth
    recording so none is re-proposed: the *decode-time auxiliary N-head* **is** the probe of
@@ -264,7 +314,13 @@ both cost a regeneration + retrain and should be costed before being started.
 
 1. **Per-node joint coordinate density** (cINN-coords / CFM-coords, `PLAN_UPDATES.md`
    WP1) — the second fired escalation; structurally motivated by the exact kinematic
-   identity, and the fallback if the spline closes the marginal PIT but TARP still fails.
+   identity `ln z = u + v − ln p_T,sum`, which no per-coordinate head can express.
+   **Deliberately still not the next step, and §2.5 sharpened why.** The spline did not
+   close G3, which by the letter of `PLAN_lnz_spline_head.md` §4 fires this — but the
+   measurement says the largest remaining defect is *another per-coordinate* one (`dv` at
+   1.04–1.12×), not the factorization. Spend 4.2(1) first: if splining `du`/`dv` closes the
+   marginal PITs everywhere and TARP *still* fails, that is a clean isolated statement that
+   the factorization is what is left, which is a far sharper trigger than today's.
 2. **Not currently justified** (triggers measured false, listed so they are not
    re-proposed by default): the edit transducer as the fielded family (lost the
    head-to-head); consensus/lattice MBR or any decode that leaves `H = {pool}`; any
@@ -303,6 +359,18 @@ Recorded because each one caught a wrong conclusion this cycle:
   on the test set, not negligible beside it. A null that rests on "these two numbers are
   close" has to price both sources, or it is quoting to three decimals a test that resolves
   to one.
+- **A parameterization can be correct and still untrainable.** Composing the spline on a
+  *learnable* truncated normal is exactly right as mathematics — it makes the old head the
+  identity special case — and it diverges, because the two parameterizations are redundant
+  and the pair walks off along the flat direction until the CDF saturates numerically. It
+  showed up as one bad seed and was a latent failure of all three. **Look at the head's
+  actual outputs before blaming the seed**: `lnz_mean = −533` on an interval of width 1.6
+  named the cause in one measurement. And prefer removing a redundancy to bounding it.
+- **A gate that fires must still be read against what the run measured.** The spline not
+  closing G3 fires the joint-density escalation by the letter of its plan. But the same run
+  says the biggest remaining defect is another per-coordinate one — so the letter would
+  send the next month at the expensive structural change while a cheap one is sitting in
+  front of it. Pre-registration binds the *verdict*, not the *next question*.
 - **A statistic computed from K draws carries K-draw noise — quote the band, not the
   decimals.** The 0.4483 that this whole work package was built around re-measured as 0.4583
   on the same 600 jets with fresh draws, because for a continue/stop family `length_pmf`

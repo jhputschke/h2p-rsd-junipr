@@ -1,9 +1,15 @@
 # PLAN — the RQ-spline `ln z` head
 
-Status: **proposed — pre-authorized escalation, fired in v1, not yet implemented.**
-Recorded by `PLAN_NCeilingProbe.md` WP-B so the trigger is not re-derived. One of the two
-remaining model-side levers (`docs/SUMMARY_Model_Status.md` §3); the other is the N channel,
-which `PLAN_NCeilingProbe.md` WP-A settled.
+Status: **implemented, trained and measured.** The verdict is §6 below: gate G3 is
+**PARTIAL** — the `ln z` PIT falls from 1.05–2.07× its critical value to 0.47–1.04×, held-out
+NLL improves on every seed, the support closure is kept exactly, and two of three seeds
+close both pre-registered clauses while the third sits marginally over the line. The
+residual has **moved to `dv`**, which is now the binding coordinate on all three seeds.
+
+**Result in one line:** the spline does most of what it was authorized to do — it is the
+first change in this line of work to improve the likelihood *and* the calibration together —
+but it does not close G3 outright, and the next lever it exposes is the *same fix applied to
+the within-cell offsets* rather than the structural escalation.
 
 ---
 
@@ -126,8 +132,176 @@ the *factorization* is what is wrong. That trigger has also already fired
 
 ## 5. Verification
 
-- `pytest tests/` green; ruff clean on touched files; `scripts/verify_parity.py` unchanged.
+- `pytest tests/` green (**857**, was 842 — the 15 new spline tests); ruff clean on touched
+  files; `scripts/verify_parity.py` still reproduces the reference v2 script bit-for-bit.
 - A new test asserting the `"truncnorm"` path is bit-identical with the flag absent and with
-  it set explicitly (the `lnz_support` legacy-parity test is the template).
+  it set explicitly (the `lnz_support` legacy-parity test is the template). **Verified**:
+  same `state_dict` keys and values, head width still 8, and `log_prob` / PIT / `sample` /
+  `sample_coordinates` / `describe_sequence` all 0.0 apart.
 - A spline-mode round-trip test: `cdf(sample(...))` uniform on a synthetic head, and the
   log-density integrating to 1 over `(lo, hi]` by quadrature.
+
+---
+
+# §6. RESULT — G3 is PARTIAL: the shape error is mostly gone, and it moved
+
+Run 2026-08-05. Training `bash scripts/run_lnz_spline.sh` (4 arms, ~60 min at concurrency
+4); evaluation `bash scripts/eval_prod_test_v1.sh --run-root runs/lnz_spline --device cpu`
+— the SAME two-tier command the v1 campaign used, so the PIT numbers are produced by the
+same code path as the numbers they are compared against. Scored by
+`python scripts/lnz_spline_gates.py`; artifact `runs/lnz_spline/lnz_spline_gates.json`.
+
+Controls are the v1 arms themselves — `v1_base_s{0,1,2}`, same preset, same seeds, same
+data, truncated-normal head — re-read from their own `eval_metrics.json`. They reproduce
+their documented 2.07× / 1.05× / 1.84× and the 2.16× bulk cell exactly, so the comparison
+is against the right record.
+
+## 6.1 The gate
+
+| arm | `ln z` KS | ×crit (0.0255) | was | KS p | `ln_z × wide_soft` | was |
+|---|---:|---:|---:|---:|---:|---:|
+| `spline_s0` | 0.0120 | **0.47×** | 2.07× | 0.805 | **0.48×** | 2.16× |
+| `spline_s1` | 0.0163 | **0.64×** | 1.05× | 0.440 | **0.75×** | 1.17× |
+| `spline_s2` | 0.0266 | **1.04×** | 1.84× | 0.035 | **1.04×** | 1.91× |
+| `contstop_spline_s0` *(transfer, not in the gate)* | 0.0268 | 1.05× | 1.89× | 0.033 | 1.08× | 1.95× |
+
+**G3: PARTIAL** — both pre-registered clauses hold on **2 of 3** seeds. Seed 2 misses by
+4%, at p = 0.035 against a 0.05 threshold; it is a marginal failure and is reported as one.
+The plan wrote that rule down in advance for exactly this outcome: a 2–4× improvement on
+every seed is the reading that invites "close enough", and the gate says all three.
+
+The improvement itself is unambiguous and larger than the change v1's WP-A produced: every
+seed improves by a factor 1.6–4.4 on the marginal and 1.6–4.5 on the bulk quadrant, and the
+transfer arm shows the fix carries to the **fielded** continue/stop family at the same size.
+
+## 6.2 The guards — nothing was bought with something else
+
+| arm | soft-drop | z > ½ | `pit_ks_max` | val NLL | Δ NLL | TARP | passes G7 |
+|---|---:|---:|---:|---:|---:|---:|:---:|
+| `spline_s0` | 0.00000% | 0.00000% | 0.0282 | 3.846 | **−0.078** | 0.0215 | **yes** |
+| *v1_base_s0* | 0.00000% | 0.00000% | 0.0529 | 3.924 | — | 0.0415 | no |
+| `spline_s1` | 0.00000% | 0.00000% | 0.0264 | 3.861 | **−0.043** | 0.0265 | **yes** |
+| *v1_base_s1* | 0.00000% | 0.00000% | 0.0324 | 3.904 | — | 0.0350 | no |
+| `spline_s2` | 0.00000% | 0.00000% | 0.0287 | 3.860 | **−0.064** | 0.0400 | no |
+| *v1_base_s2* | 0.00000% | 0.00000% | 0.0471 | 3.924 | — | 0.0335 | no |
+| `contstop_spline_s0` | 0.00000% | 0.00000% | 0.0268 | 3.739 | **−0.041** | 0.0255 | yes |
+| *v1_contstop_s0* | 0.00000% | 0.00000% | 0.0482 | 3.780 | — | 0.0200 | yes |
+
+- **Support: held.** 0.00000% below soft drop and above `z = ½` on every arm, as the
+  construction guarantees. The property v1's WP-A bought was not spent.
+- **NLL: improved on every arm**, by 0.041–0.078 nat against a control seed spread of
+  **0.020** (3.904–3.924). This is the first change in this line of work to move the
+  likelihood *and* the calibration in the same direction — the aux expansion, the encoder
+  swaps and every decode rule either moved one or neither.
+- **`pit_ks_max`: improved on every arm** (0.0529 → 0.0282, 0.0324 → 0.0264, 0.0471 →
+  0.0287, 0.0482 → 0.0268), so the worst coordinate got better even though it is no longer
+  `ln z` (§6.3).
+- **d(MBR) to truth: marginally WORSE on all four arms** (+0.0047, +0.0113, +0.0091,
+  +0.0031 against a control seed spread of 0.018). Small and inside the spread in
+  magnitude — but **consistently signed on 4 of 4**, so it is stated rather than dismissed.
+  The mechanism is indirect and worth naming: the MBR metric runs on
+  `mbr_coords="lnDR_lnkt"` and does not read `ln z` at all, so a better `ln z` density
+  cannot help it and can only perturb which trees are drawn.
+
+## 6.3 The unplanned finding: the residual moved to `dv`
+
+With `ln z` fixed, the binding coordinate is no longer `ln z`:
+
+| coordinate | s0 | s1 | s2 |
+|---|---:|---:|---:|
+| `du` | 0.77× | 0.68× | 0.61× |
+| **`dv`** | **1.10×** | **1.04×** | **1.12×** |
+| `ln z` | 0.47× | 0.64× | **1.04×** |
+| `psi` | 0.44× | 0.83× | 0.61× |
+
+`dv` — the within-cell `ln kt` offset, also a truncated normal — now fails on **all three**
+seeds, and `dv × wide_soft` sits at 1.01× / 0.94× / 1.03× in the same bulk quadrant. It was
+always there; `ln z`'s 2.07× was simply larger and `pit_ks_max` reported that instead. The
+diagnosis that motivated this work package — "a truncation cannot fix a shape mismatch
+inside the interval" — applies verbatim to `du`/`dv`, which are truncated normals on
+`[−half_u, half_u]` and `[−half_v, half_v]`. **§7.1 is the direct consequence.**
+
+## 6.4 A second unplanned finding: TARP moved, mostly the right way
+
+`v1_base` is the explicit-`q(N|x)` family, which failed G7 on **all six** of v1's arms — the
+evidence behind v1's central attribution that the joint narrowness is the multiplicity
+factorization. With the spline, seeds 0 and 1 **cross below the null band** (0.0415 → 0.0215
+and 0.0350 → 0.0265 against a p95 of 0.0275) and now pass G7; seed 2 moves the wrong way
+(0.0335 → 0.0400) and still fails.
+
+Read carefully, and **not** as an overturning of v1's attribution: that rested on six
+explicit arms failing while both continue/stop arms passed, and the continue/stop family
+still passes here either way. What this does establish is that the **coordinate density was
+contributing to the joint narrowness too** — the factorization was not the only cause. Two
+of three seeds with one contrary seed is suggestive, not a verdict, and it is recorded as
+such. A 3-seed continue/stop arm would be the way to settle it.
+
+## 6.5 What this closes, and what it does not
+
+**Closes.** The `ln z` *support-plus-shape* story, as far as a per-coordinate head can take
+it. `lnz_head="spline"` is worth fielding on its own numbers — better likelihood, better
+marginal PIT, better `pit_ks_max`, unchanged support — independently of whether the gate's
+third seed cooperates.
+
+**Does not close.** G3, formally: seed 2 sits at 1.04×. And the marginal PIT was never the
+whole question — the kinematic identity `ln z = u + v − ln p_T,sum` still makes
+independence-given-cell false, and §6.4's seed 2 says the joint is not fixed.
+
+**Does not fire the structural escalation yet, and that is a change of plan.** §4 said the
+joint coordinate density is the follow-up "if the spline does not close G3". It did not
+close it — but the reason is now measurable and it is *not* the factorization: the largest
+remaining per-coordinate defect is `dv` at 1.04–1.12×, which is the same fixable shape
+mismatch on a different coordinate. Spending the cheap fix there first is the same logic
+that put the spline before the joint density in the first place, and §7 records it.
+
+---
+
+# §7. What to do next, in the order the measurement supports
+
+## 7.1 Spline the `du`/`dv` heads — the same fix, on what is now the binding coordinate
+
+**Trigger: fired** (§6.3). `dv` fails on all three seeds at 1.04–1.12× and `dv × wide_soft`
+sits at ~1.0× in the bulk quadrant, while `ln z` is now 0.47–1.04×. The argument is
+identical to the one that authorized this work package, and now it is `du`/`dv` that are
+two-parameter truncated normals being asked to carry a shape they cannot.
+
+Cheap, because the machinery exists and is generic: `rq_interval_{logpdf,cdf,icdf,sample}`
+already take an arbitrary `(lo, hi)`, and for `du`/`dv` those bounds are the *constant*
+`±half_u` / `±half_v` rather than cell-conditional — strictly simpler than the case already
+built. The work is a `model.offset_head: "truncnorm" | "spline"` flag with the same
+head-width arithmetic (`+2 × (3K−1) − 4` outputs), the same four dispatch points, and the
+same parity discipline.
+
+Pre-register the same gate before running it: KS below critical on **every** seed for both
+`du` and `dv`, the bulk quadrant below 1.0×, support and NLL guards unchanged — and expect
+the residual to move again, since that is what happened here.
+
+## 7.2 Settle seed 2 rather than arguing about it
+
+Two cheap options, and they answer different questions:
+- **More seeds.** 3 seeds cannot distinguish "one marginal seed" from "a 1-in-3 failure
+  rate". Seeds 3–5 at the same budget (~1 hour) would; the gate criterion stays as written.
+- **More spline capacity.** `lnz_spline_bins` is a config field and was never tuned — `K = 8`
+  was chosen, not fitted. `K = 16` on seed 2 alone is a 15-minute test of whether the
+  marginal miss is expressiveness or variance. Do **not** tune `K` against G3 across all
+  seeds afterwards; that would make the gate circular, exactly as `LOSS_QUANTILE` would have.
+
+## 7.3 The joint coordinate density — still the structural escalation, now better targeted
+
+Unchanged in motivation (`ln z = u + v − ln p_T,sum` holds exactly, so no per-coordinate
+head can express the coupling) and **no longer the immediate next step**, because §6.3 says
+the largest measurable defect is still a per-coordinate one. The right sequencing is 7.1
+first: if splining `du`/`dv` closes the marginal PITs everywhere and TARP *still* fails,
+that is a clean, isolated statement that the failure is the factorization — which is what
+the joint density is for, and a much sharper trigger than the one available today.
+
+## 7.4 Field the flag, or wait?
+
+`lnz_head="spline"` improves NLL, the marginal PIT, and `pit_ks_max` on every seed, keeps
+the support closure exactly, and costs 1 365 parameters. The one thing it does not improve
+is `d(MBR)`, which is marginally worse on 4 of 4 arms (§6.2) — and which cannot see `ln z`
+at all. A defensible reading is to field it for the **density** products (the decode-free
+posterior series, calibration, anything reading `log_prob`) and to keep the recommended
+point estimate under review until 7.1 lands, since that is the number the point estimate
+actually moves on. Default stays `truncnorm` either way; this is a config decision, not a
+code one.

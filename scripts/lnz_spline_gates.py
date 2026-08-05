@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -77,6 +78,23 @@ def critical(n) -> float:
     return 1.36 / math.sqrt(float(n)) if n else float("nan")
 
 
+def best_val_nll(root: Path, arm: str) -> float | None:
+    """The arm's best held-out NLL/jet, read from its TRAINING log.
+
+    `eval_metrics.json` does not carry it — the eval reports closure and calibration, not
+    the objective — so the grid log is the record. Both sides of every pair are
+    `lnz_support="physical"` densities on the same `(u, v, ln z, psi)` box (the spline
+    integrates to 1 over it, `tests/test_lnz_spline.py`), so this comparison is
+    legitimate; the one that is not is across `lnz_support`, which nothing here does."""
+    log = root / "logs" / f"{arm}.log"
+    if not log.is_file():
+        return None
+    # The line continues past the number ("... = 3.846. checkpoints in runs/..."), so it
+    # is matched rather than split on.
+    hits = re.findall(r"best val NLL/jet = ([0-9.]+?)\.?(?:\s|$)", log.read_text())
+    return float(hits[-1]) if hits else None
+
+
 def read_arm(path: Path) -> dict:
     """The G3 numbers and the three guards, from one `eval_metrics.json`."""
     m = json.loads(path.read_text())
@@ -99,7 +117,6 @@ def read_arm(path: Path) -> dict:
         # the WP-A property this change must not spend
         "soft_drop_viol": post.get("soft_drop"),
         "z_above_half_viol": post.get("z_above_half"),
-        "nll": _get(m, "closure.nll_per_jet") or _get(m, "calibration.nll_per_jet"),
         "dlund_mbr": _get(m, "closure.dlund_mbr"),
         "coverage_68": _get(m, "closure.coverage_68"),
     }
@@ -123,11 +140,11 @@ def main(argv=None) -> int:
         if a_path is None:
             print(f"[gates] {arm}: no eval_metrics.json under {root / arm} — skipped")
             continue
-        rows[arm] = {
-            "control_arm": control,
-            "spline": read_arm(a_path),
-            "control": read_arm(c_path) if c_path else None,
-        }
+        spline, ctrl = read_arm(a_path), (read_arm(c_path) if c_path else None)
+        spline["nll"] = best_val_nll(root, arm)
+        if ctrl is not None:
+            ctrl["nll"] = best_val_nll(croot, control)
+        rows[arm] = {"control_arm": control, "spline": spline, "control": ctrl}
     if not rows:
         print("[gates] nothing to score: run the grid and the eval first.")
         return 2
@@ -165,7 +182,7 @@ def main(argv=None) -> int:
     print("\n" + "=" * 96)
     print("guards — what a PIT improvement must not have been bought with")
     print(f"{'arm':<22}{'soft-drop':>11}{'z>1/2':>9}{'pit_ks_max':>12}{'TARP':>9}"
-          f"{'null p95':>10}{'d(MBR)':>9}")
+          f"{'null p95':>10}{'val NLL':>9}{'d(MBR)':>9}")
     print("-" * 96)
     for arm, r in rows.items():
         for label, blk in (("", r["spline"]), ("  control", r["control"])):
@@ -175,7 +192,8 @@ def main(argv=None) -> int:
             print(f"{name:<22}{fmt(blk['soft_drop_viol'], '.5f'):>11}"
                   f"{fmt(blk['z_above_half_viol'], '.5f'):>9}"
                   f"{fmt(blk['pit_ks_max']):>12}{fmt(blk['tarp_max_dev'], '.4f'):>9}"
-                  f"{fmt(blk['tarp_null_p95'], '.4f'):>10}{fmt(blk['dlund_mbr'], '.4f'):>9}")
+                  f"{fmt(blk['tarp_null_p95'], '.4f'):>10}{fmt(blk.get('nll'), '.4f'):>9}"
+                  f"{fmt(blk['dlund_mbr'], '.4f'):>9}")
     print("=" * 96)
 
     leaked = [a for a, r in rows.items()
