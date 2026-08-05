@@ -1003,6 +1003,19 @@ def estimate_jet(i, rng=None, k_draws=None, with_cloud=False):
         "d_top": float(d_ex[0]) if d_ex.size else float("nan"),
         "d_best": float(d_ex.min()) if d_ex.size else float("nan"),
         "d_mbr": float(d_to_truth[win]),
+        # Support, measured against the POOL rather than against the exemplars. The
+        # `truth_unassigned` flag compares the truth to each CLUSTER's support radius, so it
+        # conflates two very different things: the truth being outside everything the model
+        # generated (a sampler problem), and the partition simply being finer than the
+        # truth's neighbourhood (a method artifact -- more clusters means tighter supports).
+        # The nearest DRAW is method-free and separates them.
+        "d_nearest_draw": float(d_to_truth.min()),
+        "d_median_draw": float(np.median(d_to_truth)),
+        # A truth-free ALTERNATIVE ranking: the exemplar of the cluster the linear medoid
+        # fell into. Mass ranks regions by probability; this ranks them by centrality, which
+        # is the criterion that actually works for a point estimate. Costs nothing.
+        "d_medoid_cluster": (float(d_ex[int(cs.labels[win])])
+                             if 0 <= int(cs.labels[win]) < d_ex.size else float("nan")),
         "empty_draw_mass": float(np.mean(mults == 0)),
         "n_top": int(len(draws[cs.exemplars[0]])) if cs.exemplars else -1,
         "n_second": int(len(draws[cs.exemplars[1]])) if len(cs.exemplars) > 1 else -1,
@@ -2129,6 +2142,44 @@ print(f"  silhouette precondition holds on "
       f"{np.mean([r['precondition'] for r in ROWS]):.1%} of jets; truth UNASSIGNED on "
       f"{UNASSIGNED_RATE:.1%}")
 print()
+print()
+print("IS THE TRUTH OUTSIDE THE MODEL, OR OUTSIDE THE PARTITION?")
+_dn = np.array([r["d_nearest_draw"] for r in ROWS], dtype=float)
+_dm = np.array([r["d_median_draw"] for r in ROWS], dtype=float)
+_un = np.array([r["truth_unassigned"] for r in ROWS], dtype=bool)
+print(f"  d(truth, nearest DRAW)   = {np.nanmean(_dn):.3f}   median "
+      f"{np.nanmedian(_dn):.3f}   [16,84]% "
+      f"[{np.nanpercentile(_dn, 16):.3f}, {np.nanpercentile(_dn, 84):.3f}]")
+print(f"  d(truth, median draw)    = {np.nanmean(_dm):.3f}   -- the pool's own scale")
+print(f"  ratio nearest/median     = {np.nanmean(_dn / _dm):.3f}   "
+      f"(-> 0 means the pool BRACKETS the truth; -> 1 means it does not)")
+print(f"  flagged 'unassigned' by the exemplar rule: {_un.mean():.1%}")
+if _un.any():
+    print(f"     of those, d(truth, nearest draw) = {np.nanmean(_dn[_un]):.3f} vs "
+          f"{np.nanmean(_dn[~_un]):.3f} for the assigned ones")
+    print(f"     ...and their nearest/median ratio  = {np.nanmean((_dn / _dm)[_un]):.3f} vs "
+          f"{np.nanmean((_dn / _dm)[~_un]):.3f}")
+print("  A high unassigned rate with a SMALL nearest/median ratio means the pool does")
+print("  bracket the truth and the PARTITION is too fine -- a method artifact, and the")
+print("  exemplar rule is the thing to loosen. A ratio near 1 means the truth is outside")
+print("  everything the model generated, which no decode-layer change can repair.")
+print()
+print("A TRUTH-FREE ALTERNATIVE RANKING: the cluster the MEDOID fell into")
+_dmc = np.array([r["d_medoid_cluster"] for r in ROWS], dtype=float)
+_dt = np.array([r["d_top"] for r in ROWS], dtype=float)
+_db = np.array([r["d_best"] for r in ROWS], dtype=float)
+_dr = np.array([r["d_mbr"] for r in ROWS], dtype=float)
+print(f"  {'rule':<34}{'<d(truth)>':>12}   truth-free?")
+for lab, v, free in (("the linear medoid", _dr, "yes"),
+                     ("top-MASS exemplar (set0)", _dt, "yes"),
+                     ("exemplar of the medoid's cluster", _dmc, "yes"),
+                     ("closest exemplar (ORACLE)", _db, "NO -- uses the truth")):
+    print(f"  {lab:<34}{np.nanmean(v):>12.3f}   {free}")
+print("  The oracle row is the ceiling a better SELECTION RULE could reach over the very")
+print("  same set. A large gap between it and every truth-free row means the set contains")
+print("  a good answer that the ranking does not find -- which is a statement about the")
+print("  RULE, not about the clustering.")
+print()
 print(f"gate G3 (empty stratum)")
 print(f"  mean |mass(N=0 draws) - q(0|x)| = {G3:.5f}"
       f"   -- a gap here is a metric-convention bug, not a finding")
@@ -2289,10 +2340,18 @@ if _ok.size >= 20:
           f"reason it most needs to.")
     print(f"  -> coverage is capped at {CONF['max_achievable_coverage']:.3f} whatever the "
           f"threshold, and the\n     nominal {1 - SET_ALPHA:.2f} is "
-          f"{'REACHABLE' if CONF['reachable'] else 'NOT REACHABLE'}"
-          + ("" if CONF["reachable"] else
-             " -- the sets cannot cover what the\n     model never generated, and no "
-             "conformal threshold repairs that"))
+          f"{'REACHABLE' if CONF['reachable'] else 'NOT REACHABLE'}")
+    if not CONF["reachable"]:
+        # WHY it is unreachable is the question, and section 9's support decomposition
+        # answers it. Do NOT read this as "the model never generated anything near the
+        # truth" without checking that: on the arm measured here the pool brackets the
+        # truth comfortably (nearest draw at 0.09 of the pool's own scale) and the ceiling
+        # comes from the ASSIGNMENT rule being strict, not from the sampler's support.
+        print("     Check section 9 before blaming the model: if d(truth, nearest DRAW) is")
+        print("     small against the pool's scale, the pool DOES bracket the truth and the")
+        print("     ceiling is set by the exemplar-support rule -- loosen `assign_truth`'s")
+        print("     slack, or report coverage against the pool rather than the exemplars.")
+        print("     Only a nearest/median ratio near 1 indicts the sampler.")
 else:
     CONF = None
     print(f"only {_ok.size} jets have an assigned truth -- too few to calibrate a threshold")

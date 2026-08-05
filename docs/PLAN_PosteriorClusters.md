@@ -124,18 +124,52 @@ path is bit-identical to today. Builds on the merged `PLAN_MBR_PerturbativeLund.
 > *estimate*. The set's value is the alternatives, the calibrated `top_mass`, and the
 > scalars' predictiveness — not a better single tree.
 >
+> **The clusters are real; the RANKING over them is what fails.** Mean distance to truth
+> over all 600 jets, by selection rule:
+>
+> | rule | `<d(truth)>` | truth-free? |
+> |---|---|---|
+> | linear medoid | 2.349 | yes |
+> | top-**mass** exemplar (`members[0]`) | 2.715 | yes |
+> | exemplar of the **medoid's** cluster | 2.310 | yes |
+> | closest exemplar | **1.476** | **no — oracle** |
+>
+> Mass is the worst of the three truth-free rules. Ranking by the medoid's own cluster —
+> centrality applied to the partition — beats it, but only ties the plain medoid (2.310 vs
+> 2.349). Meanwhile the oracle sits 36% below every one of them.
+>
+> **How much of that oracle gap is real structure rather than an order statistic:** G2''s
+> null decomposes it. On the multi-cluster jets, medoid 2.029 → random-partition oracle
+> 1.437 → real-partition oracle 0.834. So of the 1.195 total, **0.592 is the order statistic
+> of taking a minimum over ~5 exemplars** (available to any partition, real or not) and
+> **0.603 is genuine information the partition carries about where the truth is**. The
+> partition knows something; neither mass nor medoid-membership extracts it. Whether any
+> truth-free rule can is open, and it is the sharpest remaining question about this layer.
+
 > **The scalars predict the set's error and not the medoid's.** Most- over least-confident
 > RMS ratio: `set0` 0.729 / 0.792 / 0.964 across ln(1/ΔR), ln kt, ln z; `mbr` 0.906 / 1.080
 > / 1.110. That is the right direction — they describe the cluster `set0` came from.
 >
-> **G7 fails for a structural reason, and the failure is the finding.** The truth lies
-> outside every cluster's support on **35.7%** of jets, so coverage is capped at 0.660
-> whatever the threshold and the nominal 0.68 is unreachable. The sets cannot cover what the
-> model never generated, and no conformal threshold repairs that. (The first run reported
-> 0.927 PASS because the calibration silently dropped those jets — corrected;
-> `fit_set_threshold` now counts a never-covered truth at its true rank and reports
-> `max_achievable_coverage` / `reachable`.) The lever is the **unassigned rate**, i.e. the
-> pool's support, not the threshold.
+> **G7 fails, and the reason is the ASSIGNMENT RULE — not the sampler's support.** The
+> truth is ruled outside every cluster's support on **35.7%** of jets, capping coverage at
+> 0.660 against a nominal 0.68. (The first run reported 0.927 PASS because the calibration
+> silently dropped those jets — corrected; `fit_set_threshold` now counts a never-covered
+> truth at its true rank and reports `max_achievable_coverage` / `reachable`.)
+>
+> It is tempting to read that as "the sets cannot cover what the model never generated". The
+> measurement says otherwise, and this is why §9 now decomposes it: `d(truth, nearest draw)`
+> = **0.322** against a pool scale of **2.947** — a ratio of **0.092**, and 0.119 even on
+> the jets flagged unassigned. **The pool brackets the truth comfortably.** What fails is
+> `assign_truth`'s per-cluster support radius, which at `hdbscan`'s granularity
+> (`<n_clusters>` = 4.89) is strict enough to rule the truth outside a cluster it is
+> perfectly close to. The same quantity on `pam` (3.86 clusters) is **8.2%** — a 4x swing
+> from the method alone, which is what a support statement must not do.
+>
+> So G7's ceiling is a property of the reporting rule, and the lever is `assign_truth`'s
+> slack (or defining coverage against the pool rather than the exemplars), not the sampler.
+> Left as measured rather than tuned: loosening a rule until a gate passes is what
+> pre-registration exists to prevent, and the honest record is that the gate fails under the
+> rule as written and why.
 
 > **Line anchors.** File:line references were taken from the tree at commit
 > `34e98b8` (2026-08-02). Re-verify before editing; merges shift them.
