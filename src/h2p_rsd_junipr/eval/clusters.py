@@ -58,6 +58,8 @@ from ..inference.clusters import (
     assign_truth,
     cluster_posterior,
     fit_set_threshold,
+    pool_coverage_bound,
+    pool_covered,
     random_partition_null,
     set_size_for,
     support_radii,
@@ -288,6 +290,9 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
                              backend=ck["backend"], geom=geometry)[0]
         d_ex = np.array([dt[e] for e in cs.exemplars], dtype=float)
         j_truth = assign_truth(d_ex, support_radii(D, cs.labels, cs.exemplars))
+        # WP3: the same question judged at the POOL's resolution rather than at each
+        # cluster's internal tightness, so the answer does not move with the method.
+        pool_bound = pool_coverage_bound(D)
 
         # --- G2, G2' and their controls ---------------------------------------------
         lab_med = int(cs.labels[win_lin]) if cs.labels.size else -1
@@ -331,6 +336,10 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
             "truth_cluster": int(j_truth),
             "cum_mass_to_truth": (float(np.cumsum(cs.masses)[j_truth]) if j_truth >= 0
                                   else float("nan")),
+            "pool_bound": float(pool_bound),
+            "pool_covered_all": bool(pool_covered(dt, cs.labels,
+                                                  range(cs.n_clusters), pool_bound)),
+            "d_nearest_draw": float(dt.min()),
             # G3 — the empty stratum against the model's own q(0|x)
             "q0": q0,
             "empty_draw_mass": empty_mass,
@@ -458,6 +467,14 @@ def summarise_clusters(rows, stability_rows=None, *, alpha=0.32, verbose=True) -
         "n_jets": int(n),
         "n_truth_assigned": int(len(assigned)),
         "unassigned_rate": _frac(rows, "truth_unassigned"),
+        # WP3, reported BESIDE the exemplar rule and never instead of it. The exemplar
+        # rule asks "is the truth inside the region this exemplar represents"; this asks
+        # "did the pool put a draw near the truth at all", judged at the pool's own
+        # resolution so it cannot move with the clustering method (35.7% under hdbscan vs
+        # 8.2% under pam was the same jets, the same draws, a different partition).
+        "pool_covered_rate": _frac(rows, "pool_covered_all"),
+        "pool_bound_mean": _mean(rows, "pool_bound"),
+        "d_nearest_draw_mean": _mean(rows, "d_nearest_draw"),
         "n_clusters_mean": _mean(rows, "n_clusters"),
         "frac_multimodal": float(np.mean([r["n_clusters"] >= 2 for r in rows])),
         "top_mass_mean": float(np.nanmean(tops)),

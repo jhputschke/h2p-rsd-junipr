@@ -555,3 +555,42 @@ def test_all_finite_scores_are_unchanged_by_the_never_covered_path():
     assert fit["max_achievable_coverage"] == 1.0
     assert fit["fitted_under"]["n_never_covered"] == 0
     assert fit["value"] == pytest.approx(float(np.sort(s)[int(np.ceil(401 * 0.8)) - 1]))
+
+
+# ---------------------------------------------------------------------------
+# WP3 — a coverage bound that does not move with the clustering method
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("method", METHODS)
+def test_pool_coverage_bound_is_method_stable(method):
+    """The property the exemplar-support rule cannot have.
+
+    `assign_truth` compares the truth to each CLUSTER's support radius, so a finer
+    partition rejects more: measured 35.7% "unassigned" under hdbscan against 8.2% under
+    pam, on the same jets and the same draws. A statement about whether the MODEL covers
+    the truth must not swing 4x with how its output was later cut up. This bound
+    references the pool's own nearest-neighbour scale and nothing else."""
+    D, n_a, _n_b = _two_lobe()
+    bound = cl.pool_coverage_bound(D)
+    cs = cl.cluster_posterior(D, method=method)
+    assert cs.n_clusters == 2
+    # the bound is a property of D alone — the partition cannot move it
+    assert cl.pool_coverage_bound(D) == bound
+    assert 0.0 < bound < 1.0, "the within-lobe nearest-neighbour scale"
+
+    # a truth sitting inside lobe A is covered by the full set, and NOT by lobe B alone
+    d_truth = np.concatenate([np.full(n_a, 0.5 * bound), np.full(D.shape[0] - n_a, 6.0)])
+    lab_a = int(cs.labels[0])
+    assert cl.pool_covered(d_truth, cs.labels, range(cs.n_clusters), bound)
+    assert not cl.pool_covered(d_truth, cs.labels,
+                               [j for j in range(cs.n_clusters) if j != lab_a], bound)
+    assert not cl.pool_covered(d_truth, cs.labels, [], bound), "an empty set covers nothing"
+
+
+def test_pool_coverage_bound_handles_the_degenerate_pool():
+    """All draws identical -> nearest-neighbour distance 0 -> a bound of 0, which is the
+    honest answer (the pool resolves nothing) rather than a NaN."""
+    assert cl.pool_coverage_bound(np.zeros((8, 8))) == 0.0
+    assert cl.pool_coverage_bound(np.zeros((1, 1))) == 0.0
+    # ...and the off-diagonal must not be poisoned by the self-distance mask
+    D, _a, _b = _two_lobe()
+    assert np.isfinite(cl.pool_coverage_bound(D))

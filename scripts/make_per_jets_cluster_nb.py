@@ -2295,15 +2295,17 @@ rather than at the length head.
 """)
 
 code(r'''
-_ok = [r for r in ROWS if np.isfinite(r["d_mbr"]) and np.isfinite(r["d_mbr_n"])]
-_multi = [r for r in _ok if r["n_clusters"] >= 2]
+# `_nf_`-prefixed throughout: section 11 binds `_ok` to an index array, and the artifact
+# cell in section 12 reads these back AFTER it has run.
+_nf_all = [r for r in ROWS if np.isfinite(r["d_mbr"]) and np.isfinite(r["d_mbr_n"])]
+_nf_multi = [r for r in _nf_all if r["n_clusters"] >= 2]
 # Same expression section 9 uses: a split BETWEEN N strata is a different physical claim
 # from a split WITHIN one, and only the second is shape ambiguity.
-_diff = [r for r in _multi if r["n_second"] >= 0 and r["n_top"] != r["n_second"]]
-_same = [r for r in _multi if r["n_second"] >= 0 and r["n_top"] == r["n_second"]]
+_nf_diff = [r for r in _nf_multi if r["n_second"] >= 0 and r["n_top"] != r["n_second"]]
+_nf_same = [r for r in _nf_multi if r["n_second"] >= 0 and r["n_top"] == r["n_second"]]
 
 
-def _col(rs, key):
+def _nf_col(rs, key):
     v = [r[key] for r in rs if np.isfinite(r.get(key, np.nan))]
     return float(np.mean(v)) if v else float("nan")
 
@@ -2320,34 +2322,34 @@ _rows = [
     ("closest exemplar", "d_best", "NO -- oracle"),
 ]
 for lab, key, free in _rows:
-    print(f"  {lab:<38}" + "".join(f"{_col(rs, key):>9.3f}"
-                                   for rs in (_ok, _multi, _diff, _same)) + f"   {free}")
+    print(f"  {lab:<38}" + "".join(f"{_nf_col(rs, key):>9.3f}"
+                                   for rs in (_nf_all, _nf_multi, _nf_diff, _nf_same)) + f"   {free}")
 print()
 print(f"  de-smearing alone   d_mbr - d_mbr_nmed = "
-      f"{_col(_ok, 'd_mbr') - _col(_ok, 'd_mbr_nmed'):+.3f}")
+      f"{_nf_col(_nf_all, 'd_mbr') - _nf_col(_nf_all, 'd_mbr_nmed'):+.3f}")
 print(f"  the N decision      d_mbr_nmed - d_mbr_n = "
-      f"{_col(_ok, 'd_mbr_nmed') - _col(_ok, 'd_mbr_n'):+.3f}")
+      f"{_nf_col(_nf_all, 'd_mbr_nmed') - _nf_col(_nf_all, 'd_mbr_n'):+.3f}")
 print(f"  residual N error    d_mbr_n - d_mbr_ntrue = "
-      f"{_col(_ok, 'd_mbr_n') - _col(_ok, 'd_mbr_ntrue'):+.3f}"
+      f"{_nf_col(_nf_all, 'd_mbr_n') - _nf_col(_nf_all, 'd_mbr_ntrue'):+.3f}"
       f"   (what a better length head could still buy)")
 ''')
 
 code(r'''
 print("THE N DECISION ITSELF")
-_nt = np.array([r["n_true"] for r in ROWS])
-_cands = {"n_hat (median q(N|x))": np.array([r["n_hat"] for r in ROWS]),
+_nf_ntrue = np.array([r["n_true"] for r in ROWS])
+_nf_cands = {"n_hat (median q(N|x))": np.array([r["n_hat"] for r in ROWS]),
           "N(medoid)": np.array([r["n_medoid"] for r in ROWS]),
           "N(set0)": np.array([len(a) for a in RAW["set0"]]),
           "N(MAP)": np.array([len(a) for a in RAW["map"]]),
           "N(posterior draw)": np.array([len(a) for a in RAW["post"]])}
 print(f"  {'rule':<24}{'P(n = n_true)':>15}{'<|n - n_true|>':>16}   (L1 is the loss the")
 print(f"  {'':<24}{'':>15}{'':>16}    median is Bayes for)")
-for lab, v in _cands.items():
-    print(f"  {lab:<24}{float(np.mean(v == _nt)):>15.3f}{float(np.mean(np.abs(v - _nt))):>16.3f}")
-_real = np.array([r["n_hat_realized"] for r in ROWS])
+for lab, v in _nf_cands.items():
+    print(f"  {lab:<24}{float(np.mean(v == _nf_ntrue)):>15.3f}{float(np.mean(np.abs(v - _nf_ntrue))):>16.3f}")
+_nf_real = np.array([r["n_hat_realized"] for r in ROWS])
 _cond = np.array([r["n_hat_cond"] for r in ROWS])
-_nh = _cands["n_hat (median q(N|x))"]
-print(f"\n  n_hat realized in the pool on {_real.mean():.3%} of jets"
+_nh = _nf_cands["n_hat (median q(N|x))"]
+print(f"\n  n_hat realized in the pool on {_nf_real.mean():.3%} of jets"
       f"   (1.000 expected: the median of a histogram pmf always is)")
 print(f"  the CONDITIONAL median (gate said non-empty) agrees with it on "
       f"{float(np.mean(_cond == _nh)):.3f} of jets")
@@ -2356,7 +2358,7 @@ print(f"  mean stratum size {np.mean([r['stratum_size'] for r in ROWS]):.1f} of 
 ''')
 
 code(r'''
-def _boot_delta(rs, a="d_mbr", b="d_mbr_n", n_boot=N_BOOT, seed=SEED):
+def _nf_boot(rs, a="d_mbr", b="d_mbr_n", n_boot=N_BOOT, seed=SEED):
     """Jet-level bootstrap on the PAIRED difference. Paired because both estimators are
     read off the same D for the same jet, so the per-jet difference removes the jet-to-jet
     spread that would otherwise swamp it."""
@@ -2372,21 +2374,21 @@ def _boot_delta(rs, a="d_mbr", b="d_mbr_n", n_boot=N_BOOT, seed=SEED):
 
 print("SHIP GATE (pre-registered in the markdown above, before this cell was first run)")
 print(f"  {'subset':<26}{'n':>6}{'mean delta':>12}{'95% CI':>22}   verdict")
-_verdict = {}
-for lab, rs in (("all jets", _ok), ("multi-cluster", _multi),
-                ("...top-2 differ in N", _diff), ("...top-2 same N", _same)):
-    m, lo, hi, n = _boot_delta(rs)
+_nf_verdict = {}
+for lab, rs in (("all jets", _nf_all), ("multi-cluster", _nf_multi),
+                ("...top-2 differ in N", _nf_diff), ("...top-2 same N", _nf_same)):
+    m, lo, hi, n = _nf_boot(rs)
     ok = np.isfinite(lo) and lo > 0.0
-    _verdict[lab] = ok
+    _nf_verdict[lab] = ok
     ci = f"[{lo:+.3f}, {hi:+.3f}]" if np.isfinite(lo) else f"(n={n} < {MIN_CI_JETS})"
     print(f"  {lab:<26}{n:>6}{m:>+12.3f}{ci:>22}   "
           f"{'EXCLUDES 0' if ok else 'brackets 0' if np.isfinite(lo) else 'not scored'}")
 print("  delta = d(medoid) - d(mbr_n); POSITIVE means the N-first estimator is closer to")
 print("  truth. Criterion (i) is the 'all jets' row excluding 0.")
 print()
-_g0 = float(np.mean([r["d_mbr"] - r["d_mbr_n"] for r in _multi])) if _multi else float("nan")
+_nf_g0 = float(np.mean([r["d_mbr"] - r["d_mbr_n"] for r in _nf_multi])) if _nf_multi else float("nan")
 print(f"  as a fraction of the 0.603 real-information component on multi-cluster jets: "
-      f"{_g0 / 0.603:.2f}x")
+      f"{_nf_g0 / 0.603:.2f}x")
 print("  (mbr_n makes ONE selection, so it gets none of the 0.592 order-statistic share")
 print("   an oracle-over-exemplars enjoys -- this fraction is the honest yardstick.)")
 print()
@@ -2507,31 +2509,33 @@ code(r'''
 # the guarantee on assignment -- reporting a coverage that cannot fail for the one reason
 # it most needs to. `fit_set_threshold` reads non-finite as "never covered".
 _scores = np.array([r["cum_mass_to_truth"] for r in ROWS], dtype=float)
-_ok = np.arange(len(ROWS))
-if _ok.size >= 20:
-    _half = _ok.size // 2
-    _cal, _test = _ok[:_half], _ok[_half:]
-    CONF = fit_set_threshold(_scores[_cal], alpha=SET_ALPHA)
-    _cov, _sz = [], []
-    for i in _test:
+# `_cf_`-prefixed: section 9b's rows are still live here and are read again
+# by the artifact cell below.
+_cf_idx = np.arange(len(ROWS))
+if _cf_idx.size >= 20:
+    _cf_half = _cf_idx.size // 2
+    _cf_cal, _cf_test = _cf_idx[:_cf_half], _cf_idx[_cf_half:]
+    CONF = fit_set_threshold(_scores[_cf_cal], alpha=SET_ALPHA)
+    _cf_cov, _cf_sz = [], []
+    for i in _cf_test:
         k = set_size_for(ROWS[i]["masses"], CONF["value"])
-        _sz.append(k)
-        _cov.append(bool(0 <= ROWS[i]["truth_cluster"] < k))
+        _cf_sz.append(k)
+        _cf_cov.append(bool(0 <= ROWS[i]["truth_cluster"] < k))
     from h2p_rsd_junipr.eval.calibration import wilson_interval
 
-    _lo, _hi = wilson_interval(int(np.sum(_cov)), len(_cov))
-    CONF["coverage"] = float(np.mean(_cov))
+    _lo, _hi = wilson_interval(int(np.sum(_cf_cov)), len(_cf_cov))
+    CONF["coverage"] = float(np.mean(_cf_cov))
     CONF["coverage_wilson95"] = [_lo, _hi]
-    CONF["mean_set_size"] = float(np.mean(_sz))
-    CONF["n_calibration"] = int(_cal.size)
-    CONF["n_test"] = int(_test.size)
+    CONF["mean_set_size"] = float(np.mean(_cf_sz))
+    CONF["n_calibration"] = int(_cf_cal.size)
+    CONF["n_test"] = int(_cf_test.size)
     print(f"conformal set at alpha = {SET_ALPHA:g}  (nominal coverage "
           f"{1 - SET_ALPHA:.2f}, MARGINAL over jets)")
     print(f"  threshold on accumulated mass : {CONF['value']:.3f}"
-          f"   (fitted on {_cal.size} jets, exact = "
+          f"   (fitted on {_cf_cal.size} jets, exact = "
           f"{CONF['fitted_under']['finite_sample_exact']})")
     print(f"  out-of-sample coverage        : {CONF['coverage']:.3f} "
-          f"[{_lo:.3f}, {_hi:.3f}]  on {_test.size} jets")
+          f"[{_lo:.3f}, {_hi:.3f}]  on {_cf_test.size} jets")
     print(f"  mean set size                 : {CONF['mean_set_size']:.2f} clusters")
     print(f"  gate G7: {'PASS' if _hi >= 1 - SET_ALPHA else 'FAIL'} "
           f"-- the Wilson band {'contains' if _hi >= 1 - SET_ALPHA else 'excludes'} "
@@ -2557,7 +2561,7 @@ if _ok.size >= 20:
         print("     Only a nearest/median ratio near 1 indicts the sampler.")
 else:
     CONF = None
-    print(f"only {_ok.size} jets have an assigned truth -- too few to calibrate a threshold")
+    print(f"only {_cf_idx.size} jets have an assigned truth -- too few to calibrate a threshold")
 ''')
 
 # ---------------------------------------------------------------------------
@@ -2606,20 +2610,20 @@ if WRITE_ARTIFACTS:
             "G9_selection_bias": (float(_d_split.mean()) if _d_split.size else None),
         },
         "n_first": {
-            "ladder": {k: {lab: _col(rs, k) for lab, rs in
-                           (("all", _ok), ("multi", _multi), ("differ", _diff),
-                            ("same_N", _same))}
+            "ladder": {k: {lab: _nf_col(rs, k) for lab, rs in
+                           (("all", _nf_all), ("multi", _nf_multi), ("differ", _nf_diff),
+                            ("same_N", _nf_same))}
                        for k in ("d_mbr", "d_mbr_nmed", "d_mbr_n", "d_top",
                                  "d_mbr_ntrue", "d_oracle_stratum", "d_best")},
-            "delta_ci": {lab: _boot_delta(rs) for lab, rs in
-                         (("all", _ok), ("multi", _multi), ("differ", _diff),
-                          ("same_N", _same))},
-            "n_accuracy": {lab: {"exact": float(np.mean(v == _nt)),
-                                 "mean_abs": float(np.mean(np.abs(v - _nt)))}
-                           for lab, v in _cands.items()},
-            "n_hat_realized_rate": float(_real.mean()),
+            "delta_ci": {lab: _nf_boot(rs) for lab, rs in
+                         (("all", _nf_all), ("multi", _nf_multi), ("differ", _nf_diff),
+                          ("same_N", _nf_same))},
+            "n_accuracy": {lab: {"exact": float(np.mean(v == _nf_ntrue)),
+                                 "mean_abs": float(np.mean(np.abs(v - _nf_ntrue)))}
+                           for lab, v in _nf_cands.items()},
+            "n_hat_realized_rate": float(_nf_real.mean()),
             "mean_stratum_size": float(np.mean([r["stratum_size"] for r in ROWS])),
-            "ship_gate_criterion_i": bool(_verdict.get("all jets", False)),
+            "ship_gate_criterion_i": bool(_nf_verdict.get("all jets", False)),
             "note": "criteria (ii) RMS-vs-RSD and (iii) the 6b marginals are read off "
                     "those sections; all three must hold for mbr_n to be recommended",
         },

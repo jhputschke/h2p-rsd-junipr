@@ -286,6 +286,7 @@ def cmd_eval(argv) -> int:
         tarp=exp["tarp"], tarp_refs=exp["tarp_refs"], tarp_reference=exp["tarp_reference"],
         mbr_kwargs=mbr_kwargs_from_decode(decode),
         tarp_null_reps=exp["tarp_null_reps"], tarp_stratify=exp["tarp_stratify"],
+        coverage_null_reps=exp["coverage_null_reps"],
     )
     if exp["support_audit"]:
         from .eval.support import run_support_audit

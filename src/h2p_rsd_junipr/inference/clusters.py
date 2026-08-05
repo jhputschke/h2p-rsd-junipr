@@ -739,6 +739,50 @@ def support_radii(D, labels, exemplars, q: float = 0.95) -> np.ndarray:
     return np.asarray(out, dtype=float)
 
 
+def pool_coverage_bound(D, q: float = 0.95) -> float:
+    """The pool's own resolution scale — a coverage bound that does NOT move with the
+    clustering method (docs/PLAN_StratifiedMBR.md WP3).
+
+    The `q`-quantile of each draw's distance to its NEAREST other draw. It references the
+    pool's geometry only, so two partitions of the same pool give the same bound by
+    construction — which is the property `assign_truth`'s per-cluster support radius lacks
+    and cannot have.
+
+    **Why that matters.** The exemplar rule declared the truth "outside every cluster's
+    support" on 35.7% of jets under `hdbscan` and **8.2%** under `pam`, on the same jets
+    and the same draws: a 4x swing from the partition's granularity alone. Finer clusters
+    have tighter supports, so they reject more — and a statement about whether the MODEL
+    covers the truth must not depend on how finely its output was later cut up.
+
+    This is offered **beside** the exemplar rule, never instead of it: loosening a rule
+    until a gate passes is what pre-registration exists to prevent, and both numbers stay
+    on the record. What they measure genuinely differs — the exemplar rule asks "is the
+    truth inside the region this exemplar represents", this asks "did the pool put a draw
+    near the truth at all"."""
+    D = symmetrize(D)
+    n = D.shape[0]
+    if n < 2:
+        return 0.0
+    # `np.where`, not `D + eye*inf`: the latter is 0 * inf = NaN off the diagonal.
+    nn = np.where(np.eye(n, dtype=bool), np.inf, D).min(axis=1)
+    nn = nn[np.isfinite(nn)]
+    return float(np.quantile(nn, float(q))) if nn.size else 0.0
+
+
+def pool_covered(d_to_truth, labels, emitted, bound: float) -> bool:
+    """Is the truth within `bound` of ANY draw in the emitted clusters?
+
+    The set-level counterpart of `assign_truth`: a set covers the truth when the region it
+    reports actually reaches it, judged at the pool's own resolution rather than at each
+    cluster's internal tightness. `emitted` is the list of cluster indices the set emits
+    (the conformal prefix); `labels` is `PosteriorClusterSet.labels`."""
+    d = np.asarray(d_to_truth, dtype=float)
+    lab = np.asarray(labels)
+    sel = np.isin(lab, np.asarray(list(emitted), dtype=int)) if len(emitted) else np.zeros(
+        lab.shape, dtype=bool)
+    return bool(sel.any() and float(d[sel].min()) <= float(bound))
+
+
 def assign_truth(d_to_exemplars, bounds, *, slack: float = 1.0) -> int:
     """Nearest-exemplar assignment of the truth, with an explicit **unassigned** verdict.
 

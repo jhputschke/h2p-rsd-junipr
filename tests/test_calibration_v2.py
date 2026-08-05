@@ -691,3 +691,80 @@ def test_edge_tolerance_matches_the_training_time_guard():
     src = inspect.getsource(stats.check_lnz_support)
     assert f"lo - {EDGE_TOL:g}" in src or "lo - 1e-6" in src
     assert EDGE_TOL == 1e-6
+
+
+# ---------------------------------------------------------------------------
+# `coverage_68`'s own null (docs/PLAN_StratifiedMBR.md WP4)
+#
+# The leading-cell HPD-68 is built from the K DRAWS, so it cannot contain a cell of
+# probability < 1/K that a calibrated truth still visits. The statistic therefore reads
+# BELOW 0.68 even for a perfect model, and "0.53 against 0.68" cannot be called
+# over-confidence until that loss is measured. v1 already caught the same shape of trap in
+# SBC-on-N (a mid-rank statistic on a 7-valued discrete N against a continuous chi^2(9)).
+# ---------------------------------------------------------------------------
+def _hpd68(counts_by_cell):
+    """The production HPD-68 construction, in isolation, for a hand-checkable case."""
+    vals, counts = np.unique(np.asarray(counts_by_cell), return_counts=True)
+    order = np.argsort(-counts)
+    cum = np.cumsum(counts[order]) / counts.sum()
+    k68 = int(np.searchsorted(cum, 0.68)) + 1
+    return set(int(c) for c in vals[order][:k68])
+
+
+def test_the_hpd_from_k_draws_undercovers_a_perfect_model():
+    """The mechanism, on a categorical where the model IS the truth.
+
+    A long-tailed distribution has mass spread over cells no finite sample reaches, so the
+    empirical HPD misses them. That is the deficit the null exists to quantify — it is a
+    property of the estimator, and no model change removes it."""
+    rng = np.random.default_rng(0)
+    p = np.ones(200) / 200.0            # flat over 200 cells: the HPD needs 136 of them
+    K = 40                              # ...and 40 draws cannot supply that many
+    hits = []
+    for _ in range(400):
+        draws = rng.choice(len(p), size=K, p=p)
+        hpd = _hpd68(draws)
+        truth = int(rng.choice(len(p), p=p))       # the truth IS a draw from the model
+        hits.append(truth in hpd)
+    covered = float(np.mean(hits))
+    assert covered < 0.5, (
+        f"a perfect model should still under-cover at K={K} over 200 cells; got {covered:.3f}"
+    )
+
+
+def test_coverage_null_is_reported_and_default_off(batch):
+    """Opt-in and additive: `coverage_null_reps=0` adds no keys (the `tarp` convention),
+    and > 0 adds the null with its own Wilson interval and the verdict line."""
+    from h2p_rsd_junipr.config import experiment_params, load_config
+    from h2p_rsd_junipr.eval.calibration import run_calibration
+    from h2p_rsd_junipr.models.base import build_model
+
+    assert experiment_params(load_config([]))["coverage_null_reps"] == 0
+
+    b, geom = batch
+    from h2p_rsd_junipr.data.dataset import MatchedLundDataset
+    from h2p_rsd_junipr.data.synthetic import synthetic_matched_dataset
+
+    ds = MatchedLundDataset(synthetic_matched_dataset(24, seed=0), geom)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    dev = torch.device("cpu")
+
+    # Seeded identically before EACH call: two sequential calls otherwise start from
+    # different RNG states and would differ for a reason that has nothing to do with the
+    # switch. This is the actual additivity claim -- same seed in, same pre-existing keys
+    # out -- and it holds only because the null's extra draws are taken inside
+    # `fork_rng`, so they cannot shift the stream the NEXT jet samples from.
+    torch.manual_seed(0)
+    off = run_calibration(model, ds, geom, dev, K=16, n_jets=8, verbose=False)
+    assert "coverage_68_null" not in off, "off must add no keys"
+
+    torch.manual_seed(0)
+    on = run_calibration(model, ds, geom, dev, K=16, n_jets=8, verbose=False,
+                         coverage_null_reps=5)
+    assert on["coverage_68"] == off["coverage_68"], "the real statistic must not move"
+    assert on["sbc_chi2_uniform"] == off["sbc_chi2_uniform"]
+    for k in ("coverage_68_null", "coverage_68_null_ci", "n_coverage_null",
+              "coverage_68_vs_null", "coverage_68_null_explains_deficit"):
+        assert k in on
+    assert 0.0 <= on["coverage_68_null"] <= 1.0
+    assert "cannot contain a cell of probability < 1/K" in on["coverage_68_null_note"]
