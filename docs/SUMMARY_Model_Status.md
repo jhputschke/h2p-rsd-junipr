@@ -231,24 +231,33 @@ The probe's verdict re-orders everything below it. Two consequences drive the li
 0. ~~**RQ-spline ln z head**~~ — **done** (§2.5, `PLAN_lnz_spline_head.md` §6). G3 PARTIAL,
    NLL better on every seed, support unchanged, residual moved to `dv`.
 
-1. **Spline the `du`/`dv` heads — the same fix on what is now the binding coordinate.**
-   The trigger fired the moment `ln z` was fixed: `dv` fails on all three seeds at
-   1.04–1.12× and `dv × wide_soft` sits at ~1.0× in the bulk quadrant. The argument is
-   the one that authorized the `ln z` work verbatim — a two-parameter truncated normal is
-   being asked to carry a shape it cannot — and the machinery is already generic:
-   `rq_interval_{logpdf,cdf,icdf,sample}` take any `(lo, hi)`, and for `du`/`dv` those are
-   the *constant* `±half_u` / `±half_v` rather than cell-conditional, so it is strictly
-   simpler than the case already built. A `model.offset_head` flag, the same four dispatch
-   points, the same parity discipline. **Pre-register the same gate before running it**,
-   and expect the residual to move again — that is what happened here.
+1. **First, a one-off diagnostic: stratify `dv`'s PIT by `ln kt` cell** — 30 minutes, and
+   it decides which fix is right. `dv` fails on all three seeds (1.04–1.12×), but *why* is
+   not established: the marginal density gradient and the within-cell offset shape are the
+   **same** on both axes (measured), so the usual "the truncated normal cannot carry the
+   shape" story does not by itself explain why `dv` fails and `du` never does. The one
+   asymmetry found is that **13.3% of emissions sit in the `ln kt` cell touching the
+   `kt_floor` cut, against 0.0% on the angular axis**. If the defect is that edge, the fix
+   is a *support* correction on `ln kt` (the `lnz_support` move again), not a spline.
 
-2. **Settle seed 2 rather than argue about it** (`PLAN_lnz_spline_head.md` §7.2). Either
+2. **Then spline `dv` — but not `du`.** Same generic primitive:
+   `rq_interval_{logpdf,cdf,icdf,sample}` take any `(lo, hi)`, and for the offsets those are
+   the *constant* `±half_v` rather than cell-conditional, so it is strictly simpler than the
+   case already built. **`du` is not justified**: across all six control-plus-spline
+   measurements `du` is 0.73 ± 0.09 and fails 0/6, `dv` is 1.13 ± 0.08 and fails 6/6 — ~4σ
+   apart and stable. And `dv` was already failing *before* the spline (it was seed 1's
+   `pit_ks_max` at 1.27×), so these are two independent pre-existing defects, not a chain in
+   which each fix exposes the next. Pre-register the same gate; if a third coordinate does
+   become binding it is most likely `psi` (a genuine 1.28× on control seed 2, and 3× the
+   scatter of the others), which is periodic and needs a circular treatment, not this one.
+
+3. **Settle seed 2 rather than argue about it** (`PLAN_lnz_spline_head.md` §7.2). Either
    seeds 3–5 at the same budget — 3 seeds cannot tell "one marginal seed" from "a 1-in-3
    failure rate" — or `lnz_spline_bins=16` on seed 2 alone, a 15-minute test of whether the
    4% miss is expressiveness or variance. `K = 8` was chosen, never fitted. **Do not** tune
    `K` against G3 across all seeds afterwards; that makes the gate circular.
 
-3. **A 3-seed continue/stop spline arm**, to settle §2.5's TARP finding. Two of three
+4. **A 3-seed continue/stop spline arm**, to settle §2.5's TARP finding. Two of three
    explicit-`q(N|x)` seeds crossed below the null band once the coordinate density
    improved, which says the factorization was not the only contributor to the joint
    narrowness — but one seed moved the other way, and the fielded family has a single arm.

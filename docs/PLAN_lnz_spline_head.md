@@ -258,12 +258,50 @@ that put the spline before the joint density in the first place, and §7 records
 
 # §7. What to do next, in the order the measurement supports
 
-## 7.1 Spline the `du`/`dv` heads — the same fix, on what is now the binding coordinate
+## 7.1 Spline the `dv` head — the same fix, on what is now the binding coordinate
 
 **Trigger: fired** (§6.3). `dv` fails on all three seeds at 1.04–1.12× and `dv × wide_soft`
 sits at ~1.0× in the bulk quadrant, while `ln z` is now 0.47–1.04×. The argument is
-identical to the one that authorized this work package, and now it is `du`/`dv` that are
-two-parameter truncated normals being asked to carry a shape they cannot.
+identical to the one that authorized this work package: `dv` is a two-parameter truncated
+normal being asked to carry a shape it cannot.
+
+**`dv` only — `du` is NOT justified by the evidence**, and the distinction matters because
+"spline the offsets" is the lazy generalization. Across all six measurements (three control
+arms and three spline arms):
+
+| coordinate | ratio to its own critical value | fails |
+|---|---|---:|
+| `dv` | **1.13 ± 0.08** | 6 / 6 |
+| `psi` | 0.73 ± 0.26 | 1 / 6 |
+| `du` | **0.73 ± 0.09** | 0 / 6 |
+
+`du` and `dv` are ~4σ apart, both stable across seeds *and* across the `ln z` change. And
+`dv` was **already failing before the spline** — on seed 1 it was already the worst
+coordinate at 1.27×, i.e. it *was* that arm's `pit_ks_max`. So `ln z` and `dv` are two
+independent pre-existing defects, not a chain in which each fix exposes the next; fixing
+`dv` should leave `du` where it is. Splining `du` as well would be spending head width on a
+coordinate with no measured defect — do it only if a later run puts it near its critical
+value.
+
+Two caveats on that recommendation. `du`'s run-to-run scatter is ±0.09, so a retrain could
+land it in ~0.6–0.9; reaching 1.0 is ~3σ, unlikely rather than impossible. And a *passing*
+KS is not proof of correctness — at n = 2834 the test has limited power, so `du` at 0.73×
+may still hide a smaller defect. If a coordinate other than `dv` becomes the binding one it
+is most likely **`psi`**, which posted a genuine 1.28× failure on control seed 2 and whose
+scatter is 3× the others' (that reads as noise-dominated rather than systematically wrong,
+and `psi` is a von Mises on a periodic domain, so it needs a circular treatment, not this one).
+
+**Why `dv` and not `du`, mechanistically: not established.** Three natural explanations were
+tested against the truth sample and two are ruled out — the marginal log-density gradient is
+the same on both axes (0.174 vs 0.181 per 0.2-wide cell) and the within-cell offset shapes
+are the same and near-uniform on both (|skew| 0.087 vs 0.066, excess kurtosis −1.14 vs
+−1.19). The one structural asymmetry found is that **13.3% of emissions sit in the `ln kt`
+cell touching the `kt_floor` cut, against 0.0% for the angular axis** — the `kt` axis has a
+hard support boundary inside its populated region and the angular axis does not. That is a
+hypothesis, not a finding: testing it means stratifying `dv`'s PIT by `ln kt` cell, which is
+a cheap diagnostic and should be run *before* 7.1, because if the defect is an edge effect
+then a spline is the wrong fix and the right one is the same `lnz_support` move applied to
+`ln kt` — a support correction, not a shape one.
 
 Cheap, because the machinery exists and is generic: `rq_interval_{logpdf,cdf,icdf,sample}`
 already take an arbitrary `(lo, hi)`, and for `du`/`dv` those bounds are the *constant*
