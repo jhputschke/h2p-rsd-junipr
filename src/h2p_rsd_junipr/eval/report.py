@@ -73,6 +73,15 @@ def inert_decode_keys(model, decode: dict) -> list[dict]:
         why = "point_estimator != 'mbr'; no OT backend is imported"
         for k in sorted(k for k in decode if k.startswith("mbr_")):
             add(k, why)
+        # The cluster layer reads the MBR distance matrix, so without an MBR decode there
+        # is no D and every cluster_* knob is inert for the same reason.
+        for k in sorted(k for k in decode if k.startswith("cluster_")) + ["set_alpha"]:
+            add(k, "point_estimator != 'mbr'; the cluster layer has no distance matrix "
+                   "to read")
+    elif not bool(decode.get("cluster_posterior", False)):
+        for k in sorted(k for k in decode if k.startswith("cluster_")
+                        and k != "cluster_posterior") + ["set_alpha"]:
+            add(k, "decode.cluster_posterior=false; no cluster labelling is built")
 
     # `length_floor_quantile` is applied by print_point_estimate (and the serving API),
     # not by run_closure's map_or_mbr — so the closure table is unfloored either way.
@@ -261,6 +270,88 @@ def plot_calibration(metrics: dict, out_dir: Path) -> list[Path]:
         ax.legend(fontsize=7)
         fig.tight_layout()
         p = out_dir / "calibration_by_region.png"
+        fig.savefig(p, dpi=140)
+        plt.close(fig)
+        written.append(p)
+    return written
+
+
+def plot_clusters(metrics: dict, out_dir: Path) -> list[Path]:
+    """The WP6 posterior-cluster figures: the `top_mass` reliability diagram (gate G6) and
+    the conformal coverage against nominal (gate G7).
+
+    `metrics` is the `clusters` block of an eval artifact. Same contract as
+    `plot_calibration`: matplotlib is optional, and its absence degrades to a note."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[eval] matplotlib not installed; wrote the cluster metrics JSON only.")
+        return []
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    rel = metrics.get("G6_reliability")
+    if rel and rel.get("bins"):
+        relT = metrics.get("G6_reliability_recalibrated") or {}
+        T = (metrics.get("G6_temperature") or {}).get("value", 1.0)
+        fig, ax = plt.subplots(figsize=(4.4, 4.0))
+        ax.plot([0, 1], [0, 1], color="#888888", ls="--", lw=1.2, label="calibrated")
+        for entry, colour, label in ((rel, "#4C78A8", "raw"),
+                                     (relT, "#E45756", f"tempered (T={T:.2f})")):
+            bins = entry.get("bins") or []
+            if not bins:
+                continue
+            f = np.array([b["claimed"] for b in bins])
+            o = np.array([b["observed"] for b in bins])
+            ci = np.array([b["wilson95"] for b in bins], dtype=float)
+            # Wilson bars, not sqrt(p(1-p)/n): these are binomial proportions on a few
+            # dozen jets per bin, exactly where the normal approximation leaves [0, 1].
+            ax.errorbar(f, o, yerr=np.abs(np.vstack([o - ci[:, 0], ci[:, 1] - o])),
+                        fmt="o-", ms=4, lw=1.6, color=colour, capsize=3,
+                        label=f"{label}  ECE={entry.get('ece', float('nan')):.3f}")
+            # An unscored bin is drawn hollow: a point on 7 jets must not read like one on 200.
+            un = [i for i, b in enumerate(bins) if not b.get("scored", True)]
+            if un:
+                ax.scatter(f[un], o[un], s=64, facecolor="white", edgecolor=colour,
+                           zorder=5, linewidths=1.4)
+        ax.set_xlabel("claimed top-cluster mass")
+        ax.set_ylabel("realized P(truth in top cluster)")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_title(f"gate G6 — reliability of `top_mass`\nslope = {rel.get('slope', float('nan')):.2f} "
+                     f"+/- {rel.get('slope_se', float('nan')):.2f} "
+                     f"(hollow: n < {metrics.get('region_min_n', 30)}, not scored)",
+                     fontsize=9)
+        ax.legend(fontsize=8, loc="upper left")
+        fig.tight_layout()
+        p = out_dir / "clusters_reliability.png"
+        fig.savefig(p, dpi=140)
+        plt.close(fig)
+        written.append(p)
+
+    conf = metrics.get("G7_conformal")
+    if conf:
+        fig, ax = plt.subplots(figsize=(4.0, 3.4))
+        cov, ci = conf["coverage"], conf["coverage_wilson95"]
+        ax.barh([0], [cov], color="#54A24B", height=0.45)
+        ax.errorbar([cov], [0], xerr=[[cov - ci[0]], [ci[1] - cov]], fmt="none",
+                    ecolor="#333333", elinewidth=1.4, capsize=5)
+        ax.axvline(conf["nominal"], color="#E45756", ls="--", lw=1.4,
+                   label=f"nominal {conf['nominal']:.2f}")
+        ax.set_yticks([])
+        ax.set_xlim(0, 1.02)
+        ax.set_xlabel("empirical set coverage")
+        ax.set_title(f"gate G7 — conformal coverage at threshold {conf['value']:.3f}\n"
+                     f"mean set size {conf['mean_set_size']:.2f}; MARGINAL over jets, "
+                     f"not conditional on x", fontsize=9)
+        ax.legend(fontsize=8, loc="lower left")
+        fig.tight_layout()
+        p = out_dir / "clusters_conformal_coverage.png"
         fig.savefig(p, dpi=140)
         plt.close(fig)
         written.append(p)

@@ -306,6 +306,125 @@ suite (`eval/calibration.py`, SBC/PIT on multiplicity) did **not** flag this —
 are computed against the sampler's own draws, so a uniformly under-confident `q(N|x)` can
 still pass. A dedicated `P(N=0)` reliability check is the missing diagnostic.
 
+## Cross-reference — is the cluster mass vector a viable input to the reject rule?
+
+Recorded here as the exit criterion of
+[`PLAN_PosteriorClusters.md`](PLAN_PosteriorClusters.md) requires, now that its WP1–WP3
+have landed (`inference/clusters.py`, `decode.cluster_posterior`).
+
+**Structurally, yes — and for free.** `inference.mbr._empty_value` returns exactly `0` for
+two empty clouds, so at any `K` the `N = 0` draws form a **zero-diameter clique** at a large
+constant distance from every non-empty draw. Any density method finds it by construction:
+the empty stratum comes back as its own cluster whose radius is `0` and whose mass **is**
+`q(0|x)` — the very quantity the gate thresholds, and the one already measured as
+well-calibrated (AUC ≈ 0.820) while every point estimator mishandled it. `eval/clusters.py`
+reports `G3_empty_mass_vs_q0` for exactly this; a nonzero value there is a metric-convention
+bug rather than a finding about the posterior, and on the arms measured so far it is `0.000`.
+
+**So the substitution is testable, but it is not yet an improvement, for two reasons.**
+
+1. **It changes nothing about the number.** The cluster mass of the `N = 0` stratum is the
+   empirical `P(N = 0)` over the same draws `length_pmf` already histograms — the identity
+   `G3` checks. Routing the gate through the cluster layer would therefore threshold the
+   same value at `K²` EMD solves per jet instead of none. The cluster layer earns its cost
+   on the `N ≥ 1` strata, where there is a partition to find; at `N = 0` it recovers a
+   number that was already available.
+2. **What the gate actually wants is a *calibrated* `q(0|x)`, and the cluster layer does
+   not supply one.** Chow's rule (Chow, *IEEE Trans. Inf. Theory* **16** (1970) 41) is a
+   statement about a posterior probability; `top_mass` is not calibrated until
+   `PLAN_PosteriorClusters.md` WP5 says it is, and with `decode.cluster_split=false` it is
+   biased **high**. The recalibration work item above (§ "Second work item") is the thing
+   that moves this number, and it is independent of clustering.
+
+**Where the cluster layer *does* help the empty-tree decision** is the part the gate cannot
+express at all: `entropy` and `top_mass` distinguish "confidently empty" from "split between
+empty and one soft emission", which is a different jet and currently gets the same answer.
+That is a **reject-with-a-reason** rule rather than a better threshold, and it is the form
+worth prototyping if this is revisited.
+
+**Verdict: viable, currently redundant.** Keep `empty_threshold` reading `length_pmf`. If
+the gate is reworked into the general `argmin` over an explicit loss on `n` (below), the
+cluster mass vector is the natural place to get `q(m|x)` for the `m ≥ 1` terms, and the
+substitution becomes worth its cost.
+
+### ...but the composition runs the OTHER way, and there it is not redundant
+
+The paragraphs above answer "can the clusters **replace** this gate?" (no — same number).
+Measurement then showed the reverse question is the load-bearing one: **this gate fixes a
+real defect in the cluster layer's point summary**, and that composition is now implemented
+(`inference.mbr.mbr_cluster_set(empty_threshold=...)`, reached through
+`decode.empty_threshold` — the same knob, meaning the same thing, with no new config field).
+
+**The defect.** `PosteriorSetEstimate.members[0]` is the mass argmax over clusters. The
+`N = 0` stratum is **atomic** — `_empty_value` returns exactly `0` for two empty clouds, so
+every empty draw collapses into one zero-radius cluster carrying the whole of `q(0|x)` —
+while the non-empty draws live on a continuum and are **fragmented** into several clusters
+by the density method. The argmax therefore compares one lump against the largest of a split
+field, and the empty explanation wins far more often than its own mass warrants.
+
+Measured on 600 held-out jets of `data/jet_aux_asym_test.root` at `K = 200`
+(`v1_contstop_s0`, `notebooks/per_jets_estimation_cluster.ipynb` §5b):
+
+| series | `P(n=0)` | vs truth | mean mult | vs truth |
+|---|---|---:|---|---:|
+| truth | 0.167 | — | 1.442 | — |
+| MBR medoid | 0.048 | −0.119 | 1.377 | −0.065 |
+| `members[0]` (mass argmax) | **0.298** | **+0.131** (~9σ) | 1.105 | −0.337 |
+| posterior draw | 0.178 | +0.011 | 1.453 | +0.011 |
+
+That +0.131 is a partition-granularity artifact, not physics, and about two thirds of
+`members[0]`'s multiplicity deficit is *this one decision* rather than a shape error.
+
+**Why this gate is the right fix and not a patch.** Gate G3 of
+[`PLAN_PosteriorClusters.md`](PLAN_PosteriorClusters.md) measures
+`|mass(N=0 cluster) − q(0|x)|` and finds it ~0: the two are the **same number**. So the mass
+argmax and this gate differ only in what that number is compared against — a fragmented
+competitor set whose size depends on `cluster_min_mass` and the clustering method, or a τ
+fitted by rate-matching and frozen. Same information, calibrated decision rule, no new
+statistic and no new fit.
+
+**What moves and what does not.** Only the *recommendation* (`PosteriorSetEstimate.point`,
+via `point_index`) moves; `members`, `masses`, `radii` and the conformal prefix are
+untouched, and `members[0]` keeps meaning "the top-mass exemplar" so the two rules stay
+comparable on one object. Unlike `map_or_mbr` the gate does **not** short-circuit the decode
+here: the set still carries the empty explanation, because a rejected alternative is still a
+reported alternative. And it never fabricates — a `q(0|x) ≥ τ` with no empty draw in the
+pool is a disagreement between the length head and the sampler, not a tree, so the
+recommendation stays inside `H = {pool}`.
+
+**Read the result with this gate's own accuracy in mind.** τ is fitted by *rate-matching*,
+so it fixes the empty **rate** essentially by construction — agreement there is not a
+result. Whether it fixes the right **jets** is the measurement, and by the numbers at the
+top of this document the gate is a weak classifier (AUC 0.760, recall 0.36, precision 0.33).
+Expect the multiplicity marginals to improve a lot and the per-splitting residual much less.
+`notebooks/per_jets_estimation_cluster.ipynb` §6b reports both, and conditions the shape
+comparison on jets where *every* compared series is non-empty so the emptiness decision is
+removed rather than averaged over.
+
+**A reporting wart the gate had, now fixed.** `LundPointEstimate.pretty()` used
+`risk is not None` as the MAP-vs-MBR discriminator, and this gate returns *before*
+`mbr_select` runs — so an MBR decode that answered the empty tree carried no risk and
+**printed itself as a MAP**. The tree was right and the label was wrong, which is the
+failure mode this repo tracks most carefully. Provenance is now explicit on the object, the
+same pattern as `coords_source`:
+
+```python
+estimator: str = "map"    # map | mbr | empty_gate | cluster
+```
+
+set at each decision point, so a gated answer reads `EMPTY-GATED groomed shower: ... (q(N=0|x)
+cleared tau BEFORE any shape decode — no estimator ran)`. The empty-tree footer was
+similarly hard-coded to the MAP's reason ("MAP is immediate stop") for *every* estimator and
+is now per-estimator — MBR reaching empty means the posterior is empty-dominated, which is
+the estimator working rather than collapsing. `inference.clusters.assert_ancestral_draws`
+also rejects a gated tree now: it carries neither `.risk` nor `.cluster_mass`, so a check
+written against those two alone would wave it into a pushforward, and it is every bit as
+much a *decision* as a medoid.
+
+**This raises the priority of the length-head recalibration below.** The composition is
+only as good as τ's ranking of `q(0|x)`, so anything that sharpens that head now improves
+the cluster layer's point summary as well as the point estimator's.
+
 ## Open questions
 
 - Should the gate be **`P(N=0)` specific, or a general `argmin` over an explicit loss on

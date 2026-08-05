@@ -70,6 +70,26 @@ def mbr_kwargs_from_decode(decode: dict) -> dict:
     )
 
 
+def cluster_kwargs_from_decode(decode: dict) -> dict:
+    """Map a `decode_params(cfg)` dict onto `mbr_cluster_set`'s cluster-layer kwargs.
+
+    Sibling of `mbr_kwargs_from_decode`, kept separate because the two are *orthogonal*:
+    the cluster layer reads more off `D`, the risk reduction reduces over `D`, and neither
+    sees the other's output (docs/PLAN_PosteriorClusters.md §8.1)."""
+    return dict(
+        method=str(decode.get("cluster_method", "hdbscan")),
+        min_cluster_size=int(decode.get("cluster_min_cluster_size", 0)),
+        min_mass=float(decode.get("cluster_min_mass", 0.05)),
+        eps_quantile=float(decode.get("cluster_eps_quantile", 0.10)),
+        split=bool(decode.get("cluster_split", False)),
+        # The SAME knob `map_or_mbr` reads, meaning the same thing at the same stage: with
+        # it set, the emptiness decision is the calibrated gate's rather than the cluster
+        # mass argmax's. No new config field — see `mbr_cluster_set` for why the argmax is
+        # the wrong rule for the N = 0 stratum.
+        empty_threshold=float(decode.get("empty_threshold", 0.0)),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cloud adapter (cells -> centres, or v2 continuous nodes -> coords)
 # ---------------------------------------------------------------------------
@@ -186,12 +206,15 @@ def _loaded_omp_runtimes() -> set:
 
     Walks dyld's image list; `realpath` so that a symlinked duplicate counts once.
 
-    **Darwin only, and empty everywhere else — deliberately, not as a stub.** What this
-    counts is runtimes that would make a thread team *fatal*, and that is a macOS
-    phenomenon: two LLVM OpenMP runtimes abort, whereas on Linux GCC's libgomp coexists
-    with the one PyTorch bundles, which is why `_guard_wasserstein_openmp` also returns
-    early there. Enumerating `/proc/self/maps` on Linux would return a number that reads
-    like a hazard and is not one.
+    An inventory, not a verdict: which of these can make a thread team *fatal* is
+    `_wasserstein_omp_conflict`'s call, taken on two snapshots of this set rather than on
+    its size, because a stranger's vendored copy is mapped here too and is harmless.
+
+    **Darwin only, and empty everywhere else — deliberately, not as a stub.** The abort
+    it feeds is a macOS phenomenon: two LLVM OpenMP runtimes abort, whereas on Linux GCC's
+    libgomp coexists with the one PyTorch bundles, which is why `_guard_wasserstein_openmp`
+    also returns early there. Enumerating `/proc/self/maps` on Linux would return paths
+    that read like a hazard and are not one.
 
     It must not RAISE off Darwin either: `_dyld_image_count` is a dyld symbol, so the
     ctypes lookup fails with `undefined symbol` on Linux, and any caller probing the
@@ -224,10 +247,38 @@ _REBUILD_HINT = (
 # only by the guard below, when a duplicate OpenMP runtime makes a team fatal.
 _EMDS_N_JOBS = None
 _OPENMP_GUARDED = False
+# Whether wasserstein's own runtime is the duplicate. None until the guard has run;
+# it is the hazard the guard acts on, and what a test must skip on.
+_OMP_CONFLICT = None
+
+
+def _wasserstein_omp_conflict(before: set, after: set, *, precommitted: bool) -> bool:
+    """Did *wasserstein* pull in a second OpenMP runtime -- as opposed to merely running
+    in a process that happens to hold several?
+
+    ``before``/``after`` bracket the dlopen of wasserstein's OpenMP extension, so
+    ``after - before`` is whatever its ``@rpath/libomp.dylib`` resolved to, and is empty
+    when that resolved to a runtime already mapped.
+
+    Identifying wasserstein's runtime is the point; counting all of them is what this
+    replaces. Third-party wheels vendor private copies -- ``sklearn/.dylibs/libomp.dylib``
+    is one, and POT imports `sklearn` when it is installed, so *every* `import energyflow`
+    maps it. Merely having scikit-learn in the environment therefore took the count from
+    one to two and downgraded a build that was correctly sharing PyTorch's runtime,
+    costing ~11x for a hazard that was not there. A stranger's copy is invisible to
+    wasserstein, whose team is created inside the runtime *it* linked; only a different
+    one under its own rpath can make that team fatal.
+
+    ``precommitted`` covers something having imported the extension before the guard ran:
+    the resolve already happened, so ``after - before`` is empty for the wrong reason and
+    nothing is left but the conservative count."""
+    if precommitted:
+        return len(after) > 1
+    return bool(after - before) and len(after) > 1
 
 
 def _guard_wasserstein_openmp() -> None:
-    """macOS: keep `wasserstein`'s OpenMP off when a *second* runtime is loaded.
+    """macOS: keep `wasserstein`'s OpenMP off when it links a runtime of its own.
 
     PyTorch bundles `torch/lib/libomp.dylib`, and `import energyflow` loads it before
     we get here (energyflow -> POT -> `ot.backend` imports torch). If `wasserstein`'s
@@ -239,9 +290,11 @@ def _guard_wasserstein_openmp() -> None:
     what downgraded OpenMP's own self-explaining "Error #15" abort into that silent
     SIGSEGV, so it is no longer set unless it is the only thing left to try.
 
-    Probe rather than guess: dlopen the OpenMP extension -- which resolves its rpath
-    but starts no parallel region, so loading is safe even though `emds` is not -- and
-    count the runtimes. Which repair is available depends on who got here first:
+    Probe rather than guess: dlopen the OpenMP extension -- which resolves its rpath but
+    starts no parallel region, so loading is safe even though `emds` is not -- bracketed
+    by a snapshot of the mapped runtimes, so the diff names the one *it* linked rather
+    than every one in the process (see `_wasserstein_omp_conflict`). Which repair is
+    available depends on who got here first:
 
       * Nothing has touched the extension yet -> take wasserstein's own documented
         Darwin opt-out (`without_openmp()`), which selects its no-OpenMP build. Clean:
@@ -256,7 +309,7 @@ def _guard_wasserstein_openmp() -> None:
     with one shared runtime, 32.7 single-threaded, 43.1 on the per-pair `emd`. The
     batched path is still worth taking, but a shared runtime is worth ~11x more --
     hence a warning that names the repair rather than a silent degradation."""
-    global _EMDS_N_JOBS, _OPENMP_GUARDED
+    global _EMDS_N_JOBS, _OPENMP_GUARDED, _OMP_CONFLICT
     if _OPENMP_GUARDED or platform.system() != "Darwin":
         return  # Linux: GCC's libgomp coexists with torch's runtime without aborting
     try:
@@ -268,14 +321,19 @@ def _guard_wasserstein_openmp() -> None:
                                  "_wasserstein_omp*.so"))
     if not sos:  # pragma: no cover - no OpenMP build exists, so nothing to guard
         return
+    before = _loaded_omp_runtimes()  # bracket the dlopen: the diff is wasserstein's own
     try:
         ctypes.CDLL(sos[0], mode=ctypes.RTLD_LOCAL)  # resolve its libomp; no OMP init
     except OSError:  # pragma: no cover - an unloadable extension fails at first use
         return
     _OPENMP_GUARDED = True
-    if len(_loaded_omp_runtimes()) <= 1:
-        return  # one runtime -> the OpenMP-parallel `emds` is safe, and ~11x faster
-    if wconfig._CAN_SET_OPENMP:
+    precommitted = not wconfig._CAN_SET_OPENMP  # extension already imported by someone
+    _OMP_CONFLICT = _wasserstein_omp_conflict(
+        before, _loaded_omp_runtimes(), precommitted=precommitted
+    )
+    if not _OMP_CONFLICT:
+        return  # shares the mapped runtime -> the parallel `emds` is safe, and ~11x faster
+    if not precommitted:
         wconfig.without_openmp()  # no extension loaded yet: pick the no-OpenMP build
         warnings.warn(
             "Two OpenMP runtimes are loaded (PyTorch's bundled libomp and the one "
@@ -536,12 +594,109 @@ def _qn_importance_weights(model, xf, nx, draws) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# The risk reduction (docs/PLAN_PosteriorClusters.md WP4a)
+# ---------------------------------------------------------------------------
+def bandwidth_quantile(D, gamma: float = 0.10) -> float:
+    """`Q_gamma` of the POSITIVE off-diagonal distances — the pre-registered epsilon.
+
+    `gamma = 0.10` is fixed before any test run and recorded with `fitted_under`. Tuning
+    epsilon against closure metrics is forbidden: it is the one free parameter the bounded
+    construction turns on, and a closure-tuned bandwidth makes gate G7 circular. The
+    quantile form also makes epsilon invariant to the `mbr_norm` / `energyflow` 1/R
+    convention, which is *why* it is a quantile rather than an absolute.
+
+    Only positive entries enter, which excludes both the zero diagonal and the
+    empty-empty pairs. That exclusion is not a convenience — it is exactly the §8.4
+    hazard: `_empty_value` puts every empty draw at mutual distance 0, so the empty clique
+    is invisible to the bandwidth rule while remaining decisive in the neighbour tally."""
+    d = np.asarray(D, dtype=float)
+    pos = d[d > 0]
+    if pos.size == 0:
+        return 0.0
+    return float(np.quantile(pos, float(gamma)))
+
+
+def _reduce_risk(D, w=None, *, loss: str = "linear", eps=None) -> np.ndarray:
+    """Row-wise Bayes risk of each candidate under the configured loss.
+
+    The general Bayes estimator is `y_hat = argmin_{y' in H} E_{y ~ q}[Delta(y', y)]`, and
+    the *character* of the answer is fixed by `Delta` (Goel & Byrne, *Computer Speech &
+    Language* **14** (2000) 115; Berger, *Statistical Decision Theory and Bayesian
+    Analysis*, Springer 1985, §2.4):
+
+      - ``linear``  — `Delta = d`, so the argmin is the Frechet median restricted to the
+        sample. **This is the merged behaviour and is bit-identical**: with `w=None` the
+        expression below is literally `D.mean(axis=1)`, and with weights it is literally
+        the `resample_to_qn` line it replaced.
+      - ``bounded`` — `Delta = 1[d > eps]`, so the risk is `1 - (neighbour fraction)` and
+        the argmin MAXIMISES the number of neighbours within `eps`: a Parzen window
+        (Silverman, *Density Estimation*, Chapman & Hall 1986, §3) evaluated on the pool,
+        i.e. a KDE mode restricted to valid draws.
+      - ``kernel``  — the same idea with a Gaussian window instead of a top hat.
+
+    `w` is uniform unless `resample_to_qn`, so the existing q(N|x) correction composes with
+    all three losses unchanged. **Cost: zero additional EMD calls.**
+
+    Two warnings that belong at the definition rather than in a plan (§8.3, §8.4):
+    under `bounded`/`kernel` the returned number is NOT an EMD — it is dimensionless and
+    in [0, 1] (bounded) or negative (kernel) — and the N = 0 stratum forms a zero-diameter
+    clique whose neighbour count is its own size at any `eps`, so a small `eps` can collapse
+    the estimate to the empty tree. That is why WP4a keeps this an eval-only side channel
+    and `.risk` keeps the linear value."""
+    D = np.asarray(D, dtype=float)
+    if loss == "linear":
+        return D.mean(axis=1) if w is None else (D * w[None, :]).sum(axis=1) / w.sum()
+    if eps is None or not np.isfinite(eps) or eps <= 0:
+        raise ValueError(
+            f"mbr_loss={loss!r} needs a positive bandwidth eps; got {eps!r}. Use "
+            f"`bandwidth_quantile(D, gamma)` — the pre-registered per-jet rule."
+        )
+    if loss == "bounded":
+        hit = (D <= float(eps)).astype(float)
+    elif loss == "kernel":
+        hit = np.exp(-0.5 * (D / float(eps)) ** 2)
+    else:
+        raise ValueError(f"unknown mbr_loss={loss!r}; expected linear | bounded | kernel")
+    num = hit.sum(axis=1) if w is None else (hit * w[None, :]).sum(axis=1)
+    den = float(D.shape[1]) if w is None else float(w.sum())
+    return -num / den if loss == "kernel" else 1.0 - num / den
+
+
+# ---------------------------------------------------------------------------
 # The estimator
 # ---------------------------------------------------------------------------
+def posterior_distances(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
+                        lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
+                        norm=False, periodic_phi=False, phi_col=-1, backend="pot"):
+    """Everything both the point estimate and the cluster layer need, computed once.
+
+    Returns `(draws, clouds, cand_idx, D)`. Factored out of `mbr_select` so `predict_set`
+    and the WP4a diagnostics read the SAME `D` the point estimate was selected from —
+    recomputing it would be `K^2` EMD solves for a matrix that is already in hand, and
+    (worse) it would let the two products drift apart under a config change."""
+    if draws is None:
+        draws = model.sample_batch(xf, nx, n_samples)
+    K = len(draws)
+    clouds_S = [
+        lund_cloud(d, geom, lnkt_cut=lnkt_cut, weight=weight, coords=coords) for d in draws
+    ]
+    if n_candidates and 0 < n_candidates < K:
+        cand_idx = list(range(n_candidates))
+    else:
+        cand_idx = list(range(K))
+    if not cand_idx:
+        return draws, clouds_S, cand_idx, np.zeros((0, 0), dtype=float)
+    clouds_C = [clouds_S[i] for i in cand_idx]
+    D = lund_emd_matrix(clouds_C, clouds_S, R=R, beta=beta, norm=norm,
+                        periodic_phi=periodic_phi, phi_col=phi_col, backend=backend, geom=geom)
+    return draws, clouds_S, cand_idx, D
+
+
 def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
                lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
                norm=False, periodic_phi=False, phi_col=-1, backend="pot",
-               resample_to_qn=False, coords_by_draw=None):
+               resample_to_qn=False, coords_by_draw=None, diagnostic_losses=(),
+               loss_quantile=0.10):
     """Sampling-based MBR (Eikema & Aziz, EMNLP 2022): pick the drawn tree of least
     mean perturbative-Lund EMD to the ``K`` draws.
 
@@ -559,29 +714,30 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     caller already drew alongside the cells. It used to re-attach the head modes, which
     threw away the one property that makes a medoid worth reporting — that it is a
     genuine posterior sample. v0 measured the price: a psi resultant ``|R| = 0.69``
-    against a truth of 0.045, out of a head whose median ``kappa`` is 0.022."""
-    if draws is None:
-        draws = model.sample_batch(xf, nx, n_samples)
-    K = len(draws)
-    clouds_S = [
-        lund_cloud(d, geom, lnkt_cut=lnkt_cut, weight=weight, coords=coords) for d in draws
-    ]
-    if n_candidates and 0 < n_candidates < K:
-        cand_idx = list(range(n_candidates))
-    else:
-        cand_idx = list(range(K))
+    against a truth of 0.045, out of a head whose median ``kappa`` is 0.022.
+
+    ``diagnostic_losses`` (WP4a of docs/PLAN_PosteriorClusters.md) is an **eval-only side
+    channel**: pass e.g. ``("bounded", "kernel")`` and the call returns
+    ``(point_estimate, {"linear": win_idx, "bounded": win_idx, ..., "eps": eps})``
+    instead of the bare estimate. The returned ``LundPointEstimate`` is untouched — same
+    tree, same ``.risk``, still the linear medoid — so ``.risk`` keeps meaning "the
+    achieved mean distance" for all fourteen of its consumers and no config field, serving
+    surface or config-hash churn is involved. It costs zero additional EMD calls: every
+    loss is another reduction over the `D` already built."""
+    draws, clouds_S, cand_idx, D = posterior_distances(
+        model, xf, nx, draws=draws, geom=geom, n_samples=n_samples, n_candidates=n_candidates,
+        lnkt_cut=lnkt_cut, weight=weight, coords=coords, R=R, beta=beta, norm=norm,
+        periodic_phi=periodic_phi, phi_col=phi_col, backend=backend,
+    )
     if not cand_idx:  # no draws at all -> honest empty tree (reflects the posterior)
         pe = model.describe_cells(xf, nx, [])
         pe.risk = 0.0
-        return pe
-    clouds_C = [clouds_S[i] for i in cand_idx]
-    D = lund_emd_matrix(clouds_C, clouds_S, R=R, beta=beta, norm=norm,
-                        periodic_phi=periodic_phi, phi_col=phi_col, backend=backend, geom=geom)
-    if resample_to_qn:  # match the support's multiplicity marginal to calibrated q(N|x)
-        w = _qn_importance_weights(model, xf, nx, draws)
-        risk = (D * w[None, :]).sum(axis=1) / w.sum()
-    else:
-        risk = D.mean(axis=1)
+        pe.estimator = "mbr"
+        return (pe, {}) if diagnostic_losses else pe
+    # match the support's multiplicity marginal to calibrated q(N|x); None == uniform, and
+    # the uniform branch of `_reduce_risk` is literally `D.mean(axis=1)` (gate G1).
+    w = _qn_importance_weights(model, xf, nx, draws) if resample_to_qn else None
+    risk = _reduce_risk(D, w, loss="linear")
     best = int(np.argmin(risk))
     win_idx = cand_idx[best]
     winner = draws[win_idx]
@@ -591,4 +747,161 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     # genuine drawn tree -> LundPointEstimate, carrying its own sampled coordinates
     pe = model.describe_cells(xf, nx, winner, win_coords)
     pe.risk = float(risk[best])
-    return pe
+    pe.estimator = "mbr"
+    if not diagnostic_losses:
+        return pe
+    eps = bandwidth_quantile(D, loss_quantile)
+    side = {"linear": win_idx, "eps": eps, "loss_quantile": float(loss_quantile)}
+    for loss in diagnostic_losses:
+        if loss == "linear":
+            continue
+        r = _reduce_risk(D, w, loss=loss, eps=eps) if eps > 0 else np.full(len(cand_idx), np.nan)
+        side[loss] = cand_idx[int(np.argmin(r))] if eps > 0 else win_idx
+    return pe, side
+
+
+# ---------------------------------------------------------------------------
+# WP2 — the set-valued prediction
+# ---------------------------------------------------------------------------
+def mbr_cluster_set(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
+                    lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
+                    norm=False, periodic_phi=False, phi_col=-1, backend="pot",
+                    resample_to_qn=False, coords_by_draw=None,
+                    method="hdbscan", min_cluster_size=0, min_mass=0.05,
+                    eps_quantile=0.10, split=False, screening_only=False,
+                    set_threshold=None, fitted_under=None, D=None,
+                    empty_threshold=0.0):
+    """One `LundPointEstimate` per posterior cluster, each a genuine draw, with the
+    cluster's posterior mass and radius (docs/PLAN_PosteriorClusters.md WP2).
+
+    Runs at **stock MBR settings**: `mbr_select`'s point estimate is bit-identical whether
+    or not this is called, because nothing here touches `risk = D.mean(axis=1)`. `D` is the
+    same matrix — pass it in (`D=`) when the caller already built it, and no EMD is solved
+    at all.
+
+    Each member goes through `describe_cells(xf, nx, winner, win_coords)`, so every
+    exemplar carries its own sampled coordinates and `coords_source="sample"` exactly as
+    the WP-C.1 medoid does. The hypothesis space stays `H = {pool}`: nothing here
+    constructs a tree the model did not generate.
+
+    The two per-jet scalars (WP3) ride along on every member as `cluster_mass` /
+    `cluster_entropy`, so existing single-estimate consumers carry them without a
+    signature change. They are deliberately not folded into one +/-: `top_mass` is a
+    probability, `entropy` is an ambiguity over discrete alternatives, and only `radii[0]`
+    is a width.
+
+    ``empty_threshold`` (default ``0.0`` == off, bit-identical) makes the **emptiness**
+    decision the same one `map_or_mbr` already takes, instead of leaving it to the mass
+    argmax. It reuses `decode.empty_threshold` and adds no config field, because it is the
+    same knob meaning the same thing at the same stage.
+
+    **Why the mass argmax is the wrong rule for the N = 0 stratum.** `_empty_value` returns
+    exactly `0` for two empty clouds, so every empty draw collapses into ONE zero-radius
+    cluster carrying the whole of `q(0|x)` — while the non-empty draws live on a continuum
+    and get *fragmented* into several clusters by the density method. The argmax therefore
+    compares one atomic lump against the largest of a fragmented competitor set, and the
+    empty stratum wins on far more jets than its own mass warrants: measured 29.8% against a
+    true rate of 16.7% on 600 held-out jets at K = 200 (~9 sigma). That is a partition-
+    granularity artifact, not physics.
+
+    Gate G3 says the empty cluster's mass and `length_pmf`'s `q(0|x)` are the SAME NUMBER
+    (`|difference| ~ 0`). So the two rules differ only in what that number is compared
+    against — a fragmented competitor set, or a threshold fitted by rate-matching and
+    frozen (`inference.length.empty_threshold_for_rate`, docs/PLAN_empty_parton_tree.md).
+    Same information, calibrated decision rule.
+
+    What moves and what does not: `members`, `masses`, `radii` and the conformal prefix are
+    **untouched** and stay mass-descending, so every existing consumer is unaffected. Only
+    `.point` moves, via `point_index`. `members[0]` keeps meaning "the top-mass exemplar" so
+    the two rules can be compared on the same object.
+
+    Note the gate is rate-matched, not per-jet accurate — AUC ~0.76-0.82, recall ~0.36 on
+    the measured arm. It fixes the empty RATE by construction; whether it fixes the right
+    JETS is a separate measurement."""
+    from .clusters import (
+        PosteriorSetEstimate,
+        assert_cluster_metric_ok,
+        cluster_posterior,
+        set_size_for,
+    )
+
+    assert_cluster_metric_ok(
+        {"mbr_beta": beta, "mbr_R": R, "mbr_coords": coords, "mbr_n_candidates": n_candidates},
+        geom,
+    )
+    if D is None:
+        draws, _clouds, cand_idx, D = posterior_distances(
+            model, xf, nx, draws=draws, geom=geom, n_samples=n_samples, n_candidates=0,
+            lnkt_cut=lnkt_cut, weight=weight, coords=coords, R=R, beta=beta, norm=norm,
+            periodic_phi=periodic_phi, phi_col=phi_col, backend=backend,
+        )
+        if not cand_idx:  # no draws at all -> an honestly empty set, not a fabricated one
+            return PosteriorSetEstimate(
+                members=[], masses=np.zeros(0), radii=np.zeros(0),
+                top_mass=float("nan"), entropy=float("nan"),
+                clusters=cluster_posterior(np.zeros((1, 1)), method="pam", backend=backend),
+            )
+    elif draws is None:
+        raise ValueError("mbr_cluster_set(D=...) also needs the `draws` that produced it")
+    w = _qn_importance_weights(model, xf, nx, draws) if resample_to_qn else None
+    # A deterministic exchangeable split: the draws are i.i.d. from q(y|x), so even/odd is
+    # as valid a split as any RNG draw and it is reproducible without carrying a seed.
+    split_index = None
+    if split:
+        split_index = np.zeros(len(draws), dtype=bool)
+        split_index[::2] = True
+    cs = cluster_posterior(
+        D, method=method, min_mass=min_mass, min_cluster_size=min_cluster_size,
+        eps_quantile=eps_quantile, weights=w, backend=backend,
+        screening_only=screening_only, split_index=split_index,
+    )
+    members = []
+    for j, e in enumerate(cs.exemplars):
+        ec = coords_by_draw[e] if (coords_by_draw is not None and e < len(coords_by_draw)) else None
+        pe = model.describe_cells(xf, nx, draws[e], ec)
+        pe.cluster_mass = float(cs.masses[j])
+        pe.cluster_entropy = float(cs.entropy)
+        pe.estimator = "cluster"
+        members.append(pe)
+
+    # --- which member is the RECOMMENDED tree: the emptiness decision -------------
+    # The N = 0 stratum's cluster is identified by its EXEMPLAR being empty. That is exact
+    # rather than heuristic: empty draws sit at mutual distance 0 and at a large constant
+    # distance from every non-empty draw, so a cluster holding any of them holds only them
+    # and its medoid is one of them.
+    empty_cluster = next((j for j, m in enumerate(members) if m.multiplicity == 0), None)
+    point_index, gate_fired, policy = 0, None, "include"
+    tau = float(empty_threshold or 0.0)
+    if tau > 0.0 and members:
+        from .length import empty_gate
+
+        policy = "gate"
+        pmf = model.length_pmf(xf, nx, mults=[len(d) for d in draws])
+        gate_fired = bool(empty_gate(pmf, tau))
+        if gate_fired:
+            # The gate says empty. Recommend the empty explanation IF the posterior has
+            # one — never fabricate it: H = {pool}, and a q(0|x) above tau with no empty
+            # draw is a disagreement between the length head and the sampler, not a tree.
+            point_index = empty_cluster if empty_cluster is not None else 0
+        elif empty_cluster == 0 and len(members) > 1:
+            # The gate says NOT empty but the mass argmax landed on the empty stratum —
+            # the granularity artifact. Recommend the top-mass NON-empty explanation.
+            point_index = 1
+        elif empty_cluster == 0:
+            point_index = 0   # the empty cluster is the only one: nothing else to offer
+
+    return PosteriorSetEstimate(
+        members=members,
+        masses=cs.masses,
+        radii=cs.radii,
+        top_mass=cs.top_mass,
+        entropy=cs.entropy,
+        clusters=cs,
+        set_size=(set_size_for(cs.masses, set_threshold) if set_threshold is not None else None),
+        set_threshold=(float(set_threshold) if set_threshold is not None else None),
+        fitted_under=fitted_under,
+        point_index=int(point_index),
+        empty_policy=policy,
+        empty_cluster=empty_cluster,
+        empty_gate_fired=gate_fired,
+    )

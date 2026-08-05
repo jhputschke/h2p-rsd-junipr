@@ -29,12 +29,24 @@ least expected perturbative-Lund EMD to the posterior
 (`decode.point_estimator=mbr`, `[mbr]` extra; two backends, `pot` default and
 `energyflow`).
 
+A single tree is still a summary, and when the posterior is **multimodal** it is a
+misleading one — the medoid of a two-lobed posterior can land in the sparse valley between
+the lobes and represent neither explanation. `decode.cluster_posterior=true` therefore
+offers a **set-valued** answer instead: `model.predict_set(...)` clusters the *same*
+distance matrix MBR already builds and returns one genuine posterior draw per cluster with
+its posterior mass, plus two per-jet scalars — `top_mass` (a probability) and `entropy` (an
+ambiguity over discrete alternatives) — beside the cluster radius, which is the one number
+of the three that is legitimately a ±. The point estimate is bit-identical with it on: the
+partition consumes the distance matrix and never sees the risk. See
+[`docs/PLAN_PosteriorClusters.md`](docs/PLAN_PosteriorClusters.md) and
+[CONFIGURATION §10](docs/CONFIGURATION.md).
+
 ## Install
 
 ```bash
 pip install -e .                 # core: torch, numpy, omegaconf, uproot
 pip install -e ".[track,serve,dev]"   # optional extras
-pip install -e ".[mbr]"          # MBR point estimator (pot backend); add ".[energyflow]" for the reference EMD
+pip install -e ".[mbr]"          # MBR point estimator + posterior clusters (pot, scikit-learn); add ".[energyflow]" for the reference EMD
 ```
 
 After a fresh clone, run once to keep notebook outputs out of git:
@@ -131,9 +143,14 @@ each other.
 > (`_wasserstein_numpy2_compat`), which is what keeps the backend multi-core.
 >
 > **If the rebuild is skipped, `mbr` degrades instead of crashing.** `_guard_wasserstein_openmp`
-> dlopens the OpenMP extension (which resolves its rpath but starts no parallel region) and
-> counts the loaded runtimes. Finding two, it either takes `wasserstein`'s own documented
-> Darwin opt-out (`wasserstein.config.without_openmp()`, selecting the no-OpenMP build) or —
+> dlopens the OpenMP extension (which resolves its rpath but starts no parallel region)
+> between two snapshots of the loaded runtimes, so the diff is the libomp *that extension*
+> linked. It acts only when that one is new — a runtime already mapped by someone else is
+> not a hazard, and counting rather than identifying meant `sklearn`'s vendored
+> `.dylibs/libomp.dylib` — which POT pulls in on every `import energyflow` — silently
+> downgraded a correctly-rebuilt `wasserstein`. On a genuine conflict it either takes
+> `wasserstein`'s own documented Darwin opt-out
+> (`wasserstein.config.without_openmp()`, selecting the no-OpenMP build) or —
 > if something already ran an EMD and committed the OpenMP build — pins `emds` to
 > `n_jobs=1`, where no second thread team is spawned. Either way a `RuntimeWarning` names
 > the rebuild. Note that `inference.mbr` no longer sets `KMP_DUPLICATE_LIB_OK=TRUE`

@@ -320,6 +320,41 @@ class DecodeConfig:
     mbr_phi_col: int = -1              # psi column index; -1 => last coordinate
     mbr_resample_to_qn: bool = False   # reweight the MBR support to the calibrated q(N|x) marginal
     #                                    (decode-layer exposure-bias fix; off keeps the plain mean risk)
+    # --- posterior cluster layer (docs/PLAN_PosteriorClusters.md WP1-WP3). Independent
+    #     of the risk reduction: the partition consumes D and never sees the risk vector,
+    #     so the MBR point estimate is BIT-IDENTICAL with these on (plan §8.1). ---------
+    cluster_posterior: bool = False     # build the K x K cluster labelling beside the point
+    #                                     estimate. Requires mbr_n_candidates == 0 (D must be
+    #                                     square) and mbr_beta == 1.0 (beta != 1 breaks the
+    #                                     triangle inequality, so the mutual-reachability
+    #                                     distance is not a metric) — RAISES otherwise, and
+    #                                     also when mbr_R < half the ground diameter. See
+    #                                     docs/PLAN_PosteriorClusters.md §4.
+    cluster_method: str = "hdbscan"     # hdbscan (density, no fixed k, native noise label) |
+    #                                     dbscan (the eps-explicit fallback) | pam (k-medoids
+    #                                     with k by silhouette — the deterministic control arm
+    #                                     for gate G2's method dependence; pure NumPy).
+    cluster_min_cluster_size: int = 0   # hdbscan/dbscan; 0 => max(5, ceil(cluster_min_mass * K))
+    cluster_eps_quantile: float = 0.10  # dbscan ONLY: eps = Q_gamma of the POSITIVE off-diagonal
+    #                                     distances. Backend- and R-invariant by construction,
+    #                                     which is why it is a quantile and not an absolute.
+    #                                     Unused under hdbscan, which takes a size instead.
+    cluster_min_mass: float = 0.05      # clusters below this merge into a residual bucket, so
+    #                                     the reported mass vector stays short. At the default
+    #                                     n_posterior_samples=500 this is only 25 draws: gate G2
+    #                                     is answerable there, the mass vector's TAIL is not.
+    cluster_split: bool = False         # sample-split the mass estimate (plan WP5.1): cluster and
+    #                                     pick exemplars on pool A, assign a fresh pool B by
+    #                                     nearest EMD, estimate masses from B. OFF keeps the
+    #                                     single-pool estimate, which is biased HIGH — the same
+    #                                     draws define the cluster and are counted into it
+    #                                     (post-selection inference; Berk et al. 2013).
+    set_alpha: float = 0.32             # conformal miscoverage for predict_set (1 sigma). The
+    #                                     guarantee is MARGINAL over jets, not conditional on x.
+    # --- risk reduction. WP4a adds NO decode field: the bounded/kernel reductions are an
+    #     eval-only side channel (`mbr_select(diagnostic_losses=...)`), so `.risk` keeps
+    #     meaning "the achieved mean distance" for all fourteen of its consumers. A
+    #     `mbr_loss` knob is WP4b and is not added until the plan's §8.5 columns justify it.
     # --- psi identifiability (docs/PLAN_prod_test_v1.md WP-C.2) ---------------------
     kappa_min_mode: float = 0.5        # below this von Mises concentration the psi MODE is
     #                                    not identified — at kappa -> 0 the density is flat
@@ -360,6 +395,15 @@ class ExperimentConfig:
     #                                    the run's own (n_jets, alpha grid). 0 keeps the
     #                                    analytic 1.36/sqrt(n) floor alone.
     tarp_stratify: bool = False        # WP-D.2: TARP additionally per Lund quadrant
+    cluster_diagnostics: bool = False  # docs/PLAN_PosteriorClusters.md WP6: per-jet
+    #                                    n_clusters / top_mass / entropy / truth_in_top, the
+    #                                    G2 medoid-in-dominant-cluster indicator, the G2'
+    #                                    oracle-set diagnostic with its mass-matched
+    #                                    random-partition null and silhouette precondition,
+    #                                    and the WP4a loss-stability columns of
+    #                                    eval/stability.py. Needs decode.point_estimator=mbr
+    #                                    (there is no D otherwise) and scikit-learn for the
+    #                                    hdbscan/dbscan methods.
     mode_audit: bool = False           # docs/PLAN_ModeMassAudit.md: exact top-k skeleton
     #                                    enumeration with dominance certificates
     #                                    (eval/mode_audit.py -> mode_audit.json). A pure
@@ -628,6 +672,13 @@ _DECODE_DEFAULTS: dict = {
     "mbr_periodic_phi": False,
     "mbr_phi_col": -1,
     "mbr_resample_to_qn": False,
+    "cluster_posterior": False,
+    "cluster_method": "hdbscan",
+    "cluster_min_cluster_size": 0,
+    "cluster_eps_quantile": 0.10,
+    "cluster_min_mass": 0.05,
+    "cluster_split": False,
+    "set_alpha": 0.32,
     "kappa_min_mode": 0.5,
 }
 
@@ -650,6 +701,7 @@ _EXPERIMENT_DEFAULTS: dict = {
     "tarp_null_reps": 0,
     "tarp_stratify": False,
     "mode_audit": False,
+    "cluster_diagnostics": False,
 }
 
 # Audit defaults, kept in sync with AuditConfig — same contract as _DECODE_DEFAULTS.

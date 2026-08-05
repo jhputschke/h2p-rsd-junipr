@@ -33,6 +33,12 @@ pot>=0.9             # tested: 0.9.7  (ot.emd2 augmented-cost EMD)
 # to enable it; it too is lazy-imported and only needed when that backend is chosen.
 # energyflow>=1.3    # reference KMT EMD (arXiv:1902.02346); needs a working `wasserstein` build
 
+# --- posterior cluster layer (decode.cluster_posterior=true) ---
+# docs/PLAN_PosteriorClusters.md WP1. Needed only for cluster_method=hdbscan|dbscan;
+# cluster_method=pam is pure NumPy, so the CI fast tier and every guard test run without
+# it. Lazy-imported inside the method, so point_estimator=map imports nothing new.
+scikit-learn>=1.3    # tested: 1.9.0  (sklearn.cluster.HDBSCAN, metric="precomputed")
+
 # --- figures (optional) ---
 # The calibration/diagnostic plots in eval/report.py and the notebooks need
 # matplotlib; it is lazy-imported and eval degrades to metrics-JSON-only without
