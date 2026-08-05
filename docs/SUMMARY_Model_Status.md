@@ -8,11 +8,12 @@ number links back to a primary record; nothing here is a new measurement.
 Primary records: `PROD_TEST_v0_RESULTS.md`, `PROD_TEST_v1_RESULTS.md`,
 `PROD_TEST_edit_RESULTS.md`, `PLAN_PosteriorClusters.md` (implementation notes),
 `PLAN_StratifiedMBR.md` §1a–§1d, `PLAN_NCeilingProbe.md` §A,
-`PLAN_lnz_spline_head.md` §6, and the run artifacts under
+`PLAN_lnz_spline_head.md` §6 and §8, and the run artifacts under
 `runs/prod_test_v1/v1_contstop_s0/…/` (`per_jet_clusters.json`,
 `per_jet_clusters_K1000.json`, `eval_metrics_wp34.json`),
 `runs/n_ceiling_probe/20260805-122832/n_ceiling_probe.json` and
-`runs/lnz_spline/lnz_spline_gates.json`.
+`runs/lnz_spline/lnz_spline_gates.json` and
+`runs/lnz_spline/offset_head_diagnostic.json`.
 
 ---
 
@@ -144,10 +145,23 @@ the v1 arms themselves, same preset and same seeds.
 | **G3 is PARTIAL, not closed** | both pre-registered clauses hold on 2/3 seeds; seed 2 misses by 4% (KS p = 0.035) | a 1.6–4.4× improvement on every seed, and still a fail by the rule written in advance. Reported as partial |
 | **The first change to improve likelihood AND calibration together** | NLL −0.041 to −0.078 nat on 4/4 arms against a control seed spread of **0.020**; `pit_ks_max` better on 4/4 | every earlier intervention moved one or neither. Worth fielding on its own numbers |
 | **The support closure was not spent** | 0.00000% below soft drop and above `z = ½` on every arm — by construction, since the spline maps the interval onto itself | v1's WP-A property is preserved, not traded |
-| **The residual MOVED to `dv`** | `dv` now fails on all three seeds (1.10× / 1.04× / 1.12×) and `dv × wide_soft` sits at ~1.0×, while `ln z` is 0.47–1.04× | `du`/`dv` are truncated normals on bounded intervals too; the same fix applies verbatim. **This is the next work package** |
+| **The residual MOVED to `dv`** | `dv` now fails on all three seeds (1.10× / 1.04× / 1.12×) and `dv × wide_soft` sits at ~1.0×, while `ln z` is 0.47–1.04× | it became the binding coordinate — and §2.6 then measured that the same fix does **not** work on it |
 | **TARP moved, mostly the right way** | `v1_base` s0/s1 cross below the null band (0.0415 → 0.0215, 0.0350 → 0.0265 vs p95 0.0275) and now pass G7; s2 worsens (0.0335 → 0.0400) | the coordinate density was contributing to the joint narrowness too — the factorization was not the only cause. 2/3 with a contrary seed is **suggestive, not a verdict** |
 | **d(MBR) is marginally worse on 4/4** | +0.0047, +0.0113, +0.0091, +0.0031 vs a control seed spread of 0.018 | small and inside the spread in magnitude, but consistently signed. The MBR metric runs on `lnDR_lnkt` and cannot see `ln z`, so a better `ln z` can only perturb which trees are drawn |
 | **A design the measurement rejected** | composing the spline on a *learnable* truncated normal is non-identifiable: `lnz_mean` → −533 on an interval of [−2.303, −0.693], `F_TN` saturated on 100% of emissions, val NLL 4.19 → 19.2 at epoch 4 | the base must be parameter-free. Recorded in `distributions.py` and pinned by a regression test so the appealing-but-broken construction is not re-proposed |
+
+### 2.6 The follow-up grid — `dv`, more seeds, more bins (`PLAN_lnz_spline_head.md` §8)
+
+Three questions, one grid, and the headline is a **negative result that is more useful than
+the positive one would have been**.
+
+| finding | evidence | consequence |
+|---|---|---|
+| **The `dv` spline does not work** | G3-dv **0/3**: `dv` 1.10→1.22×, 1.04→1.12×, 1.12→1.02× against its own same-seed control; bulk cell worse on all three; NLL +0.016/+0.000/+0.028; TARP regresses on 2/3 (seeds 0 and 1 go from passing G7 to failing) | ships **measured-and-not-recommended**, like `mbr_n`. There is no reading of the table on which it should be fielded |
+| **…and it falsifies the tilt-budget prediction that motivated it** | the per-cell mean-PIT pattern is **identical** under both families — .523/.489/.512/.484/… (truncnorm) vs .525/.492/.513/.488/… (spline) | the defect is a per-cell **location bias**, not a within-cell shape. It is a limit on what the head can *predict from its conditioning*, not on what its density can *express* |
+| **G3 over six seeds: 5/6** | `ln z` 0.47 / 0.64 / **1.04** / 0.72 / 0.90 / 0.64×, mean 0.74× | §7.2a's question answered: **1-in-6, not 1-in-3**. Formally still PARTIAL (the gate says every seed), but five of six sit comfortably under the line |
+| **`K = 16` is inconclusive and confounded** | seed 2's `ln z` 1.04→0.80×, but `psi` **0.61→1.49×** and `pit_ks_max` 0.0287→0.0380; and changing `K` changes the parameter count, hence the init, hence the draw | cannot separate "more capacity" from "a different draw", and it broke an untouched coordinate. Read as variance; **`K` stays 8 and was not selected against G3** |
+| **The six-seed NLL band** | 3.834–3.862 vs the control's 3.904–3.924 | tighter than *and* entirely below the control — `lnz_head="spline"` is worth fielding on its own numbers |
 
 ---
 
@@ -177,7 +191,7 @@ around.
 |---|---|---|
 | **N channel** | ~0.63 EMD (oracle-N 1.72 vs medoid 2.35) | **CLOSED as a lever** (§2.4). The discriminative probe ties `q(N\|x)` on identical jets (p = 0.91) while beating both trivial predictors and sitting on a flat learning curve — no evidence that `x` carries more N information than the model already extracts. The lever is *real* (the oracle keeps its +0.63) and *unreachable*: at 45% accuracy an N decision is worse than none. It is now a **product**, not a target — the calibrated ambiguity of the set layer is the honest way to report N. |
 | **ln z shape** | was 2.16× critical PIT in the quadrant holding 94% of emissions | **SPENT, and it paid — partially** (§2.5). The RQ-spline head is built, trained and measured: `ln z` falls to 0.47–1.04×, NLL improves on every seed, support unchanged. G3 is **PARTIAL** (2/3 seeds), and the residual moved to `dv`. |
-| **`du`/`dv` shape** *(new, exposed by §2.5)* | `dv` at 1.04–1.12× on all three seeds; `dv × wide_soft` at ~1.0× in the same bulk quadrant | **OPEN — and now the priced model-side lever.** Same defect, same fix, same generic primitive: `du`/`dv` are truncated normals on *constant* bounded intervals, which is strictly simpler than the case already built. `PLAN_lnz_spline_head.md` §7.1. |
+| **`dv` shape** *(exposed by §2.5)* | `dv` at 1.02–1.22× on **every** arm measured, under both density families | **TRIED AND FAILED as a density problem** (§2.6). The spline does not fix it; the per-cell bias is identical under both families. The defect is the head's **conditioning**, not its density, and the next experiment is §2.6's follow-up: give the coordinate head the cell's continuous centre, not just a learned per-cell embedding. `PLAN_lnz_spline_head.md` §8.5(1). |
 
 **Explicit stop-signs** (measured dead ends — do not respend effort here):
 - new selection rules over the existing posterior (three straight losses);
@@ -231,31 +245,27 @@ The probe's verdict re-orders everything below it. Two consequences drive the li
 0. ~~**RQ-spline ln z head**~~ — **done** (§2.5, `PLAN_lnz_spline_head.md` §6). G3 PARTIAL,
    NLL better on every seed, support unchanged, residual moved to `dv`.
 
-1. **First, a one-off diagnostic: stratify `dv`'s PIT by `ln kt` cell** — 30 minutes, and
-   it decides which fix is right. `dv` fails on all three seeds (1.04–1.12×), but *why* is
-   not established: the marginal density gradient and the within-cell offset shape are the
-   **same** on both axes (measured), so the usual "the truncated normal cannot carry the
-   shape" story does not by itself explain why `dv` fails and `du` never does. The one
-   asymmetry found is that **13.3% of emissions sit in the `ln kt` cell touching the
-   `kt_floor` cut, against 0.0% on the angular axis**. If the defect is that edge, the fix
-   is a *support* correction on `ln kt` (the `lnz_support` move again), not a spline.
+1. ~~**Diagnose `dv`, then spline it**~~ — **done, and the spline FAILED** (§2.6,
+   `PLAN_lnz_spline_head.md` §8.1). The diagnostic ruled out the `kt_floor` edge (the cell
+   touching it is one of the *best*), the tilt-budget mechanism predicted a spline would
+   work, and the experiment falsified that: the per-cell bias is **identical** under both
+   density families. `dv_head="spline"` ships measured-and-not-recommended.
 
-2. **Then spline `dv` — but not `du`.** Same generic primitive:
-   `rq_interval_{logpdf,cdf,icdf,sample}` take any `(lo, hi)`, and for the offsets those are
-   the *constant* `±half_v` rather than cell-conditional, so it is strictly simpler than the
-   case already built. **`du` is not justified**: across all six control-plus-spline
-   measurements `du` is 0.73 ± 0.09 and fails 0/6, `dv` is 1.13 ± 0.08 and fails 6/6 — ~4σ
-   apart and stable. And `dv` was already failing *before* the spline (it was seed 1's
-   `pit_ks_max` at 1.27×), so these are two independent pre-existing defects, not a chain in
-   which each fix exposes the next. Pre-register the same gate; if a third coordinate does
-   become binding it is most likely `psi` (a genuine 1.28× on control seed 2, and 3× the
-   scatter of the others), which is periodic and needs a circular treatment, not this one.
+2. **Give the coordinate head the cell's continuous centre `(c_x, c_y)`** — the experiment
+   §2.6's negative result points at, and the cheapest live hypothesis. Today the cell enters
+   the head only as a *learned embedding of a categorical id*, so nothing tells it that
+   neighbouring cells are neighbours and every cell's within-cell tilt must be learned from
+   its own emissions alone. That is exactly the shape of a per-cell location bias which more
+   output flexibility cannot touch. Two extra columns in one `torch.cat`, one flag, one
+   grid — then re-read the per-cell mean-PIT table. **If the bias shrinks the diagnosis is
+   confirmed and the fix is nearly free; if it does not, the conditioning hypothesis is dead
+   and the joint-density argument becomes the live one.** Either outcome is worth the hour,
+   which is what makes it the right next experiment.
 
-3. **Settle seed 2 rather than argue about it** (`PLAN_lnz_spline_head.md` §7.2). Either
-   seeds 3–5 at the same budget — 3 seeds cannot tell "one marginal seed" from "a 1-in-3
-   failure rate" — or `lnz_spline_bins=16` on seed 2 alone, a 15-minute test of whether the
-   4% miss is expressiveness or variance. `K = 8` was chosen, never fitted. **Do not** tune
-   `K` against G3 across all seeds afterwards; that makes the gate circular.
+3. ~~**Settle seed 2**~~ — **done** (§2.6). Six seeds give **5/6**, so it is a 1-in-6
+   marginal seed rather than a 1-in-3 failure rate; and the `K = 16` arm is confounded with
+   a re-draw (changing `K` changes the init) *and* broke `psi`, so it reads as variance.
+   `K` stays at 8 and was never selected against G3.
 
 4. **A 3-seed continue/stop spline arm**, to settle §2.5's TARP finding. Two of three
    explicit-`q(N|x)` seeds crossed below the null band once the coordinate density
@@ -324,12 +334,17 @@ both cost a regeneration + retrain and should be costed before being started.
 1. **Per-node joint coordinate density** (cINN-coords / CFM-coords, `PLAN_UPDATES.md`
    WP1) — the second fired escalation; structurally motivated by the exact kinematic
    identity `ln z = u + v − ln p_T,sum`, which no per-coordinate head can express.
-   **Deliberately still not the next step, and §2.5 sharpened why.** The spline did not
-   close G3, which by the letter of `PLAN_lnz_spline_head.md` §4 fires this — but the
-   measurement says the largest remaining defect is *another per-coordinate* one (`dv` at
-   1.04–1.12×), not the factorization. Spend 4.2(1) first: if splining `du`/`dv` closes the
-   marginal PITs everywhere and TARP *still* fails, that is a clean isolated statement that
-   the factorization is what is left, which is a far sharper trigger than today's.
+   **Still not the next step, and §2.6 sharpened why again.** Its trigger as written is
+   "the spline closes the marginal PIT but TARP still fails" — a clean isolation, because it
+   leaves the factorization as the only thing standing. That is *not* the situation: `dv`
+   fails on 10 of 10 arms under **both** density families, so a TARP failure today is
+   confounded with a marginal that is still wrong and would not be attributable. And §2.6's
+   measured defect is a per-cell *location* bias identical across families — a limit on the
+   head's **conditioning**, which a joint density does not change (it alters the family, and
+   reads the same inputs). The trigger is therefore **restated**: §7.3 fires when every
+   per-coordinate marginal PIT is below its critical value on every seed **and** TARP still
+   exceeds its own MC null band. `PLAN_lnz_spline_head.md` §8.4 carries the argument, and
+   the counter-argument against my own reading.
 2. **Not currently justified** (triggers measured false, listed so they are not
    re-proposed by default): the edit transducer as the fielded family (lost the
    head-to-head); consensus/lattice MBR or any decode that leaves `H = {pool}`; any
@@ -368,6 +383,16 @@ Recorded because each one caught a wrong conclusion this cycle:
   on the test set, not negligible beside it. A null that rests on "these two numbers are
   close" has to price both sources, or it is quoting to three decimals a test that resolves
   to one.
+- **A mechanism that contradicts a direct measurement of the same object is a hypothesis
+  about something else.** The `dv` spline was built on a tilt-budget calculation showing the
+  truncated normal *cannot* produce the tilt the data needs — correct arithmetic, and the
+  wrong conclusion. The per-cell PIT had already shown no individual cell failing, i.e. that
+  the within-cell shapes were fine; the elegant mechanism was weighted over the direct
+  observation and cost a training grid. When the two disagree, the observation wins.
+- **A negative result that explains itself is worth more than a positive one that does
+  not.** The `dv` spline failing told us something the success would have hidden: the bias
+  is *identical* under two density families, so it is a conditioning limit, and the next
+  experiment is about the head's inputs rather than its outputs.
 - **A parameterization can be correct and still untrainable.** Composing the spline on a
   *learnable* truncated normal is exactly right as mathematics — it makes the old head the
   identity special case — and it diverges, because the two parameterizations are redundant

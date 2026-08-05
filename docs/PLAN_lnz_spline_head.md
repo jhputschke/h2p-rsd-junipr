@@ -1,15 +1,25 @@
 # PLAN — the RQ-spline `ln z` head
 
-Status: **implemented, trained and measured.** The verdict is §6 below: gate G3 is
-**PARTIAL** — the `ln z` PIT falls from 1.05–2.07× its critical value to 0.47–1.04×, held-out
-NLL improves on every seed, the support closure is kept exactly, and two of three seeds
-close both pre-registered clauses while the third sits marginally over the line. The
-residual has **moved to `dv`**, which is now the binding coordinate on all three seeds.
+Status: **implemented, trained and measured, twice.** §6 is the `ln z` spline's result and
+§8 is the follow-up grid's.
 
-**Result in one line:** the spline does most of what it was authorized to do — it is the
-first change in this line of work to improve the likelihood *and* the calibration together —
-but it does not close G3 outright, and the next lever it exposes is the *same fix applied to
-the within-cell offsets* rather than the structural escalation.
+- **`lnz_head="spline"` works and is worth fielding.** Over six seeds (§8.2) the `ln z` PIT
+  falls from 1.05–2.07× its critical value to **0.47–1.04×**, five of six below the line;
+  held-out NLL improves on every arm to a band (3.834–3.862) entirely below the control's
+  (3.904–3.924); the support closure is kept exactly. Gate G3 is formally **PARTIAL**
+  because one seed of six misses by 4%.
+- **`dv_head="spline"` does NOT work** (§8.1). G3-dv is **0/3**: the spline leaves `dv`
+  the same or worse, costs a little NLL, and regresses TARP on two of three seeds. It ships
+  measured-and-not-recommended, like `mbr_n`.
+- **The reason is the useful part.** The `dv` residual is a per-cell *location* bias that a
+  truncated normal and a spline reproduce **identically, cell by cell**. It is a limit on
+  what the head can predict from its conditioning, not on what its output family can
+  express — so more density freedom cannot fix it, and neither would the joint-density
+  escalation (§8.4).
+
+**Result in one line:** one of the two coordinate fixes paid and the other did not, and the
+one that did not says the next question is about the head's *inputs*, not its density —
+which is why §7.3 is not the right next step (§8.4) and §8.5(1) is.
 
 ---
 
@@ -343,3 +353,167 @@ posterior series, calibration, anything reading `log_prob`) and to keep the reco
 point estimate under review until 7.1 lands, since that is the number the point estimate
 actually moves on. Default stays `truncnorm` either way; this is a config decision, not a
 code one.
+
+---
+
+# §8. RESULT — §7.1 fails, §7.2 settles, and §7.3's trigger has to be restated
+
+Run 2026-08-05, second grid: `dvspline_s{0,1,2}` (§7.1), `spline_s{3,4,5}` (§7.2a) and
+`spline_k16_s2` (§7.2b), same preset and budget, evaluated with the same two-tier command.
+Artifacts: `runs/lnz_spline/lnz_spline_gates.json`, `offset_head_diagnostic.json`.
+
+## 8.1 §7.1 — the `dv` spline does NOT work, and it falsifies the prediction that led to it
+
+Each arm against its own control, the `ln z`-spline arm of the **same seed**, so the row
+prices the `dv` change alone:
+
+| seed | `dv` truncnorm | `dv` **spline** | `dv × wide_soft` | was | Δ NLL | TARP | was |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 1.10× | **1.22×** | **1.23×** | 1.01× | +0.016 | 0.0430 | 0.0215 |
+| 1 | 1.04× | **1.12×** | **1.14×** | 0.94× | +0.000 | 0.0560 | 0.0265 |
+| 2 | 1.12× | **1.02×** | **1.05×** | 1.03× | +0.028 | 0.0315 | 0.0400 |
+
+**G3-dv: 0/3 on both clauses.** The spline did not fix `dv` — it is *worse* on two seeds
+and unchanged on the third, the bulk cell is worse on all three, NLL is flat-to-worse, and
+TARP/G7 regress on two of three (seeds 0 and 1 go from passing G7 to failing it). There is
+no reading of this table on which the `dv` spline should be fielded.
+
+**The prediction it was built on is falsified, and the falsification is the useful part.**
+§7.1 argued from a *tilt budget*: a truncated normal on `[-h, h]` tilts its log-density
+across the cell by `2h·μ/σ²` with `μ` clamped to `±h`, so `dv` (running at σ = 2.6h) could
+achieve 0.158 against a measured requirement of ~0.173 while `du` (at 1.7h) achieved 0.258.
+The arithmetic is right and the conclusion drawn from it was wrong.
+
+The direct measurement says why, and it was already on the page. `offset_head_diagnostic.py`
+measurement 1 showed **no individual `ln kt` cell failing** — the aggregate exceeds its
+critical value only because small per-cell mean-PIT biases fail to cancel. Re-running that
+diagnostic on the spline arm settles it:
+
+| `ln kt` cell | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| mean PIT, **truncnorm** | .523 | .489 | .512 | .484 | .517 | .476 | .525 | .499 | .534 | .573 | .531 |
+| mean PIT, **spline** | .525 | .492 | .513 | .488 | .520 | .480 | .529 | .513 | .541 | .581 | .545 |
+
+**Identical, cell by cell.** Strictly more within-cell freedom moved the bias not at all —
+if anything slightly further from 0.5 everywhere. So the defect is not a within-cell shape
+the family cannot express: it is that the head predicts a slightly wrong within-cell
+*location*, and it does so identically under two different density families. The limit is
+what the head can **know** from `(decoder state, e(x), cell embedding)`, not what it can
+express. A more flexible output that must be predicted from the same conditioning adds
+variance without addressing the bias — which is exactly the measured table above.
+
+It is not a data artifact either: the truth's marginal spectrum falls smoothly and
+monotonically on both axes (11 consecutive negative per-cell log-slopes on `ln kt`, 10 on
+`ln 1/ΔR`, **zero sign changes**), so there is no periodic structure at the cell scale for
+the model to be chasing.
+
+**Methodological note, recorded because it cost a training grid.** Measurement 3 was an
+elegant mechanism and measurement 1 was a direct observation, and they disagreed. I weighted
+the mechanism. The rule that would have caught it: *a mechanism that contradicts a direct
+measurement of the same object is a hypothesis about something else.* The per-cell PIT was
+already saying the within-cell shapes were fine.
+
+## 8.2 §7.2a — six seeds: G3 is 5/6, and seed 2 is the lone failure
+
+| seed | 0 | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| `ln z` ×crit | 0.47× | 0.64× | **1.04×** | 0.72× | 0.90× | 0.64× |
+
+Mean 0.74×, one failure, and it is the same seed 2 that missed in the first grid. So the
+question §7.2a was posed to answer — "one marginal seed, or a 1-in-3 failure rate?" — comes
+back **1 in 6**, not 1 in 3. G3 stays formally **PARTIAL** because the gate says *every*
+seed, and that verdict is unchanged. But the thing a reader should take from it moved: the
+`ln z` spline puts five of six seeds comfortably under the line (0.47–0.90×) against a
+control that failed on all three of the seeds it was run on.
+
+Held-out NLL over the six: **3.834–3.862**, a band that is both tighter than and entirely
+below the `v1_base` control band of 3.904–3.924.
+
+## 8.3 §7.2b — K=16 is inconclusive, and confounded by construction
+
+| | K=8 (seed 2) | K=16 (seed 2) |
+|---|---:|---:|
+| `ln z` ×crit | 1.042× | **0.797×** |
+| `ln_z × wide_soft` | 1.040× | 0.864× |
+| `psi` ×crit | 0.613× | **1.489×** |
+| `pit_ks_max` | 0.0287 | **0.0380** |
+| val NLL | 3.860 | 3.862 |
+
+Read literally this "fixes" seed 2. It should not be read literally, for two reasons, and
+neither is a judgement call:
+
+1. **It is confounded with a re-draw.** Changing `K` changes the head's output width, hence
+   its parameter count, hence its initialization — so `spline_k16_s2` is not seed 2 with
+   more spline capacity, it is *a different draw* that also has more spline capacity. The
+   arm cannot separate the two.
+2. **It broke `psi`**, from 0.613× to 1.489× — a coordinate the spline does not touch — and
+   `pit_ks_max` got worse overall. A change that improves the targeted coordinate while
+   introducing a new failure elsewhere on an untouched coordinate is the signature of
+   run-to-run variance, not of capacity.
+
+Combined with §8.2's 5/6, the parsimonious reading is that **seed 2 is a variance draw and
+`K = 8` is adequate**. `K` is therefore left at 8 and was not selected against G3 — doing so
+would have made the gate circular, which is why the arm was pre-registered as reported-only.
+
+## 8.4 Is §7.3 — the joint coordinate density — the right next step? **No, and not yet necessary.**
+
+It is the pre-authorized structural escalation and its motivation is real, so the answer
+needs the reasons rather than a verdict.
+
+**What would make it right.** §4 wrote the trigger as *"the spline closes the marginal PIT
+but TARP still fails"* — i.e. every per-coordinate density is demonstrably correct and the
+*joint* is still too narrow. That is a clean isolation: it leaves the factorization as the
+only thing standing. The kinematic identity `ln z = u + v − ln p_T,sum` then names the
+mechanism exactly, since it makes independence-given-cell false by construction.
+
+**Why that is not the situation.** The marginal PIT does **not** close: `dv` fails on every
+arm measured, 10 of 10, under *both* density families (1.02–1.22×). So a TARP failure today
+cannot be attributed to the factorization — it is confounded with a per-coordinate marginal
+that is still wrong. Running the expensive structural change now would produce a result
+nobody can read.
+
+**And the measured defect is not the one a joint density fixes.** §8.1 established that
+`dv`'s residual is a per-cell *location* bias, reproduced identically by a truncated normal
+and by a spline with strictly more freedom. That is a limit on what the head can **predict
+from its conditioning**, not on what its output family can **express**. A joint density
+changes the family — it lets the coordinates depend on one another given the cell — while
+reading the *same* `(decoder state, e(x), cell embedding)`. It is not targeted at a
+conditioning limit, and on the evidence of §8.1 it would inherit the same bias.
+
+**A caveat against my own reading, stated because it is the strongest counter-argument.** A
+marginal PIT is only uniform if the model's *marginal-given-cell* is right, and the true
+marginal-given-cell is obtained by integrating the true joint — so a factorized model can be
+forced into a wrong marginal by a correlation it cannot represent. On that reading `dv`'s
+failure *is* evidence for §7.3. What makes me not take it: the bias is stable across seeds
+and across two density families to the third decimal, which looks like a deterministic
+shortfall in what the head is told rather than an averaging artifact. That is a hypothesis,
+and §8.5(1) is the experiment that separates the two.
+
+**So: not next, and not necessary yet.** It stays the escalation of record, with its trigger
+**restated** so it cannot fire on a confounded run:
+
+> §7.3 fires when every per-coordinate marginal PIT is below its critical value on every
+> seed **and** TARP still exceeds its own MC null band. Until the marginals close, a TARP
+> failure is not attributable and the joint density is not the indicated fix.
+
+## 8.5 What to do instead, in order
+
+1. **Test the conditioning hypothesis — cheap, decisive, and it targets the measured
+   defect.** §8.1 says the head cannot predict the correct within-cell location from what it
+   is given. The single most likely reason is that the cell enters only as a *learned
+   embedding* of a categorical id, so nothing tells the head that cell 437 and cell 438 are
+   neighbours; every cell's within-cell tilt must be learned independently, from its own
+   emissions. Feed the cell's **continuous centre `(c_x, c_y)`** into the coordinate head
+   alongside the embedding — a two-column change to one `torch.cat`, one flag, one training
+   grid — and re-read the per-cell mean-PIT table of §8.1. If the bias shrinks, the
+   diagnosis is confirmed and the fix is nearly free. If it does not, the conditioning
+   hypothesis is dead and §7.3's counter-argument above becomes the live one, which is
+   exactly the fork worth buying.
+2. **Then re-run the `dv` question**, whichever way (1) goes. Note that `dv_head="spline"`
+   should be considered **measured and not recommended** in the meantime — the same status
+   `mbr_n` carries — rather than removed: it is bit-identical off, and a later change to the
+   conditioning may make the extra flexibility pay where today it only adds variance.
+3. **Field `lnz_head="spline"` on its own numbers.** Six seeds, 5/6 below critical, NLL
+   better than the control band on every one, support unchanged. It does not depend on any
+   of the above.
+4. **Only then §7.3**, under the restated trigger.
