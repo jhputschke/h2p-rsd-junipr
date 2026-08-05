@@ -154,6 +154,19 @@ class ARJuniprConfig:
     #                                     Both are properties of the FILE, not free knobs:
     #                                     `data.stats.check_lnz_support` verifies them against
     #                                     the loaded jets' grooming record before training.
+    # --- ln z SHAPE (docs/PLAN_lnz_spline_head.md) -----------------------------
+    # `lnz_support` fixed WHERE the density lives; this fixes what SHAPE it may take
+    # there. v1 measured that the two failures were separate: putting ln z on its
+    # interval removed every support violation and still left the PIT at 1.05-2.07x its
+    # critical value, concentrated (2.16x) in the quadrant holding 94% of emissions — a
+    # mismatch INSIDE the interval, which a truncation cannot fix. "spline" composes a
+    # monotone rational-quadratic spline (Durkan et al., arXiv:1906.04032) onto the
+    # truncated normal's CDF, so the support closure is kept exactly and the truncated
+    # normal is the spline's identity special case. "truncnorm" is the default and is
+    # bit-identical to the pre-spline path (same state_dict width, same log_prob).
+    lnz_head: str = "truncnorm"         # truncnorm | spline
+    lnz_spline_bins: int = 8            # spline pieces; only read when lnz_head=spline.
+    #                                     Costs 3K-1 head outputs per node (23 at K=8).
 
 
 @dataclass

@@ -14,6 +14,7 @@ modes). The verification copies the script's weights into this model and checks
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
@@ -22,6 +23,11 @@ import torch.nn.functional as F
 from ..distributions import (
     gauss_cdf,
     gauss_logpdf,
+    rq_interval_cdf,
+    rq_interval_icdf,
+    rq_interval_logpdf,
+    rq_interval_sample,
+    rq_spline_n_params,
     trunc_normal_cdf,
     trunc_normal_logpdf,
     trunc_normal_sample,
@@ -39,6 +45,39 @@ from .base import PosteriorModel, register_model
 # Physical coordinate names, in the column order of `yraw` / the coordinate head.
 # Shared with the WP2 per-coordinate PIT report.
 _COORD_NAMES = ("du", "dv", "ln_z", "psi")
+
+
+class CoordParams(NamedTuple):
+    """One node's coordinate-head parameters.
+
+    The first eight fields are the tuple this used to be, unchanged and in the same
+    order — so `p[:4]` still gives the within-cell offset parameters and the numbers are
+    identical under the default `lnz_head="truncnorm"`.
+
+    The ln z head fills EITHER `(lnz_mean, lnz_sig)` — the truncated normal — OR
+    `lnz_spline`, the `(..., 3K-1)` raw spline parameters; the other is `None`. They are
+    alternatives rather than a base and a warp: a spline on top of a *learnable*
+    truncated normal is non-identifiable and diverges (see `distributions.py`'s spline
+    section for the measurement). Nothing outside `_lnz_*` should read either field."""
+
+    du_mean: torch.Tensor
+    dv_mean: torch.Tensor
+    du_sig: torch.Tensor
+    dv_sig: torch.Tensor
+    lnz_mean: torch.Tensor | None
+    lnz_sig: torch.Tensor | None
+    mu: torch.Tensor
+    kappa: torch.Tensor
+    lnz_spline: torch.Tensor | None = None
+
+    def apply(self, fn) -> CoordParams:
+        """The same parameters with `fn` applied to each — indexing, broadcasting, a
+        device move. A field the active head does not use stays `None` rather than
+        becoming `fn(None)`.
+
+        NOTE the spline tensor carries a TRAILING parameter axis the other fields do not,
+        so an `fn` that indexes the last dimension must account for it."""
+        return CoordParams(*(None if t is None else fn(t) for t in self))
 
 
 def _mlp(in_dim: int, hidden: int, out_dim: int, n_layers: int) -> nn.Module:
@@ -104,6 +143,31 @@ class ARJunipr(PosteriorModel):
         # the `legacy` state_dict stays byte-identical.
         self._ln_zcut = math.log(self.lnz_zcut) if self.lnz_physical else float("-inf")
         self._ln_half = math.log(0.5)
+        # ln z SHAPE (docs/PLAN_lnz_spline_head.md); getattr-tolerant so every checkpoint
+        # config written before the field rebuilds as the truncated normal it was trained
+        # as. `truncnorm` adds no head outputs, so its state_dict is byte-identical.
+        self.lnz_head = str(getattr(m, "lnz_head", "truncnorm"))
+        if self.lnz_head not in ("truncnorm", "spline"):
+            raise ValueError(
+                f"model.lnz_head must be 'truncnorm' or 'spline', got {self.lnz_head!r}"
+            )
+        self.lnz_spline_bins = int(getattr(m, "lnz_spline_bins", 8))
+        self.lnz_spline = self.lnz_head == "spline"
+        if self.lnz_spline and not self.lnz_physical:
+            # The spline is composed on the TRUNCATED normal's CDF, which is what keeps
+            # the soft-drop support exact. On `legacy` there is no interval to warp — the
+            # base is an unbounded Normal — so the pairing is a configuration error rather
+            # than a silently different model.
+            raise ValueError(
+                "model.lnz_head='spline' needs model.lnz_support='physical': the spline "
+                "warps the truncated normal's CDF on the soft-drop interval, and 'legacy' "
+                "has no such interval (docs/PLAN_lnz_spline_head.md §2)."
+            )
+        # Head outputs the ln z density needs: 2 for the truncated normal (mean, sigma),
+        # 3K-1 for the spline, which REPLACES them rather than adding to them. So the
+        # truncnorm width stays exactly today's 8 = 6 + 2 and no output is ever dead.
+        self.lnz_n_params = (rq_spline_n_params(self.lnz_spline_bins)
+                             if self.lnz_spline else 2)
 
         emb = int(cfg.encoder.emb_dim)  # shared emb dim (encoder x_feat <-> decoder y_embed)
         self.emb_dim = emb
@@ -153,8 +217,13 @@ class ARJunipr(PosteriorModel):
         self.split_head = _mlp(
             self.dec_dim + self.ctx_dim, self.dec_dim, self.n_cells, int(m.split_head_layers)
         )
+        # Layout: [du_mean, dv_mean, du_sig, dv_sig] + <ln z block> + [psi a, psi b].
+        # The ln z block is 2 wide for the truncated normal and 3K-1 for the spline, so
+        # `truncnorm` is exactly today's 8 outputs in today's order (parity) and `spline`
+        # spends its width on the spline instead of carrying two unused numbers.
         self.coord_head = _mlp(
-            self.dec_dim + self.ctx_dim + emb, self.dec_dim, 8, int(m.coord_head_layers)
+            self.dec_dim + self.ctx_dim + emb, self.dec_dim, 6 + self.lnz_n_params,
+            int(m.coord_head_layers),
         )
 
         cx, cy = geometry.cell_center_tensors()
@@ -226,18 +295,77 @@ class ARJunipr(PosteriorModel):
         return self._apply_xattn(out, kv)
 
     # -- continuous coordinate head -----------------------------------------
-    def _coord_params(self, coord_in: torch.Tensor):
+    def _coord_params(self, coord_in: torch.Tensor) -> CoordParams:
+        """The per-node coordinate-head parameters, as a NAMED tuple.
+
+        The first eight fields are exactly the eight this returned before the spline head
+        existed, in the same order and computed from the same output slots, so
+        `lnz_head="truncnorm"` is numerically unchanged and `p[:4]` keeps working for the
+        callers that want only the within-cell offsets. `lnz_spline` is the ninth and is
+        `None` unless the spline is on — the flag is read once, here, and every ln z
+        density call goes through `_lnz_*` below rather than re-testing it."""
         p = self.coord_head(coord_in)
         du_mean = self.half_u * torch.tanh(p[..., 0])
         dv_mean = self.half_v * torch.tanh(p[..., 1])
         du_sig = F.softplus(p[..., 2]) + self.sigma_floor
         dv_sig = F.softplus(p[..., 3]) + self.sigma_floor
-        lnz_mean = p[..., 4]
-        lnz_sig = F.softplus(p[..., 5]) + self.sigma_floor
-        a, b = p[..., 6], p[..., 7]
+        w = self.lnz_n_params
+        if self.lnz_spline:
+            lnz_mean = lnz_sig = None
+            spline = p[..., 4:4 + w]
+        else:  # today's slots 4 and 5, unchanged
+            lnz_mean = p[..., 4]
+            lnz_sig = F.softplus(p[..., 5]) + self.sigma_floor
+            spline = None
+        a, b = p[..., 4 + w], p[..., 5 + w]
         kappa = torch.sqrt(a * a + b * b).clamp(1e-3, self.kappa_max)
         mu = torch.atan2(b, a)
-        return du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig, mu, kappa
+        return CoordParams(du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig,
+                           mu, kappa, spline)
+
+    # -- the ln z density, in ONE place --------------------------------------
+    # Three call sites need it (likelihood, PIT, sampler) and a fourth needs a point
+    # summary. Each dispatches here rather than testing `lnz_head` itself, which is what
+    # keeps the sampler from ever drawing from a density the likelihood does not
+    # normalize — the failure `lnz_support="physical"` was introduced to remove.
+    def _lnz_logprob(self, p: CoordParams, lnz, cx):
+        bounds = self.lnz_bounds(cx)
+        if bounds is None:
+            return gauss_logpdf(lnz, p.lnz_mean, p.lnz_sig)
+        lo, hi = bounds
+        x = lnz.clamp(min=lo, max=hi)
+        if p.lnz_spline is None:
+            return trunc_normal_logpdf(x, p.lnz_mean, p.lnz_sig, lo, hi)
+        return rq_interval_logpdf(x, lo, hi, p.lnz_spline, self.lnz_spline_bins)
+
+    def _lnz_cdf(self, p: CoordParams, lnz, cx):
+        bounds = self.lnz_bounds(cx)
+        if bounds is None:
+            return gauss_cdf(lnz, p.lnz_mean, p.lnz_sig)
+        lo, hi = bounds
+        x = torch.clamp(lnz, min=lo, max=hi)
+        if p.lnz_spline is None:
+            return trunc_normal_cdf(x, p.lnz_mean, p.lnz_sig, lo, hi)
+        return rq_interval_cdf(x, lo, hi, p.lnz_spline, self.lnz_spline_bins)
+
+    def _lnz_point(self, p: CoordParams, cx):
+        """The ln z a MODE-based decode reports.
+
+        For the truncated normal that is the untruncated mean clamped into the support —
+        its mode, and bit-identical to what this path did before. A spline density has no
+        closed-form mode, so the **median** `F^{-1}(1/2)` is reported instead: it is
+        exact, monotone-equivariant, and cheap. The distinction only reaches the MAP
+        decode, which is not the fielded point estimate (the MBR medoid is, and it carries
+        genuine sampled coordinates)."""
+        bounds = self.lnz_bounds(cx)
+        if bounds is None:
+            return p.lnz_mean
+        lo, hi = bounds
+        if p.lnz_spline is None:
+            return torch.clamp(p.lnz_mean, min=lo, max=hi)
+        half = torch.full(p.lnz_spline.shape[:-1], 0.5, device=p.lnz_spline.device,
+                          dtype=p.lnz_spline.dtype)
+        return rq_interval_icdf(half, lo, hi, p.lnz_spline, self.lnz_spline_bins)
 
     # -- WP-A: the physical ln z support -------------------------------------
     def lnz_bounds(self, cx):
@@ -274,19 +402,14 @@ class ARJunipr(PosteriorModel):
         # against the pair.
         return lo, torch.full_like(lo, self._ln_half)
 
-    def _coord_logprob(self, params, u, v, lnz, psi, cx, cy):
-        du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig, mu, kappa = params
+    def _coord_logprob(self, params: CoordParams, u, v, lnz, psi, cx, cy):
+        p = params
         du = (u - cx).clamp(-self.half_u, self.half_u)
         dv = (v - cy).clamp(-self.half_v, self.half_v)
-        ll = trunc_normal_logpdf(du, du_mean, du_sig, -self.half_u, self.half_u)
-        ll = ll + trunc_normal_logpdf(dv, dv_mean, dv_sig, -self.half_v, self.half_v)
-        bounds = self.lnz_bounds(cx)
-        if bounds is None:
-            ll = ll + gauss_logpdf(lnz, lnz_mean, lnz_sig)
-        else:
-            lo, hi = bounds
-            ll = ll + trunc_normal_logpdf(lnz.clamp(min=lo, max=hi), lnz_mean, lnz_sig, lo, hi)
-        ll = ll + vonmises_logpdf(psi, mu, kappa)
+        ll = trunc_normal_logpdf(du, p.du_mean, p.du_sig, -self.half_u, self.half_u)
+        ll = ll + trunc_normal_logpdf(dv, p.dv_mean, p.dv_sig, -self.half_v, self.half_v)
+        ll = ll + self._lnz_logprob(p, lnz, cx)
+        ll = ll + vonmises_logpdf(psi, p.mu, p.kappa)
         return ll
 
     # -- likelihood ----------------------------------------------------------
@@ -379,25 +502,18 @@ class ARJunipr(PosteriorModel):
         e = self.encode(xf, nx)
         out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
         eh_t = torch.cat([out[:, :L, :], e.unsqueeze(1).expand(-1, L, -1)], dim=-1)
-        params = self._coord_params(torch.cat([eh_t, self.y_embed(yc.clamp(min=0))], dim=-1))
-        du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig, mu, kappa = params
+        p = self._coord_params(torch.cat([eh_t, self.y_embed(yc.clamp(min=0))], dim=-1))
         cx, cy = self.cell_cx[yc], self.cell_cy[yc]
         du = (yraw[..., 0] - cx).clamp(-self.half_u, self.half_u)
         dv = (yraw[..., 1] - cy).clamp(-self.half_v, self.half_v)
-        bounds = self.lnz_bounds(cx)
-        if bounds is None:
-            lnz_pit = gauss_cdf(yraw[..., 2], lnz_mean, lnz_sig)
-        else:  # the SAME truncated normal the likelihood normalizes by, as for du/dv
-            lo, hi = bounds
-            lnz_pit = trunc_normal_cdf(
-                torch.clamp(yraw[..., 2], min=lo, max=hi), lnz_mean, lnz_sig, lo, hi
-            )
+        # the SAME object the likelihood normalizes by, whichever ln z head is fielded
+        lnz_pit = self._lnz_cdf(p, yraw[..., 2], cx)
         u = torch.stack(
             [
-                trunc_normal_cdf(du, du_mean, du_sig, -self.half_u, self.half_u),
-                trunc_normal_cdf(dv, dv_mean, dv_sig, -self.half_v, self.half_v),
+                trunc_normal_cdf(du, p.du_mean, p.du_sig, -self.half_u, self.half_u),
+                trunc_normal_cdf(dv, p.dv_mean, p.dv_sig, -self.half_v, self.half_v),
                 lnz_pit,
-                vonmises_cdf(yraw[..., 3], mu, kappa),
+                vonmises_cdf(yraw[..., 3], p.mu, p.kappa),
             ],
             dim=-1,
         )
@@ -573,12 +689,14 @@ class ARJunipr(PosteriorModel):
         dev = xf.device
         if not len(cells):
             return torch.zeros(0, 4, device=dev)
-        du_m, dv_m, du_s, dv_s, lnz_m, lnz_s, mu, kappa = self.coord_head_params(xf, nx, cells)
+        p = self.coord_head_params(xf, nx, cells)
         yc = torch.tensor([int(c) for c in cells], dtype=torch.long, device=dev)
-        du = trunc_normal_sample(du_m, du_s, -self.half_u, self.half_u, generator=generator)
-        dv = trunc_normal_sample(dv_m, dv_s, -self.half_v, self.half_v, generator=generator)
-        lnz = self._sample_lnz(lnz_m, lnz_s, self.cell_cx[yc], generator=generator)
-        psi = vonmises_sample(mu, kappa, generator=generator)
+        du = trunc_normal_sample(p.du_mean, p.du_sig, -self.half_u, self.half_u,
+                                 generator=generator)
+        dv = trunc_normal_sample(p.dv_mean, p.dv_sig, -self.half_v, self.half_v,
+                                 generator=generator)
+        lnz = self._sample_lnz(p, self.cell_cx[yc], generator=generator)
+        psi = vonmises_sample(p.mu, p.kappa, generator=generator)
         return torch.stack(
             [self.cell_cx[yc] + du, self.cell_cy[yc] + dv, lnz, psi], dim=-1
         )
@@ -617,32 +735,40 @@ class ARJunipr(PosteriorModel):
             if lens[k]:
                 yc[k, : lens[k]] = torch.as_tensor([int(c) for c in d],
                                                    dtype=torch.long, device=dev)
-        du_m, dv_m, du_s, dv_s, lnz_m, lnz_s, mu, kappa = self._coord_params_padded(xf, nx, yc)
-        du = trunc_normal_sample(du_m, du_s, -self.half_u, self.half_u, generator=generator)
-        dv = trunc_normal_sample(dv_m, dv_s, -self.half_v, self.half_v, generator=generator)
-        lnz = self._sample_lnz(lnz_m, lnz_s, self.cell_cx[yc], generator=generator)
-        psi = vonmises_sample(mu, kappa, generator=generator)
+        p = self._coord_params_padded(xf, nx, yc)
+        du = trunc_normal_sample(p.du_mean, p.du_sig, -self.half_u, self.half_u,
+                                 generator=generator)
+        dv = trunc_normal_sample(p.dv_mean, p.dv_sig, -self.half_v, self.half_v,
+                                 generator=generator)
+        lnz = self._sample_lnz(p, self.cell_cx[yc], generator=generator)
+        psi = vonmises_sample(p.mu, p.kappa, generator=generator)
         coords = torch.stack(
             [self.cell_cx[yc] + du, self.cell_cy[yc] + dv, lnz, psi], dim=-1
         )
         return [coords[k, : lens[k]] if lens[k] else empty for k in range(K)]
 
-    def _sample_lnz(self, lnz_m, lnz_s, cx, *, generator=None):
+    def _sample_lnz(self, p: CoordParams, cx, *, generator=None):
         """One `ln z` draw per element: the unbounded Normal in `legacy` mode, the
-        cell-conditional truncated normal in `physical` mode.
+        cell-conditional truncated normal in `physical` mode, and the spline-warped
+        truncated normal when `lnz_head="spline"`.
 
-        The two samplers are paired with the two densities in `_coord_logprob` here, in
-        one place, so a draw can never come from a distribution the likelihood does not
-        normalize — which is exactly the failure `physical` mode exists to remove (v0's
-        0.88% soft-drop violations came from sampling a Normal whose support the
-        grooming forbids)."""
+        The samplers are paired with the densities of `_lnz_logprob` here, in one place,
+        so a draw can never come from a distribution the likelihood does not normalize —
+        which is exactly the failure `physical` mode exists to remove (v0's 0.88%
+        soft-drop violations came from sampling a Normal whose support the grooming
+        forbids). The spline path inherits that guarantee for free: it inverts the SAME
+        composed CDF `_lnz_cdf` reports."""
         bounds = self.lnz_bounds(cx)
         if bounds is None:
-            return lnz_m + lnz_s * torch.randn(
-                lnz_m.shape, device=lnz_m.device, dtype=lnz_m.dtype, generator=generator
+            return p.lnz_mean + p.lnz_sig * torch.randn(
+                p.lnz_mean.shape, device=p.lnz_mean.device, dtype=p.lnz_mean.dtype,
+                generator=generator,
             )
         lo, hi = bounds
-        return trunc_normal_sample(lnz_m, lnz_s, lo, hi, generator=generator)
+        if p.lnz_spline is None:
+            return trunc_normal_sample(p.lnz_mean, p.lnz_sig, lo, hi, generator=generator)
+        return rq_interval_sample(lo, hi, p.lnz_spline, self.lnz_spline_bins,
+                                  generator=generator)
 
     def _coord_params_padded(self, xf, nx, yc: torch.Tensor):
         """The eight `_coord_params` tensors, each `(B, L)`, for a `(B, L)` block of
@@ -661,9 +787,9 @@ class ARJunipr(PosteriorModel):
         return self._coord_params(torch.cat([eh, self.y_embed(yc)], dim=-1))
 
     @torch.inference_mode()
-    def coord_head_params(self, xf, nx, cells):
-        """The eight coordinate-head parameters for `cells`, teacher-forced, each `(L,)`
-        — the `_coord_params` tuple `sample_coordinates` draws from.
+    def coord_head_params(self, xf, nx, cells) -> CoordParams | None:
+        """The coordinate-head parameters for `cells`, teacher-forced, each `(L,)` — the
+        `CoordParams` `sample_coordinates` draws from.
 
         Public because the von Mises `kappa` is a diagnostic in its own right: the psi
         MODE that MAP/MBR report is near-arbitrary wherever kappa is small, so a psi
@@ -673,10 +799,14 @@ class ARJunipr(PosteriorModel):
         cells = [int(c) for c in cells]
         dev = xf.device
         if not cells:
-            return tuple(torch.zeros(0, device=dev) for _ in range(8))
+            empty = torch.zeros(0, device=dev)
+            lnz = (None, None) if self.lnz_spline else (empty, empty)
+            spline = (torch.zeros(0, self.lnz_n_params, device=dev)
+                      if self.lnz_spline else None)
+            return CoordParams(empty, empty, empty, empty, *lnz, empty, empty, spline)
         self.eval()
         yc = torch.tensor([cells], dtype=torch.long, device=dev)
-        return tuple(p.squeeze(0) for p in self._coord_params_padded(xf, nx, yc))
+        return self._coord_params_padded(xf, nx, yc).apply(lambda t: t.squeeze(0))
 
     @torch.inference_mode()
     def describe_sequence(self, xf, nx, cells, coords=None, *, generator=None
@@ -730,7 +860,8 @@ class ARJunipr(PosteriorModel):
             if self.continuous_coords:
                 cell_emb = self.y_embed(yc)
                 params = self._coord_params(torch.cat([eh_t, cell_emb], dim=-1))
-                du_mean, dv_mean, _, _, lnz_mean, _, mu, kappa = params
+                du_mean, dv_mean, mu, kappa = (params.du_mean, params.dv_mean,
+                                               params.mu, params.kappa)
                 kappa_col = [float(kappa[0, t]) for t in range(L)]
                 if coords is not None:
                     c4 = torch.as_tensor(coords, dtype=cx.dtype, device=dev).reshape(1, L, 4)
@@ -741,10 +872,10 @@ class ARJunipr(PosteriorModel):
                     u_mode, v_mode = cx + du_mean, cy + dv_mean
                     # The mode of a TRUNCATED normal is its untruncated mean clamped into
                     # the support, so `physical` mode moves the reported ln z inside the
-                    # grooming boundary by construction, not by a downstream repair.
-                    bounds = self.lnz_bounds(cx)
-                    lnz_mean = (lnz_mean if bounds is None
-                                else torch.clamp(lnz_mean, min=bounds[0], max=bounds[1]))
+                    # grooming boundary by construction, not by a downstream repair. The
+                    # spline head has no closed-form mode and reports its median instead
+                    # (`_lnz_point`); both stay inside the support by construction.
+                    lnz_mean = self._lnz_point(params, cx)
                     src = "mode"
                     # --- WP-C.2: the psi mode is reported only where it is identified ---
                     weak = kappa < self.kappa_min_mode

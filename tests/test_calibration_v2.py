@@ -40,6 +40,7 @@ from h2p_rsd_junipr.eval.calibration import (
     wilson_interval,
 )
 from h2p_rsd_junipr.geometry import Geometry
+from h2p_rsd_junipr.models.ar_junipr import CoordParams
 from h2p_rsd_junipr.models.base import build_model
 
 POT_OK = importlib.util.find_spec("ot") is not None
@@ -105,7 +106,7 @@ def _self_consistent_batch(model, batch, sigma_scale=1.0, seed=0):
     eh_t = torch.cat([out[:, :L, :], e.unsqueeze(1).expand(-1, L, -1)], dim=-1)
     du_m, dv_m, du_s, dv_s, lnz_m, lnz_s, mu, kappa = model._coord_params(
         torch.cat([eh_t, model.y_embed(yc.clamp(min=0))], dim=-1)
-    )
+    )[:8]
     du_s, dv_s, lnz_s = du_s * sigma_scale, dv_s * sigma_scale, lnz_s * sigma_scale
 
     def _trunc_normal(m, s, lo, hi):
@@ -172,7 +173,8 @@ def _pin_coords(model, *, sig=0.05, kappa=20.0, scale=1.0):
         shape = coord_in.shape[:-1]
         z = torch.zeros(shape)
         s = torch.full(shape, float(sig) * float(scale))
-        return (z, z, s, s, z, s, z, torch.full(shape, float(kappa) / float(scale) ** 2))
+        return CoordParams(z, z, s, s, z, s, z,
+                           torch.full(shape, float(kappa) / float(scale) ** 2))
 
     model._coord_params = _params
 

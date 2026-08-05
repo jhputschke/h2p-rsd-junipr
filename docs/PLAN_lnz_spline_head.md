@@ -36,11 +36,13 @@ mid-run. This document is where it gets built.
 
 ---
 
-## 2. The change
+## 2. The change, as built
 
 A **monotone rational-quadratic spline** (Durkan, Bekasov, Murray & Papamakarios,
 *Neural Spline Flows*, arXiv:1906.04032) on the same soft-drop interval the truncated
-normal already uses.
+normal already uses, reached through the affine map `t = (x − lo)/(hi − lo)`:
+
+    F(x) = S(t),   p(x) = S′(t)/(hi − lo),   x = lo + (hi − lo)·S⁻¹(u).
 
 - **Config:** `model.lnz_head: "truncnorm" | "spline"`, default `"truncnorm"`. Same
   `getattr`-tolerant read as `lnz_support` / `cell_label_smoothing`, so a checkpoint config
@@ -48,17 +50,50 @@ normal already uses.
   `model.lnz_spline_bins: int = 8` alongside it, read only in `"spline"` mode.
 - **Off path bit-identical.** The spline lives beside `_coord_logprob`'s
   `trunc_normal_logpdf` branch, `_sample_lnz`'s `trunc_normal_sample` branch and
-  `coord_pit`'s `trunc_normal_cdf` branch — three call sites, one flag, and the
-  `"truncnorm"` route must be untouched byte-for-byte (the `lnz_support` precedent, and
-  what `scripts/verify_parity.py` checks).
+  `coordinate_cdfs`'s `trunc_normal_cdf` branch — collected into four `_lnz_*` dispatch
+  methods, one flag, and the `"truncnorm"` route untouched. **Verified**: same `state_dict`
+  keys and values, head width still 8, and `log_prob` / PIT / `sample` /
+  `sample_coordinates` / `describe_sequence` all agree to 0.0;
+  `scripts/verify_parity.py` still reproduces the reference v2 script bit-for-bit.
 - **The interval is unchanged.** `lnz_bounds(cx)` stays exactly as it is — cell-conditional,
   evaluated at the loosest `u` in the cell — so the factorization is not disturbed and the
-  support guarantee v1 bought is preserved. The spline maps `(lo, hi] → (0, 1]` monotonically;
-  the head emits `3K − 1` numbers per node (widths, heights, derivatives) instead of
-  `(mean, sigma)`.
+  support guarantee v1 bought is preserved by construction. The head emits `3K − 1` numbers
+  per node (widths, heights, internal derivatives) **instead of** `(mean, sigma)`, so the
+  coordinate head is `6 + (3K−1)` = 29 wide at `K = 8` against `truncnorm`'s 8, with no
+  dead outputs.
 - **Why the spline first and not the joint density:** it is strictly cheaper, it changes
   one factor rather than the factorization, and it leaves every consumer of
   `has_continuous_coords` alone. If it closes G3 the structural escalation is not needed.
+
+### 2a. The base is FIXED — a design decision the first run overturned
+
+The obvious construction is to warp the *truncated normal's* CDF, `F(x) = S(F_TN(x))`, so
+that `lnz_head="truncnorm"` is the spline's identity special case and training starts at
+today's density. That was built first, and it **diverges**.
+
+It is **non-identifiable**. Once `S` carries the shape, any `(μ, σ)` that leaves `F_TN`
+roughly linear on the interval gives the same composed density, so the pair is free to
+drift along a flat direction — and nothing in the objective pulls it back. Measured on
+seed 2 of the first 3-seed run, at epoch 13:
+
+| | diverged arm (s2) | healthy arm (s1) |
+|---|---:|---:|
+| `lnz_mean` median (interval is [−2.303, −0.693]) | **−533** | −1.22 |
+| `lnz_sig` median | **85** | 0.28 |
+| emissions with `F_TN(x)` saturated at 0 or 1 | **100%** | 0% |
+| val NLL | **20.85** | 3.97 |
+
+Val NLL went 4.19 → 19.2 at **epoch 4** and never recovered; seeds 0 and 1 were on the
+same flat direction and had merely not walked as far, so this was a latent failure of all
+three arms rather than one bad seed.
+
+The fix removes the redundancy at the root instead of bounding its symptom: the base is the
+interval's **affine** map, which has no parameters at all, and the spline is the whole
+density. `truncnorm` remains available as its own path — that is what the parity flag is
+for — it is simply no longer *nested* inside the spline. Identity initialization then means
+the **uniform** density on the interval, which is the maximum-entropy starting point and a
+stable one. `tests/test_lnz_spline.py::test_the_spline_replaces_the_base_rather_than_warping_a_learnable_one`
+pins the contract on the head's own output so the redundancy cannot reappear.
 
 ## 3. The measurement, pre-registered
 

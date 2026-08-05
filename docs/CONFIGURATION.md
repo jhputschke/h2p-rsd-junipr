@@ -466,6 +466,8 @@ continuous coordinates) over the parton tree.
 | `lnz_support` | `"legacy"` | `legacy` = the unbounded Normal on `ln z`; `physical` = a truncated normal on the interval the grooming actually leaves. See below |
 | `lnz_zcut` | `0.1` | the file's soft-drop `z_cut`; read only when `lnz_support="physical"` |
 | `lnz_beta` | `0.0` | the file's soft-drop `β`; read only when `lnz_support="physical"` |
+| `lnz_head` | `"truncnorm"` | the SHAPE `ln z` may take on that interval: `truncnorm` = the two-parameter truncated normal; `spline` = a monotone rational-quadratic spline composed on its CDF. Requires `lnz_support="physical"`. See below |
+| `lnz_spline_bins` | `8` | spline pieces `K`; read only when `lnz_head="spline"`. Costs `3K−1` extra coordinate-head outputs per node (23 at `K=8`) |
 
 **`ar_junipr_v2` vs `ar_junipr_v1`** is exactly `continuous_coords` True vs False — v1 drops
 the coordinate density and is the categorical-cell-only backbone.
@@ -522,6 +524,55 @@ every truth `ln z` lies inside the resulting interval. The second catches a conv
 > on nothing but the head. [`tests/test_nll_comparability.py`](../tests/test_nll_comparability.py)
 > pins the cross-family claim; `scripts/prod_test_edit_gates.py` refuses to rank a
 > mismatched pair.
+
+#### `lnz_head` — the shape on that interval, once the support is right
+
+`lnz_support` fixed *where* `ln z` lives. Production test v1 then measured that the two
+failures were separate: putting `ln z` on its interval removed **every** support violation
+(0.83% → 0.0000%) and still left the PIT at **1.05–2.07×** its critical value on three
+seeds, concentrated at **2.16×** in the `wide_soft` quadrant that holds 94% of emissions. A
+truncation cannot fix a mismatch *inside* the interval — the truncated normal has two free
+numbers per node and the residual is the shape beyond them.
+
+`"spline"` puts a monotone rational-quadratic spline `S: [0,1] → [0,1]` (Durkan, Bekasov,
+Murray & Papamakarios, [arXiv:1906.04032](https://arxiv.org/abs/1906.04032)) on that
+interval through the affine map `t = (x − lo)/(hi − lo)`:
+
+    F(x) = S(t),   p(x) = S′(t)/(hi − lo),   x = lo + (hi − lo)·S⁻¹(u).
+
+The **support closure is kept exactly** — `t` is an affine bijection of the interval onto
+`[0,1]` and `S` maps `[0,1]` onto itself, so no draw can leave, by construction rather than
+by a clamp — and the **PIT and the sampler come out of one object**, so they cannot drift.
+At the raw parameters' zero the widths and heights are uniform and the knot derivatives are
+1, so `S` is the identity and the density is **uniform on the interval**: the
+maximum-entropy starting point.
+
+> ⚠️ **The base is fixed, and that is a measured decision.** The first implementation
+> warped the *truncated normal's* CDF instead, `F(x) = S(F_TN(x))`, so that `truncnorm`
+> would be the identity special case. That parameterization is **non-identifiable**: once
+> `S` carries the shape, any `(μ, σ)` leaving `F_TN` roughly linear on the interval gives
+> the same density, so the pair drifts along a flat direction. It did, and it broke — on
+> seed 2 of the first 3-seed run `lnz_mean` reached **−533** against an interval of
+> `[−2.303, −0.693]`, `lnz_sig` reached **85**, `F_TN` saturated to 0 or 1 on **100%** of
+> emissions, the gradient through `S` died, and val NLL went 4.19 → 19.2 at epoch 4 and
+> never recovered. Seeds 0 and 1 were on the same flat direction and had merely not walked
+> as far. An affine base has no parameter to run away.
+> [`tests/test_lnz_spline.py`](../tests/test_lnz_spline.py) pins the contract: exactly one
+> of the two ln z parameterizations is live, and the spline arm carries no learnable base.
+
+The spline **replaces** `(mean, sigma)` rather than adding to them, so the coordinate head
+is `6 + (3K−1)` wide — 29 at `K = 8` against `truncnorm`'s 8 — and no output is ever dead.
+That is 1 365 parameters, ~1.0% of the model, and nothing else moves. `"truncnorm"` is the
+default and is bit-identical: same head width, same `state_dict`, same likelihood, same
+PIT, same draws.
+
+`spline` requires `lnz_support="physical"` and **raises** otherwise — on `legacy` there is
+no bounded interval to put a spline on, so the pairing is a configuration error rather than
+a silently different model.
+
+> The same NLL-comparability warning above applies with full force here: a spline arm's
+> NLL is comparable to a `truncnorm` arm's only because both are densities on the same
+> space with the same `lnz_support`. Compare seed to seed, and never across `lnz_support`.
 
 **`ar_junipr_v3`** is the v2 backbone with `use_multiplicity_head=True`: it factorizes
 `q(y|x) = q(N|x)·q(y|N,x)` with a dedicated categorical multiplicity head (the same head cINN
