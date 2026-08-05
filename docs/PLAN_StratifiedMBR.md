@@ -397,6 +397,48 @@ exemplar rule's failure remains on the record rather than being tuned away.
 
 ---
 
+## 1d. Where improvement lives now — the consolidated conclusion
+
+The reason this section exists: §1a–§1c and the v1 campaign between them close enough doors
+that the remaining ones can be named exactly, and re-deriving that from eight plan documents
+is how effort gets respent. `docs/SUMMARY_Model_Status.md` is the reader-facing version of
+this; what follows is the decision record.
+
+### Settled — do not re-open without new evidence
+
+| finding | the evidence that settles it |
+|---|---|
+| **The decode layer is exhausted.** | Three selection rules over the existing posterior all lost to plain centrality, at two sampling budgets: mass argmax 2.72, medoid's-cluster 2.31, N-first 2.43, vs the medoid's 2.33; `mbr_n`'s own pre-registered gate fails at −0.083 [−0.128, −0.039] (K=200) and −0.084 [−0.135, −0.030] (K=1000). |
+| **The encoder is not the bottleneck.** | Three independent lines: v1's attribution ("it is the multiplicity factorization, not the coordinate heads, the encoder, or the support"), the null aux isolation A/B (`ln_pt + abs_eta` carry the whole gain; the full-tree-LundNet trigger did **not** fire), and the flat encoder probe. |
+| **`coverage_68` was never evidence of over-confidence.** | Its own null — model as truth, same K-draw HPD — is **0.553** [0.543, 0.563]; the observed 0.546 sits inside it (§1c WP-4). A perfect model scores 0.553 at K=200. Always quote it with its K. |
+| **G7's ceiling is the reporting rule, not the model's support.** | Same sets, two rules: exemplar 0.617, pool resolution **0.793**, nominal 0.68 (§1c WP-3). A residual 20.7% support gap is real and stays stated. |
+| **The set layer's real product is calibrated ambiguity.** | G6: ECE 0.197 → **0.040** after one temperature, slope 0.97, Brier resolution 0.079 — `top_mass` predicts the *set's* error and not the medoid's. Quote it at the **K=1000** tier. |
+| **The N channel is a real lever and an unreachable one.** | Oracle-N 1.72 vs medoid 2.35, Δ **+0.629** [+0.514, +0.752] — and the best measurable n̂ *loses* to the medoid (`PLAN_NCeilingProbe.md` §A.3). |
+
+### The two levers, priced — and one of them has now been decided
+
+| lever | size | status after `PLAN_NCeilingProbe.md` |
+|---|---:|---|
+| **N channel** | ~0.63 EMD | **CLOSED as a lever.** A discriminative probe on `(x, aux)` reaches 0.4550 [0.416, 0.495] against `q(N\|x)`'s 0.4583 — paired p = 0.91 — while beating the majority class (p = 0.0064) and `n_x` (p = 0.00083), on a learning curve that is **flat over a 20× range of training data**. No evidence of headroom; the ambiguity behaves like hadronization physics. Reopening needs a *sequence-level* probe clearing 0.458 by more than the 0.063 fit-to-fit spread. |
+| **`ln z` shape** | 2.16× critical PIT on the quadrant holding 94% of emissions | **OPEN, and now the only priced model-side lever.** The RQ-spline escalation fired in `PROD_TEST_v1_RESULTS.md` §4.2/§6 and was never built; it is written up as `docs/PLAN_lnz_spline_head.md`. |
+
+### Explicit stop-signs
+
+Measured dead ends. Each one cost a run; none of them should cost a second:
+
+- **new selection rules over the existing posterior** — three straight losses, two budgets;
+- **aux-column expansion** — isolation null, the full-tree-LundNet trigger did not fire, and
+  now null for N specifically as well (`PLAN_NCeilingProbe.md` §A.2);
+- **encoder swaps** — probe flat, v1's attribution points elsewhere;
+- **a better length head, or an N-first decode fed by one** — the ceiling probe says there is
+  no sharper n̂ to feed it, and at 45% accuracy a *correct-looking* n̂ still loses to no N
+  decision at all;
+- **the bounded / kernel MBR loss as a product** — G8′ collapses to the empty clique on
+  24.5% against a 1% ceiling;
+- **reading `coverage_68` against 0.68** — its null is 0.553 at K=200.
+
+---
+
 ## WP-3 — pool-based coverage beside G7
 
 - `inference/clusters.py: pool_coverage_bound(D)` — the pool's own resolution scale
