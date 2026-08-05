@@ -2643,7 +2643,11 @@ if WRITE_ARTIFACTS:
             f"{scalar}|{key}": rows for (scalar, key), rows in CONF_TABLE.items()
         },
     }
-    out = save_metrics(METRICS, (REPO / CKPT_PATH).parent / "per_jet_clusters.json")
+    # K-suffixed off the default, so a budget arm can never clobber the K=200 record the
+    # gate verdicts were read from (docs/PLAN_StratifiedMBR.md WP2).
+    _name = ("per_jet_clusters.json" if K_DRAWS == 200
+             else f"per_jet_clusters_K{K_DRAWS}.json")
+    out = save_metrics(METRICS, (REPO / CKPT_PATH).parent / _name)
     print(f"wrote {out.relative_to(REPO)}")
 else:
     print("WRITE_ARTIFACTS = False -- nothing written")
