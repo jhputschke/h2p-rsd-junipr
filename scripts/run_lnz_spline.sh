@@ -46,11 +46,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# §7.1 / §7.2 arms are launched from the SAME script and preset so the whole comparison
+# stays one grid. `EXTRA` carries only what every arm shares; each arm's own line carries
+# what makes it that arm.
 ARMS=(
   "spline_s0|trainer.seed=0"
   "spline_s1|trainer.seed=1"
   "spline_s2|trainer.seed=2"
   "contstop_spline_s0|trainer.seed=0 model.use_multiplicity_head=false"
+  # --- §7.1: the dv spline, on top of the ln z spline, same three seeds -------------
+  "dvspline_s0|trainer.seed=0 model.dv_head=spline"
+  "dvspline_s1|trainer.seed=1 model.dv_head=spline"
+  "dvspline_s2|trainer.seed=2 model.dv_head=spline"
+  # --- §7.2a: three MORE ln z-spline seeds. 3 seeds cannot tell "one marginal seed"
+  #     from "a 1-in-3 failure rate"; 6 can. Same config as spline_s0/1/2 exactly.
+  "spline_s3|trainer.seed=3"
+  "spline_s4|trainer.seed=4"
+  "spline_s5|trainer.seed=5"
+  # --- §7.2b: is seed 2's 4% miss expressiveness or variance? K was chosen, not fitted.
+  #     ONE arm, on the seed that missed, and K is NOT tuned across seeds afterwards.
+  "spline_k16_s2|trainer.seed=2 model.lnz_spline_bins=16"
 )
 
 EXTRA="model.lnz_head=spline"

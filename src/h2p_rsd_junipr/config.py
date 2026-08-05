@@ -167,6 +167,18 @@ class ARJuniprConfig:
     lnz_head: str = "truncnorm"         # truncnorm | spline
     lnz_spline_bins: int = 8            # spline pieces; only read when lnz_head=spline.
     #                                     Costs 3K-1 head outputs per node (23 at K=8).
+    # --- the WITHIN-CELL ln kt offset (docs/PLAN_lnz_spline_head.md §7.1) -------
+    # Same defect, measured on the same instrument, on the coordinate that became binding
+    # once `ln z` was fixed. A truncated normal on [-h, h] can tilt its log-density across
+    # the cell by at most `2h*mu/sigma^2`, and `mu` is clamped to +-h by the `h*tanh`
+    # parameterization — so a WIDE sigma costs tilt authority that cannot be bought back.
+    # Measured on the trained spline arms: `dv` runs at sigma = 2.6h and can achieve a tilt
+    # of 0.158 against a data requirement of ~0.18, while `du` runs at 1.7h and achieves
+    # 0.258. That is why `dv` fails its PIT on every seed and `du` never does — and why the
+    # fix is a spline (which is flat and tilted at once) rather than more truncated normal.
+    # `du` is deliberately NOT given one: it has no measured defect (0/6 seeds).
+    dv_head: str = "truncnorm"          # truncnorm | spline
+    dv_spline_bins: int = 8             # spline pieces; only read when dv_head=spline
 
 
 @dataclass

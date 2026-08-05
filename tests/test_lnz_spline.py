@@ -315,3 +315,80 @@ def test_spline_widens_only_the_coordinate_head():
     hidden = base.coord_head[-1].in_features
     # the spline REPLACES (mean, sigma), so the delta is 3K-1-2 outputs and nothing else
     assert extra == (rq_spline_n_params(K) - 2) * (hidden + 1)
+
+
+# ---------------------------------------------------------------------------
+# the same switch on the within-cell ln kt offset (PLAN_lnz_spline_head.md §7.1)
+# ---------------------------------------------------------------------------
+def test_dv_spline_default_is_bit_identical():
+    """PARITY again, now that a second block can move the head layout: with both heads at
+    their defaults the coordinate head is still 8 wide in today's slot order."""
+    a, _ = _model(dv_head="truncnorm", lnz_head="truncnorm")
+    b, _ = _model()
+    assert a.coord_head[-1].out_features == 8
+    ka, kb = a.state_dict(), b.state_dict()
+    assert ka.keys() == kb.keys()
+    assert max(float((ka[k] - kb[k]).abs().max()) for k in ka) == 0.0
+
+
+def test_dv_spline_replaces_its_two_slots_and_nothing_else():
+    """Each spline spends its own width: 6 + (3K-1) with one on, 4 + 2*(3K-1) with both."""
+    base, _ = _model()
+    dv, _ = _model(dv_head="spline")
+    both, _ = _model(dv_head="spline", lnz_head="spline")
+    n = rq_spline_n_params(K)
+    assert base.coord_head[-1].out_features == 8
+    assert dv.coord_head[-1].out_features == 6 + n
+    assert both.coord_head[-1].out_features == 4 + 2 * n
+    p = dv.coord_head_params(torch.randn(1, 5, 5), torch.tensor([5]), [7, 23, 61])
+    assert p.dv_spline is not None
+    assert p.dv_mean is None and p.dv_sig is None, "no learnable base beside the spline"
+    assert p.du_mean is not None and p.du_sig is not None, "du keeps its truncated normal"
+
+
+def test_dv_spline_density_integrates_to_one_and_stays_in_the_cell():
+    """The two properties that make it a usable head: a proper density on the cell, and a
+    sampler that cannot leave it."""
+    m, geom = _model(dv_head="spline", seed=3)
+    xf, nx = torch.randn(1, 5, 5), torch.tensor([5])
+    cells = [12, 34, 56]
+    p = m.coord_head_params(xf, nx, cells)
+    M = 200_000
+    g = torch.Generator().manual_seed(4)
+    for t in range(len(cells)):
+        p_t = p.apply(lambda q, t=t: (q[t].expand(M, -1) if q.dim() == 2
+                                      else torch.full((M,), float(q[t]))))
+        dv = m.half_v * (2.0 * torch.rand(M, generator=g) - 1.0)
+        with torch.inference_mode():
+            dens = m._dv_logprob(p_t, dv).exp()
+        assert float(dens.mean()) * 2 * m.half_v == pytest.approx(1.0, abs=0.02)
+    torch.manual_seed(0)
+    with torch.inference_mode():
+        coords = m.sample_coordinates(xf, nx, cells * 40)
+        yc = torch.tensor([cells * 40], dtype=torch.long)
+        cy = m.cell_cy[yc][0]
+    assert bool(((coords[:, 1] - cy).abs() <= m.half_v + 1e-6).all())
+
+
+def test_dv_pit_of_drawn_offsets_is_uniform():
+    """Sampler and CDF describe the same distribution — the SBC null for the new head."""
+    m, _ = _model(dv_head="spline", seed=5)
+    xf, nx = torch.randn(1, 5, 5), torch.tensor([5])
+    p = m.coord_head_params(xf, nx, [12])
+    n = 200_000
+    p_t = p.apply(lambda q: (q[0].expand(n, -1) if q.dim() == 2
+                             else torch.full((n,), float(q[0]))))
+    torch.manual_seed(2)
+    with torch.inference_mode():
+        dv = m._dv_sample(p_t)
+        u = m._dv_cdf(p_t, dv)
+    assert bool((dv.abs() <= m.half_v + 1e-6).all())
+    assert _ks(u.numpy()) < 1.36 / math.sqrt(n)
+
+
+def test_unknown_dv_head_raises():
+    cfg = load_config(["model=ar_junipr_v2", "encoder=gru",
+                       "model.lnz_support=physical", "model.dv_head=cubic"])
+    geom = Geometry.from_config(cfg.geometry)
+    with pytest.raises(ValueError, match="model.dv_head must be"):
+        build_model(cfg, geom)

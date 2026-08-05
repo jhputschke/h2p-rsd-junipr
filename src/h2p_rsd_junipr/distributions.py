@@ -230,8 +230,12 @@ def rq_spline_inverse(y, raw, n_bins: int):
 
 def _unit(x, lo, hi):
     """The interval mapped onto [0, 1], and its width. One place, so the density, the
-    CDF and the sampler cannot disagree about where the interval is."""
-    width = (hi - lo).clamp(min=1e-9)
+    CDF and the sampler cannot disagree about where the interval is.
+
+    `lo`/`hi` may be tensors (the cell-conditional `ln z` bounds) or plain floats (the
+    constant `+-half_v` of the within-cell offsets), so the width is materialised as a
+    tensor rather than assumed to be one."""
+    width = torch.as_tensor(hi - lo, dtype=x.dtype, device=x.device).clamp(min=1e-9)
     return ((x - lo) / width).clamp(0.0, 1.0), width
 
 

@@ -58,17 +58,22 @@ class CoordParams(NamedTuple):
     `lnz_spline`, the `(..., 3K-1)` raw spline parameters; the other is `None`. They are
     alternatives rather than a base and a warp: a spline on top of a *learnable*
     truncated normal is non-identifiable and diverges (see `distributions.py`'s spline
-    section for the measurement). Nothing outside `_lnz_*` should read either field."""
+    section for the measurement). Nothing outside `_lnz_*` should read either field.
+
+    The within-cell `ln kt` offset works the same way — `(dv_mean, dv_sig)` or `dv_spline`,
+    read only through `_dv_*` — and `du` deliberately has no spline option, because it has
+    no measured defect (`model.dv_head` in `config.py` carries the numbers)."""
 
     du_mean: torch.Tensor
-    dv_mean: torch.Tensor
+    dv_mean: torch.Tensor | None
     du_sig: torch.Tensor
-    dv_sig: torch.Tensor
+    dv_sig: torch.Tensor | None
     lnz_mean: torch.Tensor | None
     lnz_sig: torch.Tensor | None
     mu: torch.Tensor
     kappa: torch.Tensor
     lnz_spline: torch.Tensor | None = None
+    dv_spline: torch.Tensor | None = None
 
     def apply(self, fn) -> CoordParams:
         """The same parameters with `fn` applied to each — indexing, broadcasting, a
@@ -168,6 +173,20 @@ class ARJunipr(PosteriorModel):
         # truncnorm width stays exactly today's 8 = 6 + 2 and no output is ever dead.
         self.lnz_n_params = (rq_spline_n_params(self.lnz_spline_bins)
                              if self.lnz_spline else 2)
+        # The same switch on the within-cell ln kt offset (docs/PLAN_lnz_spline_head.md
+        # §7.1). `du` has no such option on purpose: it has no measured defect.
+        self.dv_head = str(getattr(m, "dv_head", "truncnorm"))
+        if self.dv_head not in ("truncnorm", "spline"):
+            raise ValueError(
+                f"model.dv_head must be 'truncnorm' or 'spline', got {self.dv_head!r}"
+            )
+        self.dv_spline_bins = int(getattr(m, "dv_spline_bins", 8))
+        self.dv_spline = self.dv_head == "spline"
+        # Offset block width: today's 4 (du/dv means then sigmas) or, with the dv spline,
+        # du's 2 followed by the spline's 3K-1. The all-truncnorm layout is untouched, so
+        # slots 0..3 keep their meaning and an older checkpoint still reads correctly.
+        self.dv_n_params = (rq_spline_n_params(self.dv_spline_bins) if self.dv_spline else 2)
+        self.offset_n_params = 2 + self.dv_n_params
 
         emb = int(cfg.encoder.emb_dim)  # shared emb dim (encoder x_feat <-> decoder y_embed)
         self.emb_dim = emb
@@ -217,12 +236,13 @@ class ARJunipr(PosteriorModel):
         self.split_head = _mlp(
             self.dec_dim + self.ctx_dim, self.dec_dim, self.n_cells, int(m.split_head_layers)
         )
-        # Layout: [du_mean, dv_mean, du_sig, dv_sig] + <ln z block> + [psi a, psi b].
-        # The ln z block is 2 wide for the truncated normal and 3K-1 for the spline, so
-        # `truncnorm` is exactly today's 8 outputs in today's order (parity) and `spline`
-        # spends its width on the spline instead of carrying two unused numbers.
+        # Layout: <offset block> + <ln z block> + [psi a, psi b]. Each block is 2 wide per
+        # truncated-normal coordinate and 3K-1 for a spline, so the all-truncnorm case is
+        # exactly today's 8 outputs in today's order (parity) and every spline spends its
+        # width on itself rather than carrying unused numbers.
         self.coord_head = _mlp(
-            self.dec_dim + self.ctx_dim + emb, self.dec_dim, 6 + self.lnz_n_params,
+            self.dec_dim + self.ctx_dim + emb, self.dec_dim,
+            self.offset_n_params + self.lnz_n_params + 2,
             int(m.coord_head_layers),
         )
 
@@ -305,29 +325,69 @@ class ARJunipr(PosteriorModel):
         `None` unless the spline is on — the flag is read once, here, and every ln z
         density call goes through `_lnz_*` below rather than re-testing it."""
         p = self.coord_head(coord_in)
-        du_mean = self.half_u * torch.tanh(p[..., 0])
-        dv_mean = self.half_v * torch.tanh(p[..., 1])
-        du_sig = F.softplus(p[..., 2]) + self.sigma_floor
-        dv_sig = F.softplus(p[..., 3]) + self.sigma_floor
-        w = self.lnz_n_params
+        if self.dv_spline:  # [du_mean, du_sig] + dv spline
+            du_mean = self.half_u * torch.tanh(p[..., 0])
+            du_sig = F.softplus(p[..., 1]) + self.sigma_floor
+            dv_mean = dv_sig = None
+            dv_spline = p[..., 2:2 + self.dv_n_params]
+        else:               # today's slots 0..3, unchanged
+            du_mean = self.half_u * torch.tanh(p[..., 0])
+            dv_mean = self.half_v * torch.tanh(p[..., 1])
+            du_sig = F.softplus(p[..., 2]) + self.sigma_floor
+            dv_sig = F.softplus(p[..., 3]) + self.sigma_floor
+            dv_spline = None
+        o, w = self.offset_n_params, self.lnz_n_params
         if self.lnz_spline:
             lnz_mean = lnz_sig = None
-            spline = p[..., 4:4 + w]
+            spline = p[..., o:o + w]
         else:  # today's slots 4 and 5, unchanged
-            lnz_mean = p[..., 4]
-            lnz_sig = F.softplus(p[..., 5]) + self.sigma_floor
+            lnz_mean = p[..., o]
+            lnz_sig = F.softplus(p[..., o + 1]) + self.sigma_floor
             spline = None
-        a, b = p[..., 4 + w], p[..., 5 + w]
+        a, b = p[..., o + w], p[..., o + w + 1]
         kappa = torch.sqrt(a * a + b * b).clamp(1e-3, self.kappa_max)
         mu = torch.atan2(b, a)
         return CoordParams(du_mean, dv_mean, du_sig, dv_sig, lnz_mean, lnz_sig,
-                           mu, kappa, spline)
+                           mu, kappa, spline, dv_spline)
 
     # -- the ln z density, in ONE place --------------------------------------
     # Three call sites need it (likelihood, PIT, sampler) and a fourth needs a point
     # summary. Each dispatches here rather than testing `lnz_head` itself, which is what
     # keeps the sampler from ever drawing from a density the likelihood does not
     # normalize — the failure `lnz_support="physical"` was introduced to remove.
+    # -- the within-cell ln kt offset, in ONE place ---------------------------
+    # Same three call sites as ln z, and the same reason to collect them. The bounds are
+    # the CONSTANT `+-half_v` rather than cell-conditional, which makes this the simpler
+    # of the two splines even though it was built second.
+    def _dv_logprob(self, p: CoordParams, dv):
+        if p.dv_spline is None:
+            return trunc_normal_logpdf(dv, p.dv_mean, p.dv_sig, -self.half_v, self.half_v)
+        return rq_interval_logpdf(dv, -self.half_v, self.half_v, p.dv_spline,
+                                  self.dv_spline_bins)
+
+    def _dv_cdf(self, p: CoordParams, dv):
+        if p.dv_spline is None:
+            return trunc_normal_cdf(dv, p.dv_mean, p.dv_sig, -self.half_v, self.half_v)
+        return rq_interval_cdf(dv, -self.half_v, self.half_v, p.dv_spline,
+                               self.dv_spline_bins)
+
+    def _dv_sample(self, p: CoordParams, *, generator=None):
+        if p.dv_spline is None:
+            return trunc_normal_sample(p.dv_mean, p.dv_sig, -self.half_v, self.half_v,
+                                       generator=generator)
+        return rq_interval_sample(-self.half_v, self.half_v, p.dv_spline,
+                                  self.dv_spline_bins, generator=generator)
+
+    def _dv_point(self, p: CoordParams):
+        """The `dv` a MODE-based decode reports — the truncated normal's clamped mean, or
+        the spline's median (same convention, and the same reason, as `_lnz_point`)."""
+        if p.dv_spline is None:
+            return p.dv_mean
+        half = torch.full(p.dv_spline.shape[:-1], 0.5, device=p.dv_spline.device,
+                          dtype=p.dv_spline.dtype)
+        return rq_interval_icdf(half, -self.half_v, self.half_v, p.dv_spline,
+                                self.dv_spline_bins)
+
     def _lnz_logprob(self, p: CoordParams, lnz, cx):
         bounds = self.lnz_bounds(cx)
         if bounds is None:
@@ -407,7 +467,7 @@ class ARJunipr(PosteriorModel):
         du = (u - cx).clamp(-self.half_u, self.half_u)
         dv = (v - cy).clamp(-self.half_v, self.half_v)
         ll = trunc_normal_logpdf(du, p.du_mean, p.du_sig, -self.half_u, self.half_u)
-        ll = ll + trunc_normal_logpdf(dv, p.dv_mean, p.dv_sig, -self.half_v, self.half_v)
+        ll = ll + self._dv_logprob(p, dv)
         ll = ll + self._lnz_logprob(p, lnz, cx)
         ll = ll + vonmises_logpdf(psi, p.mu, p.kappa)
         return ll
@@ -511,7 +571,7 @@ class ARJunipr(PosteriorModel):
         u = torch.stack(
             [
                 trunc_normal_cdf(du, p.du_mean, p.du_sig, -self.half_u, self.half_u),
-                trunc_normal_cdf(dv, p.dv_mean, p.dv_sig, -self.half_v, self.half_v),
+                self._dv_cdf(p, dv),
                 lnz_pit,
                 vonmises_cdf(yraw[..., 3], p.mu, p.kappa),
             ],
@@ -693,8 +753,7 @@ class ARJunipr(PosteriorModel):
         yc = torch.tensor([int(c) for c in cells], dtype=torch.long, device=dev)
         du = trunc_normal_sample(p.du_mean, p.du_sig, -self.half_u, self.half_u,
                                  generator=generator)
-        dv = trunc_normal_sample(p.dv_mean, p.dv_sig, -self.half_v, self.half_v,
-                                 generator=generator)
+        dv = self._dv_sample(p, generator=generator)
         lnz = self._sample_lnz(p, self.cell_cx[yc], generator=generator)
         psi = vonmises_sample(p.mu, p.kappa, generator=generator)
         return torch.stack(
@@ -738,8 +797,7 @@ class ARJunipr(PosteriorModel):
         p = self._coord_params_padded(xf, nx, yc)
         du = trunc_normal_sample(p.du_mean, p.du_sig, -self.half_u, self.half_u,
                                  generator=generator)
-        dv = trunc_normal_sample(p.dv_mean, p.dv_sig, -self.half_v, self.half_v,
-                                 generator=generator)
+        dv = self._dv_sample(p, generator=generator)
         lnz = self._sample_lnz(p, self.cell_cx[yc], generator=generator)
         psi = vonmises_sample(p.mu, p.kappa, generator=generator)
         coords = torch.stack(
@@ -860,8 +918,8 @@ class ARJunipr(PosteriorModel):
             if self.continuous_coords:
                 cell_emb = self.y_embed(yc)
                 params = self._coord_params(torch.cat([eh_t, cell_emb], dim=-1))
-                du_mean, dv_mean, mu, kappa = (params.du_mean, params.dv_mean,
-                                               params.mu, params.kappa)
+                du_mean, mu, kappa = params.du_mean, params.mu, params.kappa
+                dv_mean = self._dv_point(params)
                 kappa_col = [float(kappa[0, t]) for t in range(L)]
                 if coords is not None:
                     c4 = torch.as_tensor(coords, dtype=cx.dtype, device=dev).reshape(1, L, 4)
