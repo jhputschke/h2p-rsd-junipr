@@ -68,7 +68,8 @@ posterior draw carrying its own sampled coordinates.
 | `truth` | the parton tree $y$ | — |
 | `rsd` | plain RSD, the hadron sequence $x$ | the baseline to beat |
 | `mbr` | the **linear medoid** — today's decode headline | yes |
-| `set0` | `predict_set().members[0]`, the **top-mass exemplar** | yes — the set approach's point summary |
+| `set0` | `predict_set().members[0]`, the **top-mass exemplar** | yes — the mass-argmax summary |
+| `set0_gated` | the same set, with **emptiness decided by the frozen $\tau$** instead of by the mass argmax | yes — see §6b |
 | `setbest` | the member closest to truth | **no** — an ORACLE, diagnostic only |
 | `post` | one posterior draw | the scale reference, not a competitor |
 
@@ -214,8 +215,29 @@ PT_MIN  = None
 PT_MAX  = None
 N_JETS  = 600          # the K^2 EMD block is the cost here -- run the probe in 5a first
 SEED    = 1234
-DEVICE  = "cpu"
-TORCH_THREADS = 4
+# "auto" -> cuda when available, else cpu. Deliberately NOT `select_device()`, which would
+# pick MPS on Apple Silicon: MPS does not work for this decode. Only "cuda" and "cpu" are
+# supported, and section 2 raises on "mps" rather than letting it fail somewhere downstream.
+#
+# This is the one place this notebook departs from per_jets_estimation.ipynb, which pins
+# "cpu" because at batch 1 a GPU never amortises its dispatch overhead. Here it does: the
+# cluster layer needs the FULL K x K block (mbr_n_candidates is forced to 0), so each jet
+# costs K coordinate draws plus K^2 EMD solves instead of a 16-candidate slice, and the
+# sampling half is large enough to be worth a GPU. On the ARM GB10 leaving this at "cpu"
+# makes the pass very long.
+DEVICE  = "auto"       # auto | cuda | cpu   (never mps)
+TORCH_THREADS = 4      # CPU only; ignored on cuda
+
+# --- aux conditioning (section 3) -------------------------------------------
+# The encoder's aux columns are GROOMED per-jet scalars (docs/PLAN_Input.md), so they mean
+# what the checkpoint learned only if this file was written with the same
+# (z_cut, beta, kt_floor, kt_floor_sec). True RAISES on a mismatch; set it False only when
+# the grooming shift IS the measurement.
+PROVENANCE_STRICT = True
+# A jet whose aux sources are sentinels (NaN, -1: a column written before it existed) is
+# dropped rather than killing the build. Above this FRACTION it raises instead -- that many
+# is a schema mismatch, not stragglers, and dropping them would reshape the population.
+AUX_MAX_DROP = 0.01
 
 # --- decode -----------------------------------------------------------------
 # K is what the mass vector's RESOLUTION is. At K = 200 and CLUSTER_MIN_MASS = 0.05 a
@@ -315,7 +337,12 @@ from h2p_rsd_junipr.eval.clusters import fit_mass_temperature, reliability, temp
 from h2p_rsd_junipr.eval.closure import lund_tree_str
 from h2p_rsd_junipr.eval.report import save_metrics
 from h2p_rsd_junipr.eval.stability import loss_stability_row, summarise_stability
-from h2p_rsd_junipr.features import AUX_FEATURES, node_raw
+from h2p_rsd_junipr.features import (
+    AUX_FEATURES,
+    aux_source_fields,
+    aux_vector,
+    node_raw,
+)
 from h2p_rsd_junipr.geometry import Geometry
 from h2p_rsd_junipr.inference.clusters import (
     assert_cluster_metric_ok,
@@ -336,7 +363,7 @@ from h2p_rsd_junipr.inference.mbr import (
 )
 from h2p_rsd_junipr.models.base import build_model
 from h2p_rsd_junipr.train.checkpoint import load_for_inference
-from h2p_rsd_junipr.train.trainer import seed_everything, select_device
+from h2p_rsd_junipr.train.trainer import seed_everything
 
 # --- style (inherited from per_jets_estimation.ipynb) ------------------------
 SURFACE, INK, INK_2, MUTED, GRID, AXIS = (
@@ -349,6 +376,7 @@ C_MBR   = "#eb6834"    # MBR linear medoid    -- orange (slot 2)
 C_POST  = "#199e70"    # posterior draw       -- aqua   (slot 3), dashed
 C_SET0  = "#9a4fc4"    # top-mass exemplar    -- violet (slot 4)
 C_BEST  = "#b8a11f"    # oracle best member   -- ochre  (slot 5), never a headline
+C_GATE  = "#0f8c9e"    # gated exemplar       -- teal   (slot 6)
 # Cluster membership inside ONE jet. Categorical, not sequential: cluster ids are labels,
 # and a sequential ramp would suggest an ordering the partition does not carry.
 C_CLUSTER = ["#9a4fc4", "#199e70", "#eb6834", "#2a78d6", "#b8a11f", "#c44f8a"]
@@ -486,7 +514,15 @@ $R$ bound is computed from *this* geometry rather than hard-coded at 8.485, so a
 
 code(r'''
 seed_everything(SEED)
-device = select_device() if DEVICE == "auto" else torch.device(DEVICE)
+# cuda when available, else cpu -- and NEVER mps, which does not work for this decode.
+# `select_device()` (cuda > mps > cpu) is deliberately not used for exactly that reason.
+if str(DEVICE).startswith("mps"):
+    raise ValueError(
+        "MPS does not work for this decode -- use DEVICE='cuda' or DEVICE='cpu' ('auto' "
+        "picks cuda when it is available and cpu otherwise, and never mps)."
+    )
+device = (torch.device("cuda" if torch.cuda.is_available() else "cpu")
+          if DEVICE == "auto" else torch.device(DEVICE))
 
 CKPT = (REPO / CKPT_PATH) if not Path(CKPT_PATH).is_absolute() else Path(CKPT_PATH)
 info = load_for_inference(str(CKPT), map_location=device)
@@ -580,28 +616,166 @@ every empty draw at mutual distance **exactly 0**, so the $N=0$ stratum is a zer
 clique that any density method finds by construction, and its mass *is* $q(0\mid x)$ — the
 one quantity v1 measured as well-calibrated while every point estimator mishandled it. §9
 checks that identity (gate G3).
+
+### The aux conditioning, and why this section checks it
+
+The encoder is built for a fixed set of **aux** columns (`model.aux_feature_names`, printed
+in §2) — per-jet *groomed* scalars the primary hadron sequence structurally cannot carry
+(docs/PLAN_Input.md). Every number below is conditioned on them, so this section does not
+merely pass them through:
+
+- **Provenance.** Aux is groomed with `kt_floor_sec`, the **off-spine** floor — not the
+  `kt_floor` that `x` and `y` use. Two files can therefore agree on `kt_floor` and still
+  carry aux built at a different scale, a shift the encoder cannot see and would read as
+  physics. The whole tuple $(z_\mathrm{cut}, \beta, k_{t,\mathrm{floor}},
+  k_{t,\mathrm{floor}}^\mathrm{sec})$ is compared against the **training** file's, recorded
+  in the artifact §0 read from, and a mismatch **raises** unless `PROVENANCE_STRICT = False`.
+  The same tuple must also be single-valued across the file: a merged file whose halves were
+  groomed differently has no one aux scale.
+- **Sentinels.** The reader fills an aux column the writer never produced with a *sentinel*
+  (NaN, or $-1$) rather than failing, and `MatchedLundDataset` then raises on the first jet
+  that hits one — one bad jet, a dead section, no count. Here the aux vector is built for
+  every jet first: jets that cannot supply it are **dropped and counted**, and if the drop
+  exceeds `AUX_MAX_DROP` it raises instead, because at that point it is the wrong file
+  rather than a few stragglers. A file with *no* usable aux fails with the columns named.
+- **Range.** The per-feature mean, spread and range of what the encoder is actually fed are
+  printed, and the secondary-plane population numbers are shown beside the **training**
+  file's. Aux far outside its training range is extrapolated conditioning, and every cluster
+  mass downstream inherits that.
+
+The matrix itself stays available as `AUX_X` — one row per kept jet, one column per feature
+in `AUX` order — for stratifying any residual in §7 by what the model was actually told.
 """)
 
 code(r'''
+# THE guard, and it is checked against the CHECKPOINT rather than the artifact: a
+# checkpoint always records the file it trained on, so this holds on every route into
+# section 0 -- including the one where there is no artifact to cross-check against.
 TRAIN_PATH = str(OmegaConf.select(cfg, "data.path") or "")
 assert str(ROOT_PATH) != TRAIN_PATH, (
     f"ROOT_PATH is {ROOT_PATH!r}, the file this checkpoint TRAINED on. Not a closure test."
 )
 
 jets = load_rntuple(str(REPO / ROOT_PATH), NTUPLE_NAME)
+if not jets:
+    # `load_rntuple` PRINTS and returns None when the file or uproot is unavailable, and
+    # its other callers fall back to synthetic jets. There is no fallback here: the aux
+    # conditioning columns exist only on the RNTuple path (docs/PLAN_Input.md), so a
+    # synthetic stand-in would be a proxy built from x -- exactly what aux is not.
+    raise FileNotFoundError(f"no jets read from {REPO / ROOT_PATH}:{NTUPLE_NAME}")
 jets = select_pt_range(jets, var=PT_VAR, lo=PT_MIN, hi=PT_MAX)
+
+# --- what the aux columns look like on the FULL file --------------------------
+# Taken before the len(x) > 0 cut, because that is the population the artifact's
+# `population` block measured; comparing the two only means something on the same cut,
+# and a pT window would break it, so the comparison is skipped when one is set.
+POP_HERE = None
+if PT_MIN is None and PT_MAX is None and jets:
+    _ns = np.array([j.get("x_nsec", -1) for j in jets], dtype=float)
+    _pt = np.array([j.get("jet_pt", np.nan) for j in jets], dtype=float)
+    if np.all(_ns >= 0) and np.isfinite(_pt).all():
+        POP_HERE = {"mean_nsec": float(_ns.mean()),
+                    "p_nsec_zero": float((_ns == 0).mean()),
+                    "mean_jet_pt": float(_pt.mean())}
 
 _n_in = len(jets)
 jets = [j for j in jets if len(j["x"][0])]
 if not jets:
     raise RuntimeError("no jets survived the selection")
 
+
+# --- grooming provenance: the PAIR of floors, not kt_floor alone --------------
+# `kt_floor_sec` is the OFF-SPINE floor the aux traversal used, so when it differs from
+# `kt_floor` the aux columns are groomed LOOSER than the x/y sequences beside them (by
+# design, cpp/include/lund_io.hpp). Two files can therefore agree on `kt_floor` and still
+# carry aux built at different scales -- a shift the encoder cannot see and would read as
+# physics. Same pair `scripts/check_disjoint.py` compares.
+def _prov_same(a, b):
+    """NaN-aware equality for one provenance scalar; a missing reference never fails."""
+    if b is None:
+        return True
+    a, b = float(a), float(b)
+    return ((math.isnan(a) and math.isnan(b))
+            or math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-9))
+
+
+PROV_KEYS = ("z_cut", "beta", "kt_floor", "kt_floor_sec")
+_cols = {k: np.array([j.get(k, np.nan) for j in jets], dtype=float) for k in PROV_KEYS}
+_mixed = [k for k, v in _cols.items() if np.unique(v[np.isfinite(v)]).size > 1]
+if _mixed:
+    raise RuntimeError(
+        f"{ROOT_PATH} is not groomed uniformly: {_mixed} take more than one value across "
+        f"its jets, so its halves were written at different scales and their aux columns "
+        f"are not the same quantity. Evaluate them separately."
+    )
+PROV = {k: float(v[0]) for k, v in _cols.items()}
+# The reference is the TRAINING file's provenance -- the grooming the aux inputs meant
+# something under. `disjoint_check.provenance_a` carries it; `run.provenance` is the eval
+# file's own and stands in when the disjointness record is absent.
+_run = (_M or {}).get("run", {})
+PROV_REF = (_run.get("disjoint_check") or {}).get("provenance_a") or _run.get("provenance")
+PROV_BAD = [k for k in PROV_KEYS if not _prov_same(PROV[k], (PROV_REF or {}).get(k))]
+if PROV_BAD:
+    # `kt_floor_sec` governs the aux columns alone; the other three govern x and y
+    # themselves, and so bite on every checkpoint whether or not it reads aux.
+    _spine = [k for k in PROV_BAD if k != "kt_floor_sec"]
+    _msg = (
+        "grooming provenance differs from the training file's on "
+        + ", ".join(f"{k} = {PROV[k]:g} here vs {float(PROV_REF[k]):g} there"
+                    for k in PROV_BAD)
+        + (" -- x and y themselves were built at a different scale" if _spine else
+           " -- every aux column is a GROOMED quantity, built at the OFF-SPINE floor, so "
+           "on this file it does not mean what it meant in training, and the encoder has "
+           "no way to see the difference")
+    )
+    if PROVENANCE_STRICT and (_spine or AUX):
+        raise RuntimeError(
+            f"{_msg}. Set PROVENANCE_STRICT = False if that shift IS the measurement."
+        )
+    print(f"[warn] {_msg}")
+
+# --- the aux pre-flight -------------------------------------------------------
+# `MatchedLundDataset` checks only that the source FIELDS exist, then raises on the first
+# jet whose values are sentinels (NaN, -1: a column the writer never filled), which turns
+# one bad jet into a dead section and names no count. Screen here instead, and let the
+# FRACTION dropped decide whether those are stragglers or the wrong file.
+AUX_SRC = aux_source_fields(AUX)
+AUX_X = np.zeros((len(jets), len(AUX)), dtype=float)
+AUX_DROPPED, AUX_DROP_FRAC = 0, 0.0
+if AUX:
+    _ok, _why = np.zeros(len(jets), dtype=bool), None
+    for _i, _j in enumerate(jets):
+        try:
+            AUX_X[_i] = aux_vector(_j, AUX)
+            _ok[_i] = True
+        except (KeyError, ValueError) as exc:
+            _why = _why or str(exc)
+    AUX_DROPPED = int((~_ok).sum())
+    AUX_DROP_FRAC = float(AUX_DROPPED) / len(_ok)
+    if not _ok.any():
+        raise RuntimeError(
+            f"the checkpoint conditions on {list(AUX)}, read from {list(AUX_SRC)}, and NO "
+            f"jet in {ROOT_PATH} can supply them ({_why}). The reader fills an absent "
+            f"column with a sentinel rather than failing, so this is a file written before "
+            f"those columns existed -- re-write it with the current cpp/ writer "
+            f"(docs/PLAN_Input.md stage 1)."
+        )
+    if AUX_DROP_FRAC > AUX_MAX_DROP:
+        raise RuntimeError(
+            f"{AUX_DROP_FRAC:.2%} of jets cannot supply the aux inputs {list(AUX)} "
+            f"({_why}), above AUX_MAX_DROP = {AUX_MAX_DROP:.2%}. Dropping that many would "
+            f"reshape the population every fraction below is quoted against."
+        )
+    if AUX_DROPPED:
+        jets = [j for j, k in zip(jets, _ok) if k]
+        AUX_X = AUX_X[_ok]
+
 try:
     ds = MatchedLundDataset(jets, geom, aux_features=AUX)
 except Exception as exc:
     raise RuntimeError(
-        f"the checkpoint was trained with aux inputs {AUX} but {ROOT_PATH} cannot supply "
-        f"them ({exc})."
+        f"the checkpoint was trained with aux inputs {AUX}, read from the columns "
+        f"{list(AUX_SRC)}, but {ROOT_PATH} cannot supply them ({exc})."
     ) from exc
 
 W_ALL = np.array([float(j.get("weight", 1.0)) for j in jets], dtype=float)
@@ -609,7 +783,35 @@ _nx = np.array([len(j["x"][0]) for j in jets])
 _ny = np.array([len(j["y"][0]) for j in jets])
 print(f"source     : {ROOT_PATH}:{NTUPLE_NAME}   (trained on {TRAIN_PATH!r})")
 print(f"generator  : {jets[0].get('generator', 'n/a')}")
-print(f"selection  : len(x)>0 keeps {len(jets):,} of {_n_in:,} jets")
+print(f"grooming   : z_cut={PROV['z_cut']:.3f}  beta={PROV['beta']:.3f}  "
+      f"kt_floor={PROV['kt_floor']:.3f} GeV  kt_floor_sec={PROV['kt_floor_sec']:.3f} GeV"
+      + ("   -- matches the training file" if PROV_REF and not PROV_BAD else
+         "   -- NOT cross-checked: the artifact records no training-file provenance"
+         if AUX else ""))
+if AUX and not _prov_same(PROV["kt_floor_sec"], PROV["kt_floor"]):
+    print(f"             asymmetric: the aux columns are traversed to "
+          f"{PROV['kt_floor_sec']:g} GeV, looser than the\n             "
+          f"{PROV['kt_floor']:g} GeV of x and y, so they carry splittings x cannot show")
+print(f"selection  : len(x)>0 keeps {len(jets) + AUX_DROPPED:,} of {_n_in:,} jets")
+if AUX:
+    print(f"aux inputs : {len(AUX)} features from {list(AUX_SRC)}")
+    if AUX_DROPPED:
+        print(f"             {AUX_DROPPED:,} jets ({AUX_DROP_FRAC:.2%}) dropped: sentinel "
+              f"aux sources ({_why})")
+    for _n, _c in zip(AUX, AUX_X.T):
+        print(f"             {_n:<14s} mean {_c.mean():+7.3f}  sd {_c.std():6.3f}   "
+              f"range [{_c.min():+7.3f}, {_c.max():+7.3f}]")
+    _pop_tr = (_M or {}).get("population", {}).get("train") or {}
+    if POP_HERE and all(k in _pop_tr for k in POP_HERE):
+        print("             vs the TRAINING file (artifact 'population'), on the same "
+              "uncut sample:")
+        for _k, _f in (("mean_nsec", "6.3f"), ("p_nsec_zero", "6.3f"),
+                       ("mean_jet_pt", "6.2f")):
+            _a, _b = POP_HERE[_k], float(_pop_tr[_k])
+            print(f"               {_k:<12s} here {_a:{_f}}   train {_b:{_f}}   "
+                  f"({(_a - _b) / _b:+.2%})")
+else:
+    print("aux inputs : none -- this checkpoint conditions on the x sequence alone")
 print(f"multiplicity: hadron x = {_nx.mean():.3f}   parton y = {_ny.mean():.3f}")
 print(f"             P(n_y = 0) = {np.mean(_ny == 0):.3f}   -- the N=0 stratum, which is a "
       f"zero-diameter\n             clique in this metric and therefore its own cluster by "
@@ -649,25 +851,26 @@ def pe_coords(pe):
     return np.array([[n.ln_invDelta, n.ln_kt, n.ln_z, n.psi] for n in pe.nodes], dtype=float)
 
 
-SERIES = ("truth", "rsd", "map", "mbr", "set0", "setbest", "post")
+SERIES = ("truth", "rsd", "map", "mbr", "set0", "set0_gated", "setbest", "post")
 # Everything differenced against truth. `setbest` is in the list but is fenced off in every
 # summary table: it uses the truth to CHOOSE the member, so it measures whether the set is
 # worth reporting, not how well the model did.
-MODELS = ("rsd", "map", "mbr", "set0", "setbest", "post")
-HEADLINE = ("rsd", "mbr", "set0")   # the three a result may be quoted from
+MODELS = ("rsd", "map", "mbr", "set0", "set0_gated", "setbest", "post")
+HEADLINE = ("rsd", "mbr", "set0", "set0_gated")   # the four a result may be quoted from
 STYLE = {
     "truth":   (C_TRUTH, "-",  r"truth $y$ (parton)"),
     "rsd":     (C_RSD_E, "-",  r"plain RSD $x$ (hadron)"),
     "map":     (C_MAP,   "-",  r"MAP $\hat y$"),
     "mbr":     (C_MBR,   "-",  r"MBR medoid $\hat y$"),
     "set0":    (C_SET0,  "-",  r"top-mass exemplar $\hat y_{(0)}$"),
+    "set0_gated": (C_GATE, "-", r"gated exemplar (empty decided by $\tau$)"),
     "setbest": (C_BEST,  ":",  r"best member (ORACLE)"),
     "post":    (C_POST,  "--", r"posterior draw"),
 }
-MARKER = {"truth": "o", "rsd": "x", "map": "*", "mbr": "D", "set0": "P", "setbest": "v",
-          "post": "s"}
-MSIZE  = {"truth": 8.0, "rsd": 7.0, "map": 13.0, "mbr": 5.5, "set0": 8.0, "setbest": 6.0,
-          "post": 4.5}
+MARKER = {"truth": "o", "rsd": "x", "map": "*", "mbr": "D", "set0": "P",
+          "set0_gated": "X", "setbest": "v", "post": "s"}
+MSIZE  = {"truth": 8.0, "rsd": 7.0, "map": 13.0, "mbr": 5.5, "set0": 8.0,
+          "set0_gated": 8.0, "setbest": 6.0, "post": 4.5}
 
 
 @torch.inference_mode()
@@ -714,6 +917,26 @@ def estimate_jet(i, rng=None, k_draws=None, with_cloud=False):
         pe.cluster_entropy = float(cs.entropy)
         members.append(pe)
 
+    # --- the EMPTINESS decision, taken by the calibrated gate rather than the argmax --
+    # The N = 0 stratum is ATOMIC (every empty draw sits at mutual distance exactly 0) while
+    # the non-empty draws are FRAGMENTED into several clusters, so the mass argmax compares
+    # one lump against the largest of a split field and the empty explanation wins far more
+    # often than its own mass warrants. Gate G3 says the empty cluster's mass and q(0|x) are
+    # the SAME NUMBER, so the fix is to compare it to the frozen tau instead
+    # (docs/PLAN_empty_parton_tree.md). `members` is untouched; only the recommendation moves.
+    j_empty = next((j for j, m in enumerate(members) if m.multiplicity == 0), None)
+    q0 = float(model.length_pmf(xf, nx, mults=mults.tolist())[0])
+    gate_fired = bool(EMPTY_THRESHOLD > 0.0 and q0 >= EMPTY_THRESHOLD)
+    if EMPTY_THRESHOLD <= 0.0:
+        j_gated = 0          # no frozen tau -> no gate -> identical to set0, by construction
+    elif gate_fired:
+        j_gated = j_empty if j_empty is not None else 0      # never fabricate an empty tree
+    elif j_empty == 0 and len(members) > 1:
+        j_gated = 1                                          # the artifact: take the top NON-empty
+    else:
+        j_gated = 0
+    j_gated = j_gated if members else -1
+
     # --- the truth, and every draw's distance to it ---------------------------
     y = np.asarray(item["yraw"].numpy(), dtype=float)
     tc = lund_cloud([row for row in y], geom, **CLOUD_KW)
@@ -736,12 +959,18 @@ def estimate_jet(i, rng=None, k_draws=None, with_cloud=False):
         "map": pe_coords(mp),
         "mbr": pe_coords(mbr),
         "set0": pe_coords(members[0]) if members else np.zeros((0, 4)),
+        "set0_gated": pe_coords(members[j_gated]) if j_gated >= 0 else np.zeros((0, 4)),
         "setbest": pe_coords(members[j_best]) if j_best >= 0 else np.zeros((0, 4)),
         "post": (np.asarray(coords_by_draw[pick].cpu().double().numpy()).reshape(-1, 4)
                  if pick >= 0 and coords_by_draw[pick] is not None else np.zeros((0, 4))),
         "mults": mults,
-        "q0": float(model.length_pmf(xf, nx, mults=mults.tolist())[0]),
+        "q0": q0,
         "risk": float(mbr.risk),
+        # --- the emptiness decision (docs/PLAN_empty_parton_tree.md x clusters) -----
+        "empty_cluster": (-1 if j_empty is None else int(j_empty)),
+        "empty_gate_fired": gate_fired,
+        "gated_index": int(j_gated),
+        "gate_moved": bool(j_gated != 0),
         # --- the three per-jet scalars (WP3) ---------------------------------
         "top_mass": float(cs.top_mass),
         "entropy": float(cs.entropy),
@@ -1061,7 +1290,8 @@ for s in SERIES:
     role = {"truth": "the target", "rsd": "the baseline to beat",
             "map": "diagnostic (argmax of a high-entropy posterior)",
             "mbr": "headline: the Frechet median",
-            "set0": "headline: the top-mass exemplar",
+            "set0": "headline: the top-mass exemplar (mass argmax)",
+            "set0_gated": "headline: the same set, emptiness decided by the frozen tau",
             "setbest": "ORACLE -- diagnostic only, never a result",
             "post": "scale reference, not a competitor"}[s]
     print(f"{s:<9}{int(NSPL[s].sum()):>12,}{NSPL[s].mean():>12.3f}"
@@ -1118,8 +1348,8 @@ $\Delta = \text{estimate} - \text{truth}$, one entry per **splitting**, index-al
 exactly as in §6 of [`per_jets_estimation.ipynb`](per_jets_estimation.ipynb): a residual
 exists at $t$ only where both sides have a node there.
 
-The new comparison is **`set0` against `mbr`**. They are different estimators, not two
-routes to one:
+There are two new comparisons. The first is **`set0` against `mbr`** — different
+estimators, not two routes to one:
 
 $$
 \texttt{mbr}\;\to\;\arg\min\ \mathbb{E}\,d \quad(\text{centrality}),
@@ -1130,6 +1360,10 @@ $$
 They agree wherever the posterior is unimodal and differ wherever it is not, which is why
 §7's stratification by `entropy` is the informative view and this pooled one is only the
 headline.
+
+The second is **`set0_gated` against `set0`** — same set, same masses, one decision
+changed. §6b is where that decision is explained and priced; read the two together, because
+`set0`'s marginal multiplicity deficit is mostly *one* decision rather than a shape error.
 
 `setbest` appears in the panels in a muted style and **is fenced out of every summary
 table**: it uses the truth to choose the member, so it measures whether the set is worth
@@ -1248,7 +1482,7 @@ def slice_stats(key, sel=sel_all, series=MODELS, res=None):
 def resid_panel(ax, key, sel=sel_all, series=None, title="", res=None):
     """One difference distribution: every series' delta for one coordinate."""
     res = RES if res is None else res
-    series = ("rsd", "mbr", "set0", "setbest") if series is None else series
+    series = ("rsd", "mbr", "set0", "set0_gated", "setbest") if series is None else series
     e, col = RESID_EDGES[key], COL[key]
     stats, dens = slice_stats(key, sel, series, res), {}
     for s in series:
@@ -1363,8 +1597,8 @@ for key in RES_KEYS:
                     mark = "" if (lo - 1.0) * (hi - 1.0) > 0 else "  brackets 1"
                     ratio = f"{p:>6.3f}  [{lo:.3f}, {hi:.3f}]{mark}"
                     rec = dict(**st, rms_ratio=p, ci=[lo, hi])
-                if s == "set0":
-                    q, qlo, qhi, _nj = boot_rms_ratio(key, sel, "set0", ref="mbr")
+                if s in ("set0", "set0_gated"):
+                    q, qlo, qhi, _nj = boot_rms_ratio(key, sel, s, ref="mbr")
                     vs_mbr = (f"{q:>6.3f}  [{qlo:.3f}, {qhi:.3f}]"
                               if np.isfinite(qlo) else f"{q:>6.3f}")
                     rec["rms_ratio_vs_mbr"] = q
@@ -1384,6 +1618,98 @@ print("is effectively unimodal in this metric at this budget, and the set is a d
 print("rather than a product. Section 7 says whether that null hides a real effect on the")
 print("ambiguous subset.")
 print("\n`setbest` is deliberately absent from this table. It is an ORACLE.")
+''')
+
+# ---------------------------------------------------------------------------
+md(r"""
+### 6b. The emptiness decision — why the mass argmax is the wrong rule for $N=0$
+
+`set0`'s multiplicity deficit in §5b is not mostly a shape error. It is **one decision**.
+
+The $N=0$ stratum is **atomic by construction**: `_empty_value` returns exactly $0$ for two
+empty clouds, so every empty draw collapses into one zero-radius cluster carrying the whole
+of $q(0\mid x)$. The non-empty draws live on a continuum and get **fragmented** into
+several clusters. So the mass argmax compares one atomic lump against the largest of a
+split field, and the empty explanation wins on far more jets than its own mass warrants —
+measured **29.8% against a true rate of 16.7%** on 600 held-out jets at $K=200$ ($\sim 9\sigma$).
+That is a partition-granularity artifact, not physics.
+
+Gate **G3** (§9) is what licenses the fix: it says the empty cluster's mass and
+`length_pmf`'s $q(0\mid x)$ are the **same number**. So the two rules differ only in what
+that number is compared against:
+
+| rule | compares $q(0\mid x)$ to | calibrated? |
+|---|---|---|
+| `set0` | the largest of a **fragmented** competitor set | no — depends on `CLUSTER_MIN_MASS` and the method |
+| `set0_gated` | the frozen $\tau$ from the artifact | **yes** — fitted by rate-matching, `inference.length.empty_threshold_for_rate` |
+
+Same information, calibrated decision rule — and no new machinery: $\tau$ is the one
+[`docs/PLAN_empty_parton_tree.md`](../docs/PLAN_empty_parton_tree.md) already fitted and
+froze, printed in §0. `members`, `masses` and `radii` are **untouched**; only which member
+is recommended moves, so `set0` stays available and the two are compared on one object.
+
+**Read the result with the gate's own accuracy in mind.** $\tau$ is fitted by
+*rate-matching*, so it fixes the empty **rate** essentially by construction — that is not a
+result. Whether it fixes the right **jets** is the measurement, and the gate is a weak
+classifier there (AUC $\approx$ 0.76–0.82, recall $\approx$ 0.36 on the measured arm). Expect
+the multiplicity marginals to improve a lot and the per-splitting residual much less; if the
+residual does *not* move, the honest reading is that the gate got the rate right and the
+jets wrong.
+
+With no frozen $\tau$ (`EMPTY_THRESHOLD = 0`) there is no gate, and `set0_gated` is
+identical to `set0` by construction rather than by coincidence — the cell below says so.
+""")
+
+code(r'''
+_g = np.array([r["gate_moved"] for r in ROWS])
+_f = np.array([r["empty_gate_fired"] for r in ROWS])
+_e0 = np.array([r["empty_cluster"] == 0 for r in ROWS])
+_n0 = {s: float(np.mean([len(a) == 0 for a in RAW[s]])) for s in
+       ("truth", "mbr", "set0", "set0_gated", "setbest", "post")}
+
+if EMPTY_THRESHOLD <= 0.0:
+    print("no frozen tau was read, so there is no gate and set0_gated == set0 exactly.")
+    print("Point RUN at an arm whose prod_test_v1 artifact carries one to run 6b.")
+else:
+    print(f"frozen tau = {EMPTY_THRESHOLD:.4f}   (from the artifact; NOT refitted here)")
+    print(f"  the gate fires on                     {_f.mean():>7.3f} of jets")
+    print(f"  the mass argmax picked the N=0 lump   {_e0.mean():>7.3f}"
+          f"   <- the artifact")
+    print(f"  the recommendation MOVED on           {_g.mean():>7.3f} of jets")
+    print()
+    _mm_truth = float(np.mean([len(a) for a in RAW["truth"]]))
+    print(f"  {'series':<12}{'P(n=0)':>9}{'vs truth':>10}{'mean mult':>11}{'vs truth':>10}")
+    for s in ("truth", "mbr", "set0", "set0_gated", "setbest", "post"):
+        mm = float(np.mean([len(a) for a in RAW[s]]))
+        d0 = "" if s == "truth" else f"{_n0[s] - _n0['truth']:>+10.3f}"
+        dm = "" if s == "truth" else f"{mm - _mm_truth:>+10.3f}"
+        print(f"  {s:<12}{_n0[s]:>9.3f}{d0:>10}{mm:>11.3f}{dm:>10}")
+    print()
+    print("  The empty RATE is fixed by construction -- tau was fitted by rate-matching, so")
+    print("  agreement there is not a result. The residual tables in section 6 are where the")
+    print("  gate has to earn it: they say whether it also picked the right JETS.")
+    # ...and the honest conditional: the SHAPE comparison, with the emptiness decision
+    # removed. Each series' own non-empty subset is NOT the right population -- the series
+    # disagree about which jets are empty, so those means would be over different jets and
+    # the comparison would be partly a comparison of subsets. Condition on the jets where
+    # TRUTH and every compared series are all non-empty, so the rows are identical.
+    _cmp = ("truth", "mbr", "set0", "set0_gated")
+    _both = np.ones(len(RAW["truth"]), dtype=bool)
+    for s in _cmp:
+        _both &= np.array([len(a) > 0 for a in RAW[s]])
+    print()
+    print(f"  the SHAPE comparison, on the {int(_both.sum())} of {len(_both)} jets where truth")
+    print(f"  and all of {list(_cmp[1:])} are non-empty -- identical rows, so the")
+    print("  emptiness decision is removed rather than averaged over:")
+    print(f"  {'series':<12}{'mean mult':>12}{'vs truth':>10}")
+    if _both.any():
+        _t = float(np.mean([len(a) for a, k in zip(RAW["truth"], _both) if k]))
+        for s in _cmp:
+            v = float(np.mean([len(a) for a, k in zip(RAW[s], _both) if k]))
+            d = "" if s == "truth" else f"{v - _t:>+10.3f}"
+            print(f"  {s:<12}{v:>12.3f}{d:>10}")
+    else:
+        print("  (no jet has every series non-empty -- nothing to compare)")
 ''')
 
 # ---------------------------------------------------------------------------
@@ -1419,7 +1745,8 @@ def quantile_bins(vals, n_bins=CONF_BINS):
     return q, [ok & (v > q[b]) & (v <= q[b + 1]) for b in range(n_bins)]
 
 
-def stratified_rms(scalar_name, key, series=("rsd", "mbr", "set0"), n_bins=CONF_BINS):
+def stratified_rms(scalar_name, key, series=("rsd", "mbr", "set0", "set0_gated"),
+                   n_bins=CONF_BINS):
     """RMS residual per confidence bin, per series -- the trend IS the measurement."""
     vals = np.array([r[scalar_name] for r in ROWS], dtype=float)
     edges, masks = quantile_bins(vals, n_bins)
@@ -1444,14 +1771,14 @@ for scalar, direction in (("top_mass", "higher = more confident -> RMS should FA
         if not rows:
             continue
         print(f"\n=== {TLABEL[key]}   by {scalar}   ({direction}) " + "=" * 12)
+        _cols = ("rsd", "mbr", "set0", "set0_gated")
         print(f"{'bin':<22}{'jets':>7}{'pairs':>8}" +
-              "".join(f"{'RMS ' + s:>12}" for s in ("rsd", "mbr", "set0"))
-              + f"{'set0/mbr':>11}")
+              "".join(f"{'RMS ' + s:>14}" for s in _cols) + f"{'set0/mbr':>11}")
         for e in rows:
             r0, rm = e["set0"]["rms"], e["mbr"]["rms"]
             span = f"{e['lo']:.3f} - {e['hi']:.3f}"
             print(f"{span:<22}{e['n_jets']:>7}{e['rsd']['n']:>8}"
-                  + "".join(f"{e[s]['rms']:>12.3f}" for s in ("rsd", "mbr", "set0"))
+                  + "".join(f"{e[s]['rms']:>14.3f}" for s in _cols)
                   + f"{(r0 / rm if rm > 0 else float('nan')):>11.3f}")
 ''')
 
@@ -1466,7 +1793,7 @@ for row_i, scalar in enumerate(("top_mass", "entropy")):
             ax.set_axis_off()
             continue
         x = np.array([0.5 * (e["lo"] + e["hi"]) for e in rows])
-        for s in ("rsd", "mbr", "set0"):
+        for s in ("rsd", "mbr", "set0", "set0_gated"):
             c, ls, lab = STYLE[s]
             y = np.array([e[s]["rms"] for e in rows])
             ax.plot(x, y, ls=ls, color=c, marker="o", ms=4.5, lw=1.8, label=lab)
@@ -1496,7 +1823,7 @@ for scalar in ("top_mass", "entropy"):
         if len(rows) < 2:
             continue
         lo_b, hi_b = (rows[0], rows[-1]) if scalar == "top_mass" else (rows[-1], rows[0])
-        for s in ("mbr", "set0"):
+        for s in ("mbr", "set0", "set0_gated"):
             a, b = lo_b[s]["rms"], hi_b[s]["rms"]
             print(f"{scalar:<12}{TLABEL[key]:<12}{s:<8}{a:>12.3f}{b:>12.3f}"
                   f"{(b / a if a > 0 else float('nan')):>9.3f}")
@@ -1938,6 +2265,7 @@ if WRITE_ARTIFACTS:
             "checkpoint": str(CKPT_PATH), "test_path": str(ROOT_PATH),
             "model": info["model_name"], "encoder": str(cfg.encoder.name),
             "aux_features": list(AUX), "lnz_support": LNZ_SUPPORT,
+            "aux_dropped": int(AUX_DROPPED), "provenance": PROV,
             "n_bins": geom.n_bins, "n_jets": int(N), "K_draws": int(K_DRAWS),
             "seed": int(SEED), "mbr_backend": MBR_BACKEND,
             "mbr_beta": float(EMD_KW["beta"]), "mbr_R": float(EMD_KW["R"]),

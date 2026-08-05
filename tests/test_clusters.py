@@ -25,16 +25,24 @@ import importlib.util
 import numpy as np
 import pytest
 
+from h2p_rsd_junipr.config import load_config
 from h2p_rsd_junipr.geometry import Geometry
 from h2p_rsd_junipr.inference import clusters as cl
+from h2p_rsd_junipr.models.base import build_model
 
 SKLEARN = importlib.util.find_spec("sklearn") is not None
+_POT_OK = importlib.util.find_spec("ot") is not None
 METHODS = [
     pytest.param("hdbscan", marks=[] if SKLEARN else pytest.mark.skip(reason="no scikit-learn")),
     pytest.param("dbscan", marks=[] if SKLEARN else pytest.mark.skip(reason="no scikit-learn")),
     pytest.param("pam", marks=[]),  # pure numpy, always available
 ]
 GEOM = Geometry()
+
+
+def _jet(batch):
+    b, geom = batch
+    return b["xf"][:1], b["nx"][:1], geom
 
 
 def _two_lobe(n_a=40, n_b=60, sep=6.0, scale=0.2, seed=0):
@@ -351,3 +359,105 @@ def test_assert_ancestral_draws_rejects_selected_trees():
         cl.assert_ancestral_draws([draw, medoid])
     with pytest.raises(ValueError, match="ANCESTRAL"):
         cl.assert_ancestral_draws([exemplar])
+
+
+# ---------------------------------------------------------------------------
+# The emptiness decision: the mass argmax is the wrong rule for the N = 0 stratum
+# ---------------------------------------------------------------------------
+def _empty_dominated_draws():
+    """A posterior whose EMPTY stratum wins the mass argmax without being a majority.
+
+    This is the granularity artifact in miniature: the empty draws sit at mutual distance
+    exactly 0 and so form ONE atomic cluster, while the non-empty draws spread out and get
+    fragmented into several. 8 empty draws (a third of the pool) beat three non-empty
+    clusters of 6/5/5 — even though two jets in three are not empty."""
+    return ([[]] * 8
+            + [[12, 34, 56]] * 6
+            + [[5, 9]] * 5
+            + [[40, 41, 42, 43]] * 5)
+
+
+@pytest.mark.skipif(not _POT_OK, reason="POT not installed")
+def test_mass_argmax_lets_the_empty_stratum_win_without_a_majority(batch):
+    """The failure the gate exists to fix, pinned as a measurement rather than described.
+
+    Measured on 600 held-out jets at K = 200: `members[0]` answers EMPTY on 29.8% against a
+    true rate of 16.7%. The mechanism is here in miniature."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = _empty_dominated_draws()
+    ps = model.predict_set(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                           cluster_method="pam", cluster_min_mass=0.05)
+    assert ps.empty_cluster == 0, "the empty stratum should have won the mass argmax here"
+    assert ps.masses[0] < 0.5, (
+        "...and it wins with a PLURALITY, not a majority — which is the whole artifact: "
+        "one atomic lump against a fragmented competitor set"
+    )
+    assert ps.point.multiplicity == 0          # the default rule recommends the empty tree
+    assert ps.empty_policy == "include" and ps.empty_gate_fired is None
+
+
+@pytest.mark.skipif(not _POT_OK, reason="POT not installed")
+def test_empty_gate_moves_the_recommendation_but_not_the_set(batch):
+    """`decode.empty_threshold` decides emptiness for the SET too, and only `.point` moves.
+
+    `members`, `masses` and `radii` are untouched, so the conformal prefix and every
+    existing consumer are unaffected — the set still carries the empty explanation, because
+    a rejected alternative is still a reported alternative."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = _empty_dominated_draws()
+    base = model.predict_set(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                             cluster_method="pam")
+    # tau above q(0|x) = 8/24 -> the gate does NOT fire -> recommend the top NON-empty
+    off = model.predict_set(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                            cluster_method="pam", empty_threshold=0.90)
+    assert off.empty_gate_fired is False and off.empty_policy == "gate"
+    assert off.point_index == 1 and off.point.multiplicity > 0
+    # ...and tau below it -> the gate fires -> the empty explanation is the answer
+    on = model.predict_set(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                           cluster_method="pam", empty_threshold=0.10)
+    assert on.empty_gate_fired is True and on.point.multiplicity == 0
+
+    # the SET is identical in all three: only `.point` moved
+    for other in (off, on):
+        assert np.array_equal(other.masses, base.masses)
+        assert np.array_equal(other.radii, base.radii)
+        assert [m.multiplicity for m in other.members] == [m.multiplicity for m in base.members]
+        assert other.members[0].multiplicity == 0, "members[0] keeps meaning top-mass"
+
+
+@pytest.mark.skipif(not _POT_OK, reason="POT not installed")
+def test_empty_threshold_zero_is_bit_identical(batch):
+    """The parity rule: the new knob's OFF path is the merged behaviour exactly."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = _empty_dominated_draws()
+    kw = dict(point_estimator="mbr", mbr_backend="pot", cluster_method="pam")
+    a = model.predict_set(xf, nx, draws=draws, **kw)
+    b = model.predict_set(xf, nx, draws=draws, empty_threshold=0.0, **kw)
+    assert a.point_index == b.point_index == 0
+    assert a.empty_policy == b.empty_policy == "include"
+    assert np.array_equal(a.masses, b.masses)
+
+
+@pytest.mark.skipif(not _POT_OK, reason="POT not installed")
+def test_the_gate_never_fabricates_an_empty_tree(batch):
+    """H = {pool}. A `q(0|x)` above tau with NO empty draw in the pool is a disagreement
+    between the length head and the sampler, not an explanation — so the recommendation
+    stays inside the posterior rather than inventing the tree the gate asked for.
+
+    Needs a family with an EXPLICIT `q(N|x)` head. For the continue/stop families the length
+    belief *is* the sampler histogram, so `q(0|x)` is identically 0 when no draw is empty
+    and the gate cannot fire at all — a real property, but it makes them unable to exhibit
+    the disagreement this test is about."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=cinn", "encoder=deepsets"]), geom).eval()
+    draws = [[12, 34, 56]] * 8 + [[5, 9]] * 8      # nothing empty anywhere
+    if float(np.asarray(model.length_pmf(xf, nx))[0]) <= 0.0:
+        pytest.skip("this head puts no mass at N=0, so the gate cannot fire")
+    ps = model.predict_set(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                           cluster_method="pam", empty_threshold=1e-12)  # fires on any mass
+    assert ps.empty_gate_fired is True and ps.empty_cluster is None
+    assert ps.point.multiplicity > 0, "no empty draw exists, so none may be recommended"
+    assert ps.point is ps.members[0]

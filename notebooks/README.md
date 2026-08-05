@@ -129,8 +129,22 @@ the docs:
   three raise: `MBR_N_CANDIDATES = 0` (a candidate cap leaves `D` rectangular),
   `mbr_beta = 1` (β ≠ 1 breaks the triangle inequality), and never the `surrogate` backend
   (it normalises, so it is exactly blind to the total `k_t` and multiplicity that separate
-  the `N` strata). Writes `per_jet_clusters.json` beside the checkpoint. **Generated** by
-  [`scripts/make_per_jets_cluster_nb.py`](../scripts/make_per_jets_cluster_nb.py).
+  the `N` strata). §3 provenance-checks the aux conditioning columns — the whole
+  `(z_cut, β, kt_floor, kt_floor_sec)` tuple against the training file's, since aux is
+  groomed with the *off-spine* floor and two files can agree on `kt_floor` while carrying
+  aux built at a different scale — and drops-and-counts sentinel jets instead of dying on
+  the first one. **§6b** is the emptiness decision: `members[0]` over-selects the empty tree
+  (29.8% against a true 16.7% at 600 jets / `K=200`) because the `N=0` stratum is *atomic*
+  while the non-empty draws are *fragmented*, so the mass argmax compares one lump against a
+  split field; `set0_gated` hands that one decision to the frozen τ of
+  [`PLAN_empty_parton_tree.md`](../docs/PLAN_empty_parton_tree.md) instead, and the section
+  conditions its shape comparison on jets where every series is non-empty so the decision is
+  removed rather than averaged over. `DEVICE = "auto"` resolves to **cuda or cpu, never
+  mps** — unlike its sibling this notebook needs the full `K×K` block, so the sampling half
+  is worth a GPU and cpu is very slow on the ARM GB10. Writes `per_jet_clusters.json` beside
+  the checkpoint. **Generated** by
+  [`scripts/make_per_jets_cluster_nb.py`](../scripts/make_per_jets_cluster_nb.py) — edit the
+  generator, never the `.ipynb`.
 
 - **inference_demo_cluster.ipynb** — the short, standalone "what does a set-valued
   prediction look like" companion to `inference_demo.ipynb` (§10.5 of the same plan).

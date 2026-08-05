@@ -82,6 +82,11 @@ def cluster_kwargs_from_decode(decode: dict) -> dict:
         min_mass=float(decode.get("cluster_min_mass", 0.05)),
         eps_quantile=float(decode.get("cluster_eps_quantile", 0.10)),
         split=bool(decode.get("cluster_split", False)),
+        # The SAME knob `map_or_mbr` reads, meaning the same thing at the same stage: with
+        # it set, the emptiness decision is the calibrated gate's rather than the cluster
+        # mass argmax's. No new config field — see `mbr_cluster_set` for why the argmax is
+        # the wrong rule for the N = 0 stratum.
+        empty_threshold=float(decode.get("empty_threshold", 0.0)),
     )
 
 
@@ -762,7 +767,8 @@ def mbr_cluster_set(model, xf, nx, *, draws=None, geom, n_samples=200, n_candida
                     resample_to_qn=False, coords_by_draw=None,
                     method="hdbscan", min_cluster_size=0, min_mass=0.05,
                     eps_quantile=0.10, split=False, screening_only=False,
-                    set_threshold=None, fitted_under=None, D=None):
+                    set_threshold=None, fitted_under=None, D=None,
+                    empty_threshold=0.0):
     """One `LundPointEstimate` per posterior cluster, each a genuine draw, with the
     cluster's posterior mass and radius (docs/PLAN_PosteriorClusters.md WP2).
 
@@ -780,7 +786,36 @@ def mbr_cluster_set(model, xf, nx, *, draws=None, geom, n_samples=200, n_candida
     `cluster_entropy`, so existing single-estimate consumers carry them without a
     signature change. They are deliberately not folded into one +/-: `top_mass` is a
     probability, `entropy` is an ambiguity over discrete alternatives, and only `radii[0]`
-    is a width."""
+    is a width.
+
+    ``empty_threshold`` (default ``0.0`` == off, bit-identical) makes the **emptiness**
+    decision the same one `map_or_mbr` already takes, instead of leaving it to the mass
+    argmax. It reuses `decode.empty_threshold` and adds no config field, because it is the
+    same knob meaning the same thing at the same stage.
+
+    **Why the mass argmax is the wrong rule for the N = 0 stratum.** `_empty_value` returns
+    exactly `0` for two empty clouds, so every empty draw collapses into ONE zero-radius
+    cluster carrying the whole of `q(0|x)` — while the non-empty draws live on a continuum
+    and get *fragmented* into several clusters by the density method. The argmax therefore
+    compares one atomic lump against the largest of a fragmented competitor set, and the
+    empty stratum wins on far more jets than its own mass warrants: measured 29.8% against a
+    true rate of 16.7% on 600 held-out jets at K = 200 (~9 sigma). That is a partition-
+    granularity artifact, not physics.
+
+    Gate G3 says the empty cluster's mass and `length_pmf`'s `q(0|x)` are the SAME NUMBER
+    (`|difference| ~ 0`). So the two rules differ only in what that number is compared
+    against — a fragmented competitor set, or a threshold fitted by rate-matching and
+    frozen (`inference.length.empty_threshold_for_rate`, docs/PLAN_empty_parton_tree.md).
+    Same information, calibrated decision rule.
+
+    What moves and what does not: `members`, `masses`, `radii` and the conformal prefix are
+    **untouched** and stay mass-descending, so every existing consumer is unaffected. Only
+    `.point` moves, via `point_index`. `members[0]` keeps meaning "the top-mass exemplar" so
+    the two rules can be compared on the same object.
+
+    Note the gate is rate-matched, not per-jet accurate — AUC ~0.76-0.82, recall ~0.36 on
+    the measured arm. It fixes the empty RATE by construction; whether it fixes the right
+    JETS is a separate measurement."""
     from .clusters import (
         PosteriorSetEstimate,
         assert_cluster_metric_ok,
@@ -825,6 +860,33 @@ def mbr_cluster_set(model, xf, nx, *, draws=None, geom, n_samples=200, n_candida
         pe.cluster_mass = float(cs.masses[j])
         pe.cluster_entropy = float(cs.entropy)
         members.append(pe)
+
+    # --- which member is the RECOMMENDED tree: the emptiness decision -------------
+    # The N = 0 stratum's cluster is identified by its EXEMPLAR being empty. That is exact
+    # rather than heuristic: empty draws sit at mutual distance 0 and at a large constant
+    # distance from every non-empty draw, so a cluster holding any of them holds only them
+    # and its medoid is one of them.
+    empty_cluster = next((j for j, m in enumerate(members) if m.multiplicity == 0), None)
+    point_index, gate_fired, policy = 0, None, "include"
+    tau = float(empty_threshold or 0.0)
+    if tau > 0.0 and members:
+        from .length import empty_gate
+
+        policy = "gate"
+        pmf = model.length_pmf(xf, nx, mults=[len(d) for d in draws])
+        gate_fired = bool(empty_gate(pmf, tau))
+        if gate_fired:
+            # The gate says empty. Recommend the empty explanation IF the posterior has
+            # one — never fabricate it: H = {pool}, and a q(0|x) above tau with no empty
+            # draw is a disagreement between the length head and the sampler, not a tree.
+            point_index = empty_cluster if empty_cluster is not None else 0
+        elif empty_cluster == 0 and len(members) > 1:
+            # The gate says NOT empty but the mass argmax landed on the empty stratum —
+            # the granularity artifact. Recommend the top-mass NON-empty explanation.
+            point_index = 1
+        elif empty_cluster == 0:
+            point_index = 0   # the empty cluster is the only one: nothing else to offer
+
     return PosteriorSetEstimate(
         members=members,
         masses=cs.masses,
@@ -835,4 +897,8 @@ def mbr_cluster_set(model, xf, nx, *, draws=None, geom, n_samples=200, n_candida
         set_size=(set_size_for(cs.masses, set_threshold) if set_threshold is not None else None),
         set_threshold=(float(set_threshold) if set_threshold is not None else None),
         fitted_under=fitted_under,
+        point_index=int(point_index),
+        empty_policy=policy,
+        empty_cluster=empty_cluster,
+        empty_gate_fired=gate_fired,
     )

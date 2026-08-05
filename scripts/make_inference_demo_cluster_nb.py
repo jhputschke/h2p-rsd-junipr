@@ -37,9 +37,11 @@ md(r"""
 # Set-valued inference — what the posterior actually says about one jet
 
 The companion to [`inference_demo.ipynb`](inference_demo.ipynb) for
-docs/PLAN_PosteriorClusters.md. Standalone: it loads the newest checkpoint, falls back to
-the synthetic simulator when no ROOT file is given, and needs nothing that notebook does
-not.
+docs/PLAN_PosteriorClusters.md. Standalone: it loads the newest checkpoint, reads the
+held-out `jets.root` that checkpoint was evaluated on — **with** the aux conditioning
+columns, provenance-checked as in
+[`per_jets_estimation_cluster.ipynb`](per_jets_estimation_cluster.ipynb) §3 — and falls
+back to the synthetic simulator only for a checkpoint that reads no aux.
 
 `inference_demo.ipynb` §5 shows the MAP and the posterior spread for one jet. This shows
 what neither of those can: **the discrete alternative explanations the posterior is split
@@ -77,13 +79,36 @@ md(r"""
 code(r'''
 # --- inputs -----------------------------------------------------------------
 CKPT_PATH   = None      # path to a best.ckpt; None -> newest runs/**/best.ckpt
-ROOT_PATH   = None      # path to a test jets.root; None -> synthetic test data
+# None -> the file the checkpoint was EVALUATED on, if a prod_test_v1_metrics.json sits
+# beside it; failing that the synthetic simulator, which is admissible only for a
+# checkpoint that reads no aux (section 3).
+ROOT_PATH   = None
 NTUPLE_NAME = "Jets"
 
+# --- jet selection (ROOT path only) -----------------------------------------
+PT_VAR = "jet_pt"
+PT_MIN = None
+PT_MAX = None
+
+# --- aux conditioning (section 3) -------------------------------------------
+# The encoder's aux columns are GROOMED per-jet scalars (docs/PLAN_Input.md), so they mean
+# what the checkpoint learned only if this file was written with the same
+# (z_cut, beta, kt_floor, kt_floor_sec). True RAISES on a mismatch; set it False only when
+# the grooming shift IS the measurement.
+PROVENANCE_STRICT = True
+# A jet whose aux sources are sentinels (NaN, -1: a column written before it existed) is
+# dropped rather than killing the build. Above this FRACTION it raises instead -- that many
+# is a schema mismatch, not stragglers, and dropping them would reshape the population.
+AUX_MAX_DROP = 0.01
+
 # --- test sample ------------------------------------------------------------
+# Jets kept from either source. A demo needs one jet for section 4 and N_SUMMARY for
+# section 5; the full pass over a file is per_jets_estimation_cluster.ipynb.
 N_TEST_JETS = 600
 SEED        = 1234
-DEVICE      = "cpu"
+# "auto" -> cuda when available, else cpu. Deliberately NOT `select_device()`, which would
+# pick MPS on Apple Silicon: MPS does not work for this decode. Section 2 raises on "mps".
+DEVICE      = "auto"    # auto | cuda | cpu   (never mps)
 
 # --- inference knobs --------------------------------------------------------
 # K is what the mass vector's RESOLUTION is: at CLUSTER_MIN_MASS = 0.05 a reportable
@@ -113,6 +138,7 @@ md(r"""
 """)
 
 code(r'''
+import json
 import math
 from pathlib import Path
 
@@ -121,16 +147,17 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from h2p_rsd_junipr.data.datamodule import select_pt_range
 from h2p_rsd_junipr.data.dataset import MatchedLundDataset
 from h2p_rsd_junipr.data.rntuple import load_rntuple
 from h2p_rsd_junipr.data.synthetic import synthetic_matched_dataset
 from h2p_rsd_junipr.eval.closure import lund_tree_str
-from h2p_rsd_junipr.features import node_raw
+from h2p_rsd_junipr.features import aux_source_fields, aux_vector, node_raw
 from h2p_rsd_junipr.geometry import Geometry
 from h2p_rsd_junipr.inference.clusters import assert_cluster_metric_ok
 from h2p_rsd_junipr.models.base import build_model
 from h2p_rsd_junipr.train.checkpoint import load_for_inference
-from h2p_rsd_junipr.train.trainer import seed_everything, select_device
+from h2p_rsd_junipr.train.trainer import seed_everything
 
 plt.rcParams.update({
     "figure.dpi": 110, "savefig.dpi": 110,
@@ -155,11 +182,26 @@ def repo_root(start: Path | None = None) -> Path:
     return p
 
 
+def newest(root: Path, pattern: str) -> Path | None:
+    """Newest match of `pattern` anywhere under `root`, or None."""
+    hits = sorted(root.rglob(pattern), key=lambda q: q.stat().st_mtime) if root.is_dir() else []
+    return hits[-1] if hits else None
+
+
 def find_latest_checkpoint(runs_dir: Path) -> Path | None:
     cks = sorted(runs_dir.rglob("best.ckpt"), key=lambda q: q.stat().st_mtime)
     if not cks:
         cks = sorted(runs_dir.rglob("last.ckpt"), key=lambda q: q.stat().st_mtime)
     return cks[-1] if cks else None
+
+
+def prov_same(a, b) -> bool:
+    """NaN-aware equality for one grooming-provenance scalar; a missing reference passes."""
+    if b is None:
+        return True
+    a, b = float(a), float(b)
+    return ((math.isnan(a) and math.isnan(b))
+            or math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-9))
 
 
 def classical_mds(D, dim=2):
@@ -206,10 +248,20 @@ Rebuilt from the checkpoint's own config snapshot, then `assert_cluster_metric_o
 
 code(r'''
 ckpt = Path(CKPT_PATH) if CKPT_PATH else find_latest_checkpoint(REPO / "runs")
+if ckpt is not None and not ckpt.is_absolute():
+    ckpt = REPO / ckpt          # CKPT_PATH may be repo-relative, as ROOT_PATH may be
 assert ckpt is not None and ckpt.exists(), (
     "No checkpoint found. Train one with `h2p-rsd-junipr train ...` or set CKPT_PATH."
 )
-device = select_device() if DEVICE == "auto" else torch.device(DEVICE)
+# cuda when available, else cpu -- and NEVER mps, which does not work for this decode.
+# `select_device()` (cuda > mps > cpu) is deliberately not used for exactly that reason.
+if str(DEVICE).startswith("mps"):
+    raise ValueError(
+        "MPS does not work for this decode -- use DEVICE='cuda' or DEVICE='cpu' ('auto' "
+        "picks cuda when it is available and cpu otherwise, and never mps)."
+    )
+device = (torch.device("cuda" if torch.cuda.is_available() else "cpu")
+          if DEVICE == "auto" else torch.device(DEVICE))
 seed_everything(SEED, deterministic=True)
 
 info  = load_for_inference(str(ckpt), map_location=device)
@@ -221,6 +273,11 @@ model.eval()
 
 from h2p_rsd_junipr.config import decode_params
 
+# The aux columns the encoder was BUILT for. Read here rather than in section 3 because
+# they decide where the jets may come from: aux exists only on the RNTuple path.
+AUX = tuple(model.aux_feature_names)
+TRAIN_PATH = str(OmegaConf.select(cfg, "data.path") or "")
+
 DEC = {**decode_params(cfg),
        "point_estimator": "mbr",
        "mbr_backend": MBR_BACKEND,
@@ -230,9 +287,12 @@ DEC = {**decode_params(cfg),
        "cluster_min_mass": CLUSTER_MIN_MASS}
 assert_cluster_metric_ok(DEC, geom)          # GATE G4 -- raises, never warns
 
-print(f"checkpoint : {ckpt.relative_to(REPO)}")
+print(f"checkpoint : {ckpt.relative_to(REPO) if ckpt.is_relative_to(REPO) else ckpt}")
 print(f"model      : {info['model_name']}   encoder={cfg.encoder.name}")
 print(f"geometry   : n_bins={geom.n_bins}  n_cells={geom.n_cells}")
+print(f"aux inputs : {len(AUX)}  {list(AUX)}"
+      + ("" if AUX else "   -- conditions on the x sequence alone"))
+print(f"trained on : {TRAIN_PATH or 'n/a'}")
 print(f"metric     : backend={MBR_BACKEND!r}  beta={DEC['mbr_beta']:g}  R={DEC['mbr_R']:g}"
       f"  coords={DEC['mbr_coords']!r}   -- gate G4 PASSED")
 print(f"clusters   : method={CLUSTER_METHOD!r}  min_mass={CLUSTER_MIN_MASS:g}  "
@@ -251,34 +311,209 @@ $N=0$ draws sit at mutual distance exactly 0 (`inference.mbr._empty_value`), so 
 stratum is a zero-diameter clique any density method finds by construction, and its cluster
 mass *is* $q(0\mid x)$. Dropping those jets would hide the one part of this posterior that is
 already known to be well calibrated.
+
+**Where the jets come from.** `ROOT_PATH` wins; failing that, a `prod_test_v1_metrics.json`
+beside the checkpoint records which file this checkpoint was *evaluated* on, and is used.
+Only if neither exists does this fall back to the synthetic simulator — and then only for a
+checkpoint that reads no aux, because the aux columns exist **only** on the RNTuple path
+(docs/PLAN_Input.md) and a synthetic stand-in would be a proxy built from `x`, which is
+exactly what aux is not.
+
+### The aux conditioning, and why this section checks it
+
+The encoder is built for a fixed set of **aux** columns (`model.aux_feature_names`, printed
+in §2) — per-jet *groomed* scalars the primary hadron sequence structurally cannot carry.
+Every mass, radius and entropy below is conditioned on them, so this section does not merely
+pass them through. The three checks are the ones
+[`per_jets_estimation_cluster.ipynb`](per_jets_estimation_cluster.ipynb) §3 runs, kept
+minimal here:
+
+- **Provenance.** Aux is groomed with `kt_floor_sec`, the **off-spine** floor — not the
+  `kt_floor` that `x` and `y` use. Two files can agree on `kt_floor` and still carry aux
+  built at a different scale, a shift the encoder cannot see and would read as physics. The
+  tuple $(z_\mathrm{cut}, \beta, k_{t,\mathrm{floor}}, k_{t,\mathrm{floor}}^\mathrm{sec})$
+  must be single-valued across the file, and is compared against the **training** file's
+  when the artifact records it; a mismatch **raises** unless `PROVENANCE_STRICT = False`.
+- **Sentinels.** The reader fills an aux column the writer never produced with a *sentinel*
+  (NaN, or $-1$) rather than failing, and `MatchedLundDataset` then raises on the first jet
+  that hits one — one bad jet, a dead section, no count. Here the aux vector is built for
+  every jet first: jets that cannot supply it are **dropped and counted**, and a drop above
+  `AUX_MAX_DROP` raises, because at that point it is the wrong file rather than stragglers.
+- **Range.** The per-feature mean, spread and range of what the encoder is actually fed are
+  printed. Aux far outside its training range is extrapolated conditioning, and every
+  cluster mass downstream inherits that.
+
+The matrix stays available as `AUX_X` — one row per kept jet, one column per feature in
+`AUX` order.
 """)
 
 code(r'''
-jets, source_desc = None, None
-if ROOT_PATH:
-    rp = Path(ROOT_PATH)
+# --- 3a. where the jets come from --------------------------------------------
+# A prod_test artifact beside the checkpoint records the file this checkpoint was
+# EVALUATED on, and -- the part that matters for aux -- the grooming provenance of the
+# file it was TRAINED on. Both are optional here; neither is invented when absent.
+ART = newest(ckpt.parent, "prod_test_v1_metrics.json")
+META = json.loads(ART.read_text()) if ART is not None else None
+root_path = ROOT_PATH or (META or {}).get("run", {}).get("test_path")
+
+jets, source_desc, FROM_ROOT = None, None, False
+if root_path:
+    rp = Path(root_path)
     rp = rp if rp.is_absolute() else (REPO / rp)
-    jets = load_rntuple(str(rp), NTUPLE_NAME)
+    assert str(root_path) != TRAIN_PATH, (
+        f"{root_path!r} is the file this checkpoint TRAINED on. Not a closure test."
+    )
+    jets = load_rntuple(str(rp), NTUPLE_NAME)   # PRINTS and returns None when unreadable
     if jets:
-        source_desc = f"ROOT RNTuple  {rp.name}:{NTUPLE_NAME}"
-if jets is None:
+        FROM_ROOT = True
+        jets = select_pt_range(jets, var=PT_VAR, lo=PT_MIN, hi=PT_MAX)
+        if not jets:
+            # The file WAS read, so falling through to the simulator here would
+            # silently answer a different question than the window asked.
+            raise RuntimeError(
+                f"the {PT_VAR} window [{PT_MIN}, {PT_MAX}) keeps no jet of "
+                f"{rp.name}"
+            )
+        # A DEMO sample: one jet in section 4, N_SUMMARY in section 5. Every number
+        # printed below is quoted on this prefix, not on the whole file -- the full
+        # measurement pass is per_jets_estimation_cluster.ipynb.
+        n_file = len(jets)
+        jets = jets[:N_TEST_JETS] if N_TEST_JETS else jets
+        source_desc = (f"ROOT RNTuple  {rp.name}:{NTUPLE_NAME}   "
+                       f"(first {len(jets):,} of {n_file:,} jets)")
+if not jets:
+    # No fallback once the checkpoint conditions on aux: those columns exist only on the
+    # RNTuple path (docs/PLAN_Input.md), so a synthetic stand-in would be a proxy built
+    # from x -- exactly what aux is not.
+    if AUX:
+        raise FileNotFoundError(
+            f"this checkpoint conditions on aux {list(AUX)}, which only a jets.root can "
+            f"supply, and no ROOT file was read"
+            + (f" (tried {root_path!r})" if root_path else
+               " (ROOT_PATH is None and no prod_test_v1_metrics.json sits beside the "
+               "checkpoint)")
+            + ". Set ROOT_PATH to a held-out jets.root written by the current cpp/ writer."
+        )
     jets = synthetic_matched_dataset(N_TEST_JETS, seed=SEED)
     source_desc = f"synthetic matched simulator  (n={N_TEST_JETS}, seed={SEED})"
 
 n_raw = len(jets)
 jets = [j for j in jets if len(np.asarray(j["x"][0])) >= 1]
-AUX = tuple(model.aux_feature_names)
+if not jets:
+    raise RuntimeError("no jets survived the len(x) > 0 selection")
+
+# --- 3b. grooming provenance: the PAIR of floors, not kt_floor alone ----------
+# `kt_floor_sec` is the OFF-SPINE floor the aux traversal used, so when it differs from
+# `kt_floor` the aux columns are groomed LOOSER than the x/y sequences beside them (by
+# design, cpp/include/lund_io.hpp). Same pair `scripts/check_disjoint.py` compares.
+PROV_KEYS = ("z_cut", "beta", "kt_floor", "kt_floor_sec")
+PROV, PROV_REF, PROV_BAD = None, None, []
+if FROM_ROOT:
+    _cols = {k: np.array([j.get(k, np.nan) for j in jets], dtype=float) for k in PROV_KEYS}
+    _mixed = [k for k, v in _cols.items() if np.unique(v[np.isfinite(v)]).size > 1]
+    if _mixed:
+        raise RuntimeError(
+            f"{root_path} is not groomed uniformly: {_mixed} take more than one value "
+            f"across its jets, so its halves were written at different scales and their "
+            f"aux columns are not the same quantity. Evaluate them separately."
+        )
+    PROV = {k: float(v[0]) for k, v in _cols.items()}
+    # The reference is the TRAINING file's provenance -- the grooming the aux inputs meant
+    # something under. `disjoint_check.provenance_a` carries it; `run.provenance` is the
+    # eval file's own and stands in when the disjointness record is absent.
+    _run = (META or {}).get("run", {})
+    PROV_REF = (_run.get("disjoint_check") or {}).get("provenance_a") or _run.get("provenance")
+    PROV_BAD = [k for k in PROV_KEYS if not prov_same(PROV[k], (PROV_REF or {}).get(k))]
+if PROV_BAD:
+    # `kt_floor_sec` governs the aux columns alone; the other three govern x and y
+    # themselves, and so bite on every checkpoint whether or not it reads aux.
+    _spine = [k for k in PROV_BAD if k != "kt_floor_sec"]
+    _msg = (
+        "grooming provenance differs from the training file's on "
+        + ", ".join(f"{k} = {PROV[k]:g} here vs {float(PROV_REF[k]):g} there"
+                    for k in PROV_BAD)
+        + (" -- x and y themselves were built at a different scale" if _spine else
+           " -- every aux column is a GROOMED quantity, built at the OFF-SPINE floor, so "
+           "on this file it does not mean what it meant in training, and the encoder has "
+           "no way to see the difference")
+    )
+    if PROVENANCE_STRICT and (_spine or AUX):
+        raise RuntimeError(
+            f"{_msg}. Set PROVENANCE_STRICT = False if that shift IS the measurement."
+        )
+    print(f"[warn] {_msg}")
+
+# --- 3c. the aux pre-flight ---------------------------------------------------
+# `MatchedLundDataset` checks only that the source FIELDS exist, then raises on the first
+# jet whose values are sentinels (NaN, -1: a column the writer never filled), which turns
+# one bad jet into a dead section and names no count. Screen here instead, and let the
+# FRACTION dropped decide whether those are stragglers or the wrong file.
+AUX_SRC = aux_source_fields(AUX)
+AUX_X = np.zeros((len(jets), len(AUX)), dtype=float)
+AUX_DROPPED, AUX_DROP_FRAC = 0, 0.0
+if AUX:
+    _ok, _why = np.zeros(len(jets), dtype=bool), None
+    for _i, _j in enumerate(jets):
+        try:
+            AUX_X[_i] = aux_vector(_j, AUX)
+            _ok[_i] = True
+        except (KeyError, ValueError) as exc:
+            _why = _why or str(exc)
+    AUX_DROPPED = int((~_ok).sum())
+    AUX_DROP_FRAC = float(AUX_DROPPED) / len(_ok)
+    if not _ok.any():
+        raise RuntimeError(
+            f"the checkpoint conditions on {list(AUX)}, read from {list(AUX_SRC)}, and NO "
+            f"jet in {root_path} can supply them ({_why}). The reader fills an absent "
+            f"column with a sentinel rather than failing, so this is a file written before "
+            f"those columns existed -- re-write it with the current cpp/ writer "
+            f"(docs/PLAN_Input.md stage 1)."
+        )
+    if AUX_DROP_FRAC > AUX_MAX_DROP:
+        raise RuntimeError(
+            f"{AUX_DROP_FRAC:.2%} of jets cannot supply the aux inputs {list(AUX)} "
+            f"({_why}), above AUX_MAX_DROP = {AUX_MAX_DROP:.2%}. Dropping that many would "
+            f"reshape the population every fraction below is quoted against."
+        )
+    if AUX_DROPPED:
+        jets = [j for j, k in zip(jets, _ok) if k]
+        AUX_X = AUX_X[_ok]
+
 try:
     ds = MatchedLundDataset(jets, geom, aux_features=AUX)
 except Exception as exc:
     raise RuntimeError(
-        f"this checkpoint was trained with aux inputs {AUX}, which "
-        f"{ROOT_PATH or 'the synthetic generator'} cannot supply ({exc})."
+        f"the checkpoint was trained with aux inputs {AUX}, read from the columns "
+        f"{list(AUX_SRC)}, but {source_desc} cannot supply them ({exc})."
     ) from exc
 
 mult_y = np.array([len(j["y"][0]) for j in jets])
 print(f"source     : {source_desc}")
-print(f"jets       : {len(jets)} of {n_raw} kept (len(x) > 0)")
+if ART is not None:
+    print(f"artifact   : {ART.relative_to(REPO) if ART.is_relative_to(REPO) else ART}"
+          + ("   (its test_path is the file above)" if ROOT_PATH is None else ""))
+if PROV is not None:
+    print(f"grooming   : z_cut={PROV['z_cut']:.3f}  beta={PROV['beta']:.3f}  "
+          f"kt_floor={PROV['kt_floor']:.3f} GeV  "
+          f"kt_floor_sec={PROV['kt_floor_sec']:.3f} GeV"
+          + ("   -- matches the training file" if PROV_REF and not PROV_BAD else
+             "   -- NOT cross-checked: no training-file provenance on record" if AUX
+             else ""))
+    if AUX and not prov_same(PROV["kt_floor_sec"], PROV["kt_floor"]):
+        print(f"             asymmetric: the aux columns are traversed to "
+              f"{PROV['kt_floor_sec']:g} GeV, looser than the\n             "
+              f"{PROV['kt_floor']:g} GeV of x and y, so they carry splittings x cannot show")
+print(f"jets       : {len(jets) + AUX_DROPPED} of {n_raw} kept (len(x) > 0)")
+if AUX:
+    print(f"aux inputs : {len(AUX)} features from {list(AUX_SRC)}")
+    if AUX_DROPPED:
+        print(f"             {AUX_DROPPED:,} jets ({AUX_DROP_FRAC:.2%}) dropped: sentinel "
+              f"aux sources ({_why})")
+    for _n, _c in zip(AUX, AUX_X.T):
+        print(f"             {_n:<14s} mean {_c.mean():+7.3f}  sd {_c.std():6.3f}   "
+              f"range [{_c.min():+7.3f}, {_c.max():+7.3f}]")
+else:
+    print("aux inputs : none -- this checkpoint conditions on the x sequence alone")
 print(f"mean mult. : parton truth y = {mult_y.mean():.2f}   "
       f"P(n_y = 0) = {np.mean(mult_y == 0):.3f}")
 assert len(ds) > 10, "need >10 matched jets"

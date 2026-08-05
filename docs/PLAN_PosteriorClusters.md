@@ -58,6 +58,44 @@ path is bit-identical to today. Builds on the merged `PLAN_MBR_PerturbativeLund.
 > The `[mbr]` extra gains `scikit-learn >= 1.3`; `cluster_method="pam"` needs none of it, so
 > the CI fast tier and every guard test run on a host without it.
 
+> **Measured follow-up (2026-08-04): the mass argmax is the wrong rule for the `N = 0`
+> stratum, and §2 anticipated the fact without anticipating the consequence.**
+>
+> §2 records that the empty draws form a zero-diameter clique "any density method finds by
+> construction, at large constant distance from every non-empty draw", and treats that as a
+> feature — gate G3 confirms the resulting cluster mass *is* `q(0|x)`. It is. What it also
+> does is make the `N = 0` stratum **atomic** while the non-empty draws stay a continuum
+> that the clustering **fragments**. `members[0]` is an argmax over that partition, so it
+> compares one lump against the largest of a split field.
+>
+> Measured on 600 held-out jets at `K = 200` (`v1_contstop_s0`): `members[0]` answers empty
+> on **29.8%** against a true rate of **16.7%** — about 9σ, and roughly two thirds of its
+> multiplicity deficit. The competitor set's size depends on `cluster_min_mass` and the
+> method, so this is a partition-granularity artifact rather than a statement about the
+> posterior.
+>
+> **Fix, shipped:** `mbr_cluster_set(empty_threshold=...)`, reached through the existing
+> `decode.empty_threshold`. Because G3 says the empty cluster's mass and `length_pmf`'s
+> `q(0|x)` are the same number, handing the decision to the calibrated gate changes only
+> what that number is compared against. Only `PosteriorSetEstimate.point` moves (via
+> `point_index`); `members`, `masses`, `radii` and the conformal prefix are untouched, so
+> `members[0]` keeps its meaning and the two rules stay comparable on one object. The gate
+> never fabricates: `q(0|x) >= tau` with no empty draw leaves the recommendation inside
+> `H = {pool}`.
+>
+> **The shape claim survives the fix and is what makes the set worth having.** Conditioned
+> on jets where truth *and every compared series* are non-empty — identical rows, emptiness
+> removed rather than averaged over — `members[0]`'s multiplicity deficit is about 40%
+> smaller than the linear medoid's. The medoid's good *marginal* mean is a cancellation: it
+> under-produces empties (which raises the mean) and under-counts splittings (which lowers
+> it).
+>
+> **Caveat carried in the code and the notebook:** τ is fitted by rate-matching, so it fixes
+> the empty *rate* by construction — that is not a result. Whether it fixes the right *jets*
+> is a separate measurement, and the gate is a weak classifier (AUC 0.760, recall 0.36).
+> `notebooks/per_jets_estimation_cluster.ipynb` §6b reports both.
+> `PLAN_empty_parton_tree.md` carries the cross-reference from the other side.
+
 > **Line anchors.** File:line references were taken from the tree at commit
 > `34e98b8` (2026-08-02). Re-verify before editing; merges shift them.
 

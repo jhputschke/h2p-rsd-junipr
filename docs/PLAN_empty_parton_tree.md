@@ -347,6 +347,64 @@ the gate is reworked into the general `argmin` over an explicit loss on `n` (bel
 cluster mass vector is the natural place to get `q(m|x)` for the `m ≥ 1` terms, and the
 substitution becomes worth its cost.
 
+### ...but the composition runs the OTHER way, and there it is not redundant
+
+The paragraphs above answer "can the clusters **replace** this gate?" (no — same number).
+Measurement then showed the reverse question is the load-bearing one: **this gate fixes a
+real defect in the cluster layer's point summary**, and that composition is now implemented
+(`inference.mbr.mbr_cluster_set(empty_threshold=...)`, reached through
+`decode.empty_threshold` — the same knob, meaning the same thing, with no new config field).
+
+**The defect.** `PosteriorSetEstimate.members[0]` is the mass argmax over clusters. The
+`N = 0` stratum is **atomic** — `_empty_value` returns exactly `0` for two empty clouds, so
+every empty draw collapses into one zero-radius cluster carrying the whole of `q(0|x)` —
+while the non-empty draws live on a continuum and are **fragmented** into several clusters
+by the density method. The argmax therefore compares one lump against the largest of a split
+field, and the empty explanation wins far more often than its own mass warrants.
+
+Measured on 600 held-out jets of `data/jet_aux_asym_test.root` at `K = 200`
+(`v1_contstop_s0`, `notebooks/per_jets_estimation_cluster.ipynb` §5b):
+
+| series | `P(n=0)` | vs truth | mean mult | vs truth |
+|---|---|---:|---|---:|
+| truth | 0.167 | — | 1.442 | — |
+| MBR medoid | 0.048 | −0.119 | 1.377 | −0.065 |
+| `members[0]` (mass argmax) | **0.298** | **+0.131** (~9σ) | 1.105 | −0.337 |
+| posterior draw | 0.178 | +0.011 | 1.453 | +0.011 |
+
+That +0.131 is a partition-granularity artifact, not physics, and about two thirds of
+`members[0]`'s multiplicity deficit is *this one decision* rather than a shape error.
+
+**Why this gate is the right fix and not a patch.** Gate G3 of
+[`PLAN_PosteriorClusters.md`](PLAN_PosteriorClusters.md) measures
+`|mass(N=0 cluster) − q(0|x)|` and finds it ~0: the two are the **same number**. So the mass
+argmax and this gate differ only in what that number is compared against — a fragmented
+competitor set whose size depends on `cluster_min_mass` and the clustering method, or a τ
+fitted by rate-matching and frozen. Same information, calibrated decision rule, no new
+statistic and no new fit.
+
+**What moves and what does not.** Only the *recommendation* (`PosteriorSetEstimate.point`,
+via `point_index`) moves; `members`, `masses`, `radii` and the conformal prefix are
+untouched, and `members[0]` keeps meaning "the top-mass exemplar" so the two rules stay
+comparable on one object. Unlike `map_or_mbr` the gate does **not** short-circuit the decode
+here: the set still carries the empty explanation, because a rejected alternative is still a
+reported alternative. And it never fabricates — a `q(0|x) ≥ τ` with no empty draw in the
+pool is a disagreement between the length head and the sampler, not a tree, so the
+recommendation stays inside `H = {pool}`.
+
+**Read the result with this gate's own accuracy in mind.** τ is fitted by *rate-matching*,
+so it fixes the empty **rate** essentially by construction — agreement there is not a
+result. Whether it fixes the right **jets** is the measurement, and by the numbers at the
+top of this document the gate is a weak classifier (AUC 0.760, recall 0.36, precision 0.33).
+Expect the multiplicity marginals to improve a lot and the per-splitting residual much less.
+`notebooks/per_jets_estimation_cluster.ipynb` §6b reports both, and conditions the shape
+comparison on jets where *every* compared series is non-empty so the emptiness decision is
+removed rather than averaged over.
+
+**This raises the priority of the length-head recalibration below.** The composition is
+only as good as τ's ranking of `q(0|x)`, so anything that sharpens that head now improves
+the cluster layer's point summary as well as the point estimator's.
+
 ## Open questions
 
 - Should the gate be **`P(N=0)` specific, or a general `argmin` over an explicit loss on

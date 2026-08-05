@@ -223,14 +223,29 @@ class PosteriorSetEstimate:
     set_size: int | None = None        # conformal set size at `set_threshold`, when fitted
     set_threshold: float | None = None
     fitted_under: dict | None = None   # provenance of a frozen threshold (v0 §7 pattern)
+    # --- which member is the RECOMMENDED single tree (the emptiness decision) --------
+    # `members` stays mass-descending and untouched, so `masses`, `radii`, the conformal
+    # prefix and every existing consumer are unaffected; only `.point` moves. See
+    # `inference.mbr.mbr_cluster_set` for why the mass argmax alone is the wrong rule for
+    # the N = 0 stratum.
+    point_index: int = 0
+    empty_policy: str = "include"      # include (mass argmax, the default) | gate
+    empty_cluster: int | None = None   # index of the N = 0 stratum's cluster, when it has one
+    empty_gate_fired: bool | None = None   # did q(N=0|x) >= tau? None when the gate is off
 
     def __len__(self) -> int:
         return len(self.members)
 
     @property
     def point(self):
-        """The mass-maximising member — the set-valued answer's single-tree summary."""
-        return self.members[0] if self.members else None
+        """The single tree this set recommends.
+
+        Under the default `empty_policy="include"` this is `members[0]`, the mass-maximising
+        exemplar. Under `"gate"` the emptiness decision is taken by the calibrated
+        `decode.empty_threshold` instead of by the mass argmax, and this is the member that
+        decision selects — see `inference.mbr.mbr_cluster_set`. `members[0]` remains
+        available and keeps its own meaning either way."""
+        return self.members[self.point_index] if self.members else None
 
     def conformal_members(self) -> list:
         """The smallest mass-descending prefix whose accumulated mass reaches the frozen

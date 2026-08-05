@@ -307,7 +307,15 @@ class PosteriorModel(nn.Module, ABC):
 
         Raises (never warns) when the metric settings make `D` non-metric — `mbr_beta != 1`,
         `mbr_R` below half the ground diameter, or a candidate cap that leaves `D`
-        rectangular. See `inference.clusters.assert_cluster_metric_ok`."""
+        rectangular. See `inference.clusters.assert_cluster_metric_ok`.
+
+        ``decode['empty_threshold']`` reaches the SET as well, and means the same thing it
+        means for `map_or_mbr`: with it set, the emptiness decision is the calibrated gate's
+        rather than the cluster mass argmax's, and `.point` follows it while `members[0]`
+        keeps meaning "the top-mass exemplar". Unlike `map_or_mbr` the gate does **not**
+        short-circuit the decode here — the set still carries every explanation, including
+        the empty one, because the set is the deliverable and a rejected alternative is
+        still a reported alternative."""
         from ..inference.mbr import (
             cluster_kwargs_from_decode,
             mbr_cluster_set,

@@ -1620,6 +1620,21 @@ number that gets quoted anyway). All three are measured facts, not conventions:
    exactly `mbr_R`'s default; `+lnz` and `+psi` raise it to ≈ 9.9 and ≈ 11.7, still leaving
    margin.
 
+**`empty_threshold` reaches the set too, and means the same thing.** The `N = 0` stratum is
+*atomic* — every empty draw sits at mutual distance exactly 0, so it forms one zero-radius
+cluster carrying the whole of `q(0|x)` — while the non-empty draws are *fragmented* into
+several clusters. The mass argmax therefore compares one lump against the largest of a split
+field, and the empty explanation wins on far more jets than its own mass warrants: measured
+**29.8% against a true rate of 16.7%** on 600 held-out jets at `K = 200`. Setting
+`decode.empty_threshold` hands that decision to the calibrated gate instead
+([`PLAN_empty_parton_tree.md`](PLAN_empty_parton_tree.md)); gate G3 says the two numbers are
+the *same number*, so this changes only what it is compared against. Only
+`PosteriorSetEstimate.point` moves — `members`, `masses`, `radii` and the conformal prefix
+are untouched, and `members[0]` keeps meaning "the top-mass exemplar". Unlike `map_or_mbr`
+the gate does not short-circuit the decode here: the set still carries the empty
+explanation, because a rejected alternative is still a reported alternative. `0.0` (the
+default) is off and bit-identical.
+
 **`mbr_backend="surrogate"` is refused** for a cluster mass vector. Not principally for its
 two triangle violations in 64 000 — `_lund_image` **normalises**, so the surrogate is
 *exactly* blind to total `k_t` and multiplicity and collapses the very `N`-stratum
