@@ -96,6 +96,47 @@ path is bit-identical to today. Builds on the merged `PLAN_MBR_PerturbativeLund.
 > `notebooks/per_jets_estimation_cluster.ipynb` §6b reports both.
 > `PLAN_empty_parton_tree.md` carries the cross-reference from the other side.
 
+> **Gate results, 600 held-out jets at K = 200 (`v1_contstop_s0`, energyflow, cuda).**
+> Reported for both cluster methods, per G2's method-dependence clause.
+>
+> | gate | `hdbscan` | `pam` | verdict |
+> |---|---|---|---|
+> | G2 medoid-in-dominant | 0.468 | 0.648 | both far below 0.90 — **verdict agrees**, so not method-dependent |
+> | G2' gain vs null (all) | +0.603 ± 0.048 | +0.800 ± 0.062 | **strongly positive**, ~12σ |
+> | G2' gain (precondition) | +0.621 ± 0.069 | +0.835 ± 0.083 | survives the silhouette condition |
+> | G3 empty mass vs q(0\|x) | 0.00000 | 0.00000 | exact |
+> | G6 ECE (raw → tempered) | 0.197 → 0.040 | 0.033 → 0.031 | **PASS** both |
+> | G6 slope | 1.12 → 0.97 | 1.02 ± 0.08 | consistent with 1 |
+> | G6 Brier resolution | 0.0785 | 0.0778 | informative, not just calibrated |
+> | G7 conformal | **FAIL — unreachable** | — | see below |
+> | G8' empty clique wins | 0.245 | — | **fails** the 1% ceiling; WP4b stays closed |
+>
+> **The kill criterion does NOT fire.** G2 < 0.90 *and* G2' strongly positive is the
+> informative-disagreement case §13 anticipated: the lobes exist, the medoid is often
+> outside the dominant one, and the set recovers something a mass-matched random partition
+> does not.
+>
+> **But `members[0]` is not the point estimate to ship.** On identical rows its residual is
+> *worse* than the linear medoid's — RMS ratio 1.112 [1.066, 1.167] in ln(1/ΔR) and 1.141
+> [1.104, 1.185] in ln kt, both CIs excluding 1 — and only the medoid beats plain RSD
+> (0.956 [0.928, 0.988], 0.907 [0.866, 0.943]). §8.1 argued mass was "the coherent choice"
+> for reporting the most probable explanation; measured against truth it is not the better
+> *estimate*. The set's value is the alternatives, the calibrated `top_mass`, and the
+> scalars' predictiveness — not a better single tree.
+>
+> **The scalars predict the set's error and not the medoid's.** Most- over least-confident
+> RMS ratio: `set0` 0.729 / 0.792 / 0.964 across ln(1/ΔR), ln kt, ln z; `mbr` 0.906 / 1.080
+> / 1.110. That is the right direction — they describe the cluster `set0` came from.
+>
+> **G7 fails for a structural reason, and the failure is the finding.** The truth lies
+> outside every cluster's support on **35.7%** of jets, so coverage is capped at 0.660
+> whatever the threshold and the nominal 0.68 is unreachable. The sets cannot cover what the
+> model never generated, and no conformal threshold repairs that. (The first run reported
+> 0.927 PASS because the calibration silently dropped those jets — corrected;
+> `fit_set_threshold` now counts a never-covered truth at its true rank and reports
+> `max_achievable_coverage` / `reachable`.) The lever is the **unassigned rate**, i.e. the
+> pool's support, not the threshold.
+
 > **Line anchors.** File:line references were taken from the tree at commit
 > `34e98b8` (2026-08-02). Re-verify before editing; merges shift them.
 

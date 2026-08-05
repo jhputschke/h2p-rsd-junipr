@@ -622,28 +622,53 @@ def fit_set_threshold(scores, alpha: float = 0.32) -> dict:
     notion TARP tests. It must be documented that way wherever it is quoted: a per-jet
     reading of a marginal guarantee is the standard misuse.
 
+    **A jet whose truth no prefix covers has score `+inf`, and must still be counted.**
+    That is the case where the truth sits outside every cluster's support — the pool never
+    generated anything near it — and the set genuinely does not contain it. Dropping those
+    jets (they have no finite score, so it is the tempting thing to do) silently conditions
+    the guarantee on assignment and reports a coverage that cannot fail for the reason it
+    most needs to: at an unassigned rate `u`, **no** threshold can reach coverage above
+    `1 - u`, and a calibration that never sees them will happily return one that claims to.
+    Pass them in as `inf` (or `nan`, read the same way); `max_achievable_coverage` reports
+    the ceiling, and `reachable` says whether `1 - alpha` sits under it.
+
     Returns the `fitted_under` record, not a bare float, so a frozen threshold carries its
     own provenance (the `tau.fitted_under` pattern of docs/PLAN_prod_test_v1.md v0 §7)."""
-    s = np.asarray([v for v in np.asarray(scores, dtype=float).ravel() if np.isfinite(v)])
+    s = np.asarray(scores, dtype=float).ravel()
     n = int(s.size)
     if n == 0:
-        raise ValueError("fit_set_threshold needs at least one finite calibration score")
+        raise ValueError("fit_set_threshold needs at least one calibration score")
     if not 0.0 < float(alpha) < 1.0:
         raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")
+    # NaN and +inf both mean "never covered". Sorting puts them last, which is exactly
+    # their rank: they are the worst possible nonconformity.
+    never = ~np.isfinite(s)
+    order = np.sort(np.where(never, np.inf, s))
     rank = int(math.ceil((n + 1) * (1.0 - float(alpha))))
+    reachable = True
     if rank > n:  # too few calibration jets for this alpha: the honest threshold is "all"
         thr, exact = 1.0, False
+    elif not np.isfinite(order[rank - 1]):
+        # More than `alpha` of the calibration jets are never covered by ANY prefix, so
+        # `1 - alpha` is unreachable at this pool and this partition. Emitting the full set
+        # is the best available answer and it still under-covers; say so rather than
+        # returning a threshold that looks like it worked.
+        thr, exact, reachable = 1.0, True, False
     else:
-        thr, exact = float(np.sort(s)[rank - 1]), True
+        thr, exact = float(order[rank - 1]), True
     return {
         "value": float(min(max(thr, 0.0), 1.0)),
         "alpha": float(alpha),
+        "reachable": bool(reachable),
+        "max_achievable_coverage": float(np.mean(~never)),
         "fitted_under": {
             "n_calibration": n,
+            "n_never_covered": int(never.sum()),
             "rank": rank,
             "finite_sample_exact": bool(exact),
             "coverage": "marginal over jets, NOT conditional on x",
-            "score": "cumulative cluster mass at which the truth is first covered",
+            "score": "cumulative cluster mass at which the truth is first covered; "
+                     "+inf when no prefix covers it (truth outside every cluster's support)",
         },
     }
 

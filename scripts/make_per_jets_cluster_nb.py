@@ -2248,8 +2248,12 @@ a genuine out-of-sample number rather than the tautology of scoring on the calib
 """)
 
 code(r'''
+# NaN = "no prefix covers this jet's truth" (it sits outside every cluster's support).
+# KEPT, not dropped: that is its true nonconformity rank, and dropping it would condition
+# the guarantee on assignment -- reporting a coverage that cannot fail for the one reason
+# it most needs to. `fit_set_threshold` reads non-finite as "never covered".
 _scores = np.array([r["cum_mass_to_truth"] for r in ROWS], dtype=float)
-_ok = np.flatnonzero(np.isfinite(_scores))
+_ok = np.arange(len(ROWS))
 if _ok.size >= 20:
     _half = _ok.size // 2
     _cal, _test = _ok[:_half], _ok[_half:]
@@ -2279,9 +2283,16 @@ if _ok.size >= 20:
           f"-- the Wilson band {'contains' if _hi >= 1 - SET_ALPHA else 'excludes'} "
           f"the nominal level")
     print(f"\n  {UNASSIGNED_RATE:.1%} of jets have the truth OUTSIDE every cluster's "
-          f"support. Those are\n  counted as uncovered above, which is the honest "
-          f"treatment: a set that does not\n  contain the truth has not covered it, "
-          f"whatever the reason.")
+          f"support -- no prefix\n  of the set covers them, at any threshold. They are "
+          f"COUNTED (as never-covered), not\n  dropped: dropping them would condition the "
+          f"guarantee on assignment and report a\n  coverage that cannot fail for the one "
+          f"reason it most needs to.")
+    print(f"  -> coverage is capped at {CONF['max_achievable_coverage']:.3f} whatever the "
+          f"threshold, and the\n     nominal {1 - SET_ALPHA:.2f} is "
+          f"{'REACHABLE' if CONF['reachable'] else 'NOT REACHABLE'}"
+          + ("" if CONF["reachable"] else
+             " -- the sets cannot cover what the\n     model never generated, and no "
+             "conformal threshold repairs that"))
 else:
     CONF = None
     print(f"only {_ok.size} jets have an assigned truth -- too few to calibrate a threshold")

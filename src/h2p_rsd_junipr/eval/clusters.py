@@ -430,7 +430,11 @@ def summarise_clusters(rows, stability_rows=None, *, alpha=0.32, verbose=True) -
                         [r["truth_in_top"] for r in assigned])
 
     # --- G7: the conformal threshold and the coverage it buys ---------------------
-    scores = [r["cum_mass_to_truth"] for r in rows if np.isfinite(r["cum_mass_to_truth"])]
+    # `nan` for a jet whose truth no prefix covers -- kept, not dropped: `fit_set_threshold`
+    # reads it as "never covered", which is its true rank. Dropping them would condition the
+    # guarantee on assignment and report a coverage that cannot fail for the reason it most
+    # needs to (see that function).
+    scores = [r["cum_mass_to_truth"] for r in rows]
     conf = None
     if scores:
         conf = fit_set_threshold(scores, alpha=alpha)

@@ -519,3 +519,39 @@ def test_assert_ancestral_draws_rejects_a_gated_empty_tree():
     assert gated.risk is None and gated.cluster_mass is None    # invisible to the old check
     with pytest.raises(ValueError, match="ANCESTRAL"):
         cl.assert_ancestral_draws([gated])
+
+
+def test_never_covered_jets_are_counted_not_dropped():
+    """A truth no prefix covers has NO finite score, and dropping it is the tempting thing
+    to do — it silently conditions the guarantee on assignment and reports a coverage that
+    cannot fail for the one reason it most needs to.
+
+    At an unassigned rate `u` no threshold reaches coverage above `1 - u`, so with
+    `1 - alpha` above that ceiling the honest answer is "emit everything, and it still
+    under-covers" rather than a threshold that looks like it worked."""
+    rng = np.random.default_rng(0)
+    covered = rng.uniform(0.0, 0.6, 60)
+    scores = np.concatenate([covered, np.full(40, np.nan)])   # 40% never covered
+
+    fit = cl.fit_set_threshold(scores, alpha=0.32)            # wants 0.68, ceiling is 0.60
+    assert fit["max_achievable_coverage"] == pytest.approx(0.60)
+    assert fit["reachable"] is False
+    assert fit["value"] == 1.0, "the best available answer is the full set"
+    assert fit["fitted_under"]["n_never_covered"] == 40
+    assert fit["fitted_under"]["n_calibration"] == 100, "the dropped jets were the point"
+
+    # ...and with the nominal INSIDE the ceiling it behaves normally again
+    ok = cl.fit_set_threshold(scores, alpha=0.60)             # wants 0.40, ceiling 0.60
+    assert ok["reachable"] is True and ok["value"] < 1.0
+    assert float(np.mean(np.nan_to_num(scores, nan=np.inf) <= ok["value"])) >= 0.40 - 0.02
+
+
+def test_all_finite_scores_are_unchanged_by_the_never_covered_path():
+    """Parity: with every jet assigned, the threshold is the plain order statistic."""
+    rng = np.random.default_rng(1)
+    s = rng.uniform(0, 1, 400)
+    fit = cl.fit_set_threshold(s, alpha=0.2)
+    assert fit["reachable"] is True
+    assert fit["max_achievable_coverage"] == 1.0
+    assert fit["fitted_under"]["n_never_covered"] == 0
+    assert fit["value"] == pytest.approx(float(np.sort(s)[int(np.ceil(401 * 0.8)) - 1]))
