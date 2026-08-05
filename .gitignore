@@ -11,6 +11,11 @@ venv/
 .ruff_cache/
 .pytest_cache/
 
+# Scratch notebook copies. The generated notebooks are executed from a COPY at the repo
+# root so `_REPO` resolves correctly, and those copies carry MBs of outputs that have no
+# business in git -- they have twice been committed by accident.
+_*.ipynb
+
 # Runs / data / artifacts
 runs/
 *.root
