@@ -657,16 +657,24 @@ def assert_ancestral_draws(estimates, *, where: str = "an aggregate pushforward"
     under-dispersed exactly in the soft/wide-angle corner it most needs to get right. The
     same applies to the MBR medoid.
 
-    The provenance is already on the object: `.risk` is set only by `mbr_select`, and
-    `.cluster_mass` only by `mbr_cluster_set`. Any consumer building an aggregate series
-    from per-jet objects should call this first; it is cheap and it fails loudly, which a
-    silently narrow distribution does not."""
+    The provenance is already on the object: `.estimator` names the decision that produced
+    it. Any consumer building an aggregate series from per-jet objects should call this
+    first; it is cheap and it fails loudly, which a silently narrow distribution does not.
+
+    A gate-decided empty tree is rejected too, and it is the one that would otherwise slip
+    through: it carries neither `.risk` nor `.cluster_mass` (the gate returns before either
+    estimator runs), so a check written against those two alone would wave it past — while
+    it is every bit as much a *decision* as a medoid, and pushing it forward would bias the
+    multiplicity marginal toward zero on exactly the jets the gate fired on."""
     bad = []
     for k, pe in enumerate(estimates or []):
-        if getattr(pe, "cluster_mass", None) is not None:
-            bad.append(f"[{k}] cluster exemplar (cluster_mass is set)")
-        elif getattr(pe, "risk", None) is not None:
-            bad.append(f"[{k}] MBR medoid (risk is set)")
+        est = getattr(pe, "estimator", "map")
+        if est == "cluster" or getattr(pe, "cluster_mass", None) is not None:
+            bad.append(f"[{k}] cluster exemplar")
+        elif est == "mbr" or getattr(pe, "risk", None) is not None:
+            bad.append(f"[{k}] MBR medoid")
+        elif est == "empty_gate":
+            bad.append(f"[{k}] gate-decided empty tree (no risk, no mass — still a decision)")
     if bad:
         raise ValueError(
             f"{where} must consume ANCESTRAL draws, not selected trees — a selected tree "

@@ -461,3 +461,61 @@ def test_the_gate_never_fabricates_an_empty_tree(batch):
     assert ps.empty_gate_fired is True and ps.empty_cluster is None
     assert ps.point.multiplicity > 0, "no empty draw exists, so none may be recommended"
     assert ps.point is ps.members[0]
+
+
+# ---------------------------------------------------------------------------
+# `estimator` — which DECISION produced this tree
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not _POT_OK, reason="POT not installed")
+def test_a_gated_empty_answer_does_not_report_itself_as_a_MAP(batch):
+    """`pretty()` used `risk is not None` as the MAP-vs-MBR discriminator, and
+    `map_or_mbr`'s empty gate returns BEFORE `mbr_select` runs — so an MBR decode that
+    answered the empty tree carried no risk and printed as a MAP. The tree was right and
+    the label was wrong, which is the failure mode this repo tracks most carefully."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[]] * 7 + [[12, 34]] * 3          # q(0|x) = 0.7, so any sane tau fires
+    pe = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                          empty_threshold=0.5)
+    assert pe.multiplicity == 0 and pe.risk is None      # the gate short-circuited
+    assert pe.estimator == "empty_gate"
+    assert "MAP" not in pe.pretty(), "a gate-decided answer is not a MAP"
+    assert "EMPTY-GATED" in pe.pretty()
+    assert "before any shape decode" in pe.pretty().lower()
+
+
+@pytest.mark.skipif(not _POT_OK, reason="POT not installed")
+def test_estimator_labels_every_decision_and_leaves_the_others_unchanged(batch):
+    """The four labels, and the parity rule: nothing that used to print "MAP"/"MBR" moves."""
+    xf, nx, geom = _jet(batch)
+    model = build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]), geom).eval()
+    draws = [[12, 34, 56]] * 6 + [[5, 9]] * 5 + [[]] * 5
+
+    mp = model.map_or_mbr(xf, nx, draws=draws, point_estimator="map")
+    assert mp.estimator == "map" and mp.pretty().startswith("MAP groomed shower")
+
+    mbr = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot")
+    assert mbr.estimator == "mbr" and mbr.pretty().startswith("MBR groomed shower")
+
+    ps = model.predict_set(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                           cluster_method="pam")
+    assert all(m.estimator == "cluster" for m in ps.members)
+    assert ps.members[0].pretty().startswith("cluster-exemplar groomed shower")
+
+    # a bare `describe_cells` is a SCORING call, not an estimator: it keeps the default,
+    # so its printed form is unchanged from before the field existed.
+    assert model.describe_cells(xf, nx, [12, 34]).estimator == "map"
+
+
+def test_assert_ancestral_draws_rejects_a_gated_empty_tree():
+    """The one a `risk`/`cluster_mass` check alone would wave through: the gate returns
+    before either estimator runs, so a gate-decided empty tree carries neither — while
+    being every bit as much a decision, and pushing it forward would bias the multiplicity
+    marginal toward zero on exactly the jets the gate fired on."""
+    from h2p_rsd_junipr.inference.point_estimate import LundPointEstimate
+
+    gated = LundPointEstimate(nodes=[], logprob=0.0, multiplicity=0,
+                              estimator="empty_gate")
+    assert gated.risk is None and gated.cluster_mass is None    # invisible to the old check
+    with pytest.raises(ValueError, match="ANCESTRAL"):
+        cl.assert_ancestral_draws([gated])

@@ -70,6 +70,18 @@ class LundPointEstimate:
     # or "sample" (a genuine draw — what the MBR medoid carries, since the medoid IS a
     # posterior sample and re-attaching modes forfeits exactly that property).
     coords_source: str = "mode"
+    # WHICH decision produced this tree. `.risk is not None` used to stand in for it, and
+    # that is wrong for exactly one path: `map_or_mbr`'s empty gate returns before
+    # `mbr_select` ever runs, so an MBR decode that answered the empty tree carried no risk
+    # and reported itself as a MAP (docs/PLAN_empty_parton_tree.md). The provenance is now
+    # explicit, the same pattern as `coords_source`:
+    #   "map"        — the staged beam-search joint mode, or a bare `describe_cells` score
+    #                  (the caller labels it; `describe_cells` is a scoring helper, not an
+    #                  estimator, and leaving the default keeps its printed form unchanged)
+    #   "mbr"        — the minimum-Bayes-risk medoid; `.risk` is set
+    #   "empty_gate" — `q(N=0|x) >= tau` fired BEFORE any shape decode, so no estimator ran
+    #   "cluster"    — a posterior-cluster exemplar; `.cluster_mass` is set
+    estimator: str = "map"
     # --- posterior-cluster scalars (docs/PLAN_PosteriorClusters.md WP3) ---------------
     # Set only by `inference.mbr.mbr_cluster_set` / `PosteriorModel.predict_set`, and None
     # on every other path — including the MBR medoid, which is a centrality estimate with
@@ -92,11 +104,26 @@ class LundPointEstimate:
         """Nodes whose reported psi is a mode the head does not actually identify."""
         return sum(1 for n in self.nodes if n.psi_identified is False)
 
+    # How each `estimator` names itself in `pretty()`. An unknown value prints verbatim
+    # rather than falling back to "MAP" — a label that is merely unrecognised is a smaller
+    # problem than one that is confidently wrong.
+    _ESTIMATOR_LABEL = {
+        "map": "MAP", "mbr": "MBR",
+        "empty_gate": "EMPTY-GATED", "cluster": "cluster-exemplar",
+    }
+
     def pretty(self) -> str:
+        # NOT `risk is not None`: `map_or_mbr`'s empty gate returns before `mbr_select`
+        # runs, so an MBR decode that answered the empty tree has no risk and used to
+        # report itself as a MAP.
+        label = self._ESTIMATOR_LABEL.get(self.estimator, self.estimator)
+        tail = ("" if self.estimator != "empty_gate" else
+                "   (q(N=0|x) cleared tau BEFORE any shape decode — no estimator ran)")
         head = (
-            f"{'MBR' if self.risk is not None else 'MAP'} groomed shower: "
+            f"{label} groomed shower: "
             f"{self.multiplicity} primary splittings, "
             f"log q(y_hat|x) = {self.logprob:.3f}   (coordinates: {self.coords_source})"
+            f"{tail}"
         )
         rows = [
             f"  [{n.depth}] kt={n.kt:6.2f} GeV  DeltaR={n.delta_R:5.3f}  z={n.z:5.3f}  "
@@ -108,7 +135,20 @@ class LundPointEstimate:
         if self.n_psi_unidentified:
             rows.append(f"  * psi drawn, not moded: kappa below the identifiability bound "
                         f"({self.n_psi_unidentified} of {self.multiplicity} nodes)")
-        return "\n".join([head, *rows]) if rows else head + "\n  (empty: MAP is immediate stop)"
+        if rows:
+            return "\n".join([head, *rows])
+        # An empty answer means something DIFFERENT for each estimator, and the footer used
+        # to assert the MAP's reason for all of them. "MAP is immediate stop" is a statement
+        # about the beam search; MBR reaching empty means the posterior is empty-dominated,
+        # which is the estimator working rather than collapsing.
+        why = {
+            "map": "MAP is immediate stop",
+            "mbr": "the posterior is empty-dominated, so the medoid is empty — no floor "
+                   "was clamped",
+            "empty_gate": "decided by the empty gate, not by a shape decode",
+            "cluster": "this explanation IS the N=0 stratum",
+        }.get(self.estimator, "no splittings")
+        return head + f"\n  (empty: {why})"
 
 
 StepFn = Callable[[torch.Tensor, torch.Tensor, object], tuple]

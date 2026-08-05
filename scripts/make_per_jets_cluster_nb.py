@@ -69,6 +69,7 @@ posterior draw carrying its own sampled coordinates.
 | `rsd` | plain RSD, the hadron sequence $x$ | the baseline to beat |
 | `mbr` | the **linear medoid** — today's decode headline | yes |
 | `set0` | `predict_set().members[0]`, the **top-mass exemplar** | yes — the mass-argmax summary |
+| `mbr_gated` | the medoid under the **same** $\tau$ — the fair baseline for the row below | yes |
 | `set0_gated` | the same set, with **emptiness decided by the frozen $\tau$** instead of by the mass argmax | yes — see §6b |
 | `setbest` | the member closest to truth | **no** — an ORACLE, diagnostic only |
 | `post` | one posterior draw | the scale reference, not a competitor |
@@ -851,12 +852,17 @@ def pe_coords(pe):
     return np.array([[n.ln_invDelta, n.ln_kt, n.ln_z, n.psi] for n in pe.nodes], dtype=float)
 
 
-SERIES = ("truth", "rsd", "map", "mbr", "set0", "set0_gated", "setbest", "post")
+SERIES = ("truth", "rsd", "map", "mbr", "mbr_gated", "set0", "set0_gated", "setbest",
+          "post")
 # Everything differenced against truth. `setbest` is in the list but is fenced off in every
 # summary table: it uses the truth to CHOOSE the member, so it measures whether the set is
 # worth reporting, not how well the model did.
-MODELS = ("rsd", "map", "mbr", "set0", "set0_gated", "setbest", "post")
-HEADLINE = ("rsd", "mbr", "set0", "set0_gated")   # the four a result may be quoted from
+MODELS = ("rsd", "map", "mbr", "mbr_gated", "set0", "set0_gated", "setbest", "post")
+HEADLINE = ("rsd", "mbr", "mbr_gated", "set0", "set0_gated")   # quotable
+# Which baseline each estimator's RMS ratio is taken against. GATED against GATED: a gated
+# estimator measured against an ungated one would fold "the gate helped" into a number
+# billed as "the set helped".
+RATIO_REF = {"mbr": "rsd", "mbr_gated": "rsd", "set0": "mbr", "set0_gated": "mbr_gated"}
 STYLE = {
     "truth":   (C_TRUTH, "-",  r"truth $y$ (parton)"),
     "rsd":     (C_RSD_E, "-",  r"plain RSD $x$ (hadron)"),
@@ -864,13 +870,14 @@ STYLE = {
     "mbr":     (C_MBR,   "-",  r"MBR medoid $\hat y$"),
     "set0":    (C_SET0,  "-",  r"top-mass exemplar $\hat y_{(0)}$"),
     "set0_gated": (C_GATE, "-", r"gated exemplar (empty decided by $\tau$)"),
+    "mbr_gated": (C_MBR,  "--", r"MBR medoid, gated"),
     "setbest": (C_BEST,  ":",  r"best member (ORACLE)"),
     "post":    (C_POST,  "--", r"posterior draw"),
 }
-MARKER = {"truth": "o", "rsd": "x", "map": "*", "mbr": "D", "set0": "P",
-          "set0_gated": "X", "setbest": "v", "post": "s"}
-MSIZE  = {"truth": 8.0, "rsd": 7.0, "map": 13.0, "mbr": 5.5, "set0": 8.0,
-          "set0_gated": 8.0, "setbest": 6.0, "post": 4.5}
+MARKER = {"truth": "o", "rsd": "x", "map": "*", "mbr": "D", "mbr_gated": "d",
+          "set0": "P", "set0_gated": "X", "setbest": "v", "post": "s"}
+MSIZE  = {"truth": 8.0, "rsd": 7.0, "map": 13.0, "mbr": 5.5, "mbr_gated": 5.5,
+          "set0": 8.0, "set0_gated": 8.0, "setbest": 6.0, "post": 4.5}
 
 
 @torch.inference_mode()
@@ -960,6 +967,10 @@ def estimate_jet(i, rng=None, k_draws=None, with_cloud=False):
         "mbr": pe_coords(mbr),
         "set0": pe_coords(members[0]) if members else np.zeros((0, 4)),
         "set0_gated": pe_coords(members[j_gated]) if j_gated >= 0 else np.zeros((0, 4)),
+        # The medoid under the SAME gate, so section 6 compares gated to gated. Without it
+        # the `set0_gated` vs `mbr` ratio conflates "the gate helped" with "the set helped".
+        "mbr_gated": (np.zeros((0, 4)) if (EMPTY_THRESHOLD > 0.0 and gate_fired)
+                      else pe_coords(mbr)),
         "setbest": pe_coords(members[j_best]) if j_best >= 0 else np.zeros((0, 4)),
         "post": (np.asarray(coords_by_draw[pick].cpu().double().numpy()).reshape(-1, 4)
                  if pick >= 0 and coords_by_draw[pick] is not None else np.zeros((0, 4))),
@@ -1291,6 +1302,7 @@ for s in SERIES:
             "map": "diagnostic (argmax of a high-entropy posterior)",
             "mbr": "headline: the Frechet median",
             "set0": "headline: the top-mass exemplar (mass argmax)",
+            "mbr_gated": "headline: the medoid under the SAME gate (the fair baseline)",
             "set0_gated": "headline: the same set, emptiness decided by the frozen tau",
             "setbest": "ORACLE -- diagnostic only, never a result",
             "post": "scale reference, not a competitor"}[s]
@@ -1361,8 +1373,10 @@ They agree wherever the posterior is unimodal and differ wherever it is not, whi
 §7's stratification by `entropy` is the informative view and this pooled one is only the
 headline.
 
-The second is **`set0_gated` against `set0`** — same set, same masses, one decision
-changed. §6b is where that decision is explained and priced; read the two together, because
+The second is **`set0_gated` against `mbr_gated`** — the same pair, both decoded with the
+gate on, so the ratio isolates the *shape* with the emptiness decision held fixed. Ratioing
+a gated estimator against an ungated one would fold "the gate helped" into a number billed
+as "the set helped"; the column names its reference for that reason. §6b is where that decision is explained and priced; read the two together, because
 `set0`'s marginal multiplicity deficit is mostly *one* decision rather than a shape error.
 
 `setbest` appears in the panels in a muted style and **is fenced out of every summary
@@ -1482,7 +1496,8 @@ def slice_stats(key, sel=sel_all, series=MODELS, res=None):
 def resid_panel(ax, key, sel=sel_all, series=None, title="", res=None):
     """One difference distribution: every series' delta for one coordinate."""
     res = RES if res is None else res
-    series = ("rsd", "mbr", "set0", "set0_gated", "setbest") if series is None else series
+    series = (("rsd", "mbr", "mbr_gated", "set0", "set0_gated", "setbest")
+              if series is None else series)
     e, col = RESID_EDGES[key], COL[key]
     stats, dens = slice_stats(key, sel, series, res), {}
     for s in series:
@@ -1578,7 +1593,7 @@ TABLE = {}
 for key in RES_KEYS:
     print(f"\n=== {TLABEL[key]}   delta = estimate - truth " + "=" * (44 - len(TLABEL[key])))
     print(f"{'slice':<18}{'series':<9}{'pairs':>8}{'bias':>9}{'RMS':>8}{'68% hw':>9}"
-          f"   {'RMS / plain RSD  [68% CI]':<34}{'RMS / MBR medoid':<22}")
+          f"   {'RMS / plain RSD  [68% CI]':<34}{'RMS / its own medoid':<30}")
     for slab, sel in SLICES:
         for s in HEADLINE:
             m = sel(RES["T"][s])
@@ -1597,21 +1612,34 @@ for key in RES_KEYS:
                     mark = "" if (lo - 1.0) * (hi - 1.0) > 0 else "  brackets 1"
                     ratio = f"{p:>6.3f}  [{lo:.3f}, {hi:.3f}]{mark}"
                     rec = dict(**st, rms_ratio=p, ci=[lo, hi])
-                if s in ("set0", "set0_gated"):
-                    q, qlo, qhi, _nj = boot_rms_ratio(key, sel, s, ref="mbr")
-                    vs_mbr = (f"{q:>6.3f}  [{qlo:.3f}, {qhi:.3f}]"
-                              if np.isfinite(qlo) else f"{q:>6.3f}")
+                _ref = RATIO_REF.get(s)
+                if _ref in ("mbr", "mbr_gated"):
+                    q, qlo, qhi, _nj = boot_rms_ratio(key, sel, s, ref=_ref)
+                    vs_mbr = ((f"{q:>6.3f}  [{qlo:.3f}, {qhi:.3f}]"
+                               if np.isfinite(qlo) else f"{q:>6.3f}") + f"  /{_ref}")
                     rec["rms_ratio_vs_mbr"] = q
+                    rec["ratio_ref"] = _ref
                     rec["ci_vs_mbr"] = [qlo, qhi] if np.isfinite(qlo) else None
                 else:
                     vs_mbr = ""
             TABLE[(key, slab, s)] = rec
             print(f"{slab if s == HEADLINE[0] else '':<18}{s:<9}{st['n']:>8,}"
                   f"{st['bias']:>+9.3f}{st['rms']:>8.3f}{st['hw68']:>9.3f}"
-                  f"   {ratio:<34}{vs_mbr:<22}")
+                  f"   {ratio:<34}{vs_mbr:<30}")
 
-print("\nThe last column is the one this notebook exists for: RMS(set0) / RMS(mbr), the")
-print("mass-maximising exemplar against the Frechet median, on the rows they BOTH cover.")
+print("\nThe last column is the one this notebook exists for: each set estimator against")
+print("the medoid decoded THE SAME WAY -- set0 vs mbr (both ungated), set0_gated vs")
+print("mbr_gated (both gated) -- on the rows they BOTH cover. Ratioing a gated estimator")
+print("against an ungated one would fold 'the gate helped' into a number billed as 'the")
+print("set helped', which is why the reference is named in the column.")
+print()
+print("EXPECT THE GATED AND UNGATED RATIOS TO BE IDENTICAL, and do not read that as 'the")
+print("gate does nothing'. The ratio uses the COMMON-depth pairing, where a jet contributes")
+print("rows only if EVERY series has a node at t -- so every jet the gate touched (one side")
+print("answered empty) contributes no rows at all. The emptiness decision is invisible to")
+print("this table BY CONSTRUCTION; it shows up in the multiplicity marginals of sections 5b")
+print("and 6b, and nowhere else in this notebook. The own-depth columns to the left DO")
+print("differ, because they keep each series' own splittings.")
 print("A ratio whose interval brackets 1 is a null result and is reported as one -- and a")
 print("null here is INFORMATIVE: it is the kill criterion's outcome, meaning the posterior")
 print("is effectively unimodal in this metric at this budget, and the set is a diagnostic")
@@ -1665,7 +1693,7 @@ _g = np.array([r["gate_moved"] for r in ROWS])
 _f = np.array([r["empty_gate_fired"] for r in ROWS])
 _e0 = np.array([r["empty_cluster"] == 0 for r in ROWS])
 _n0 = {s: float(np.mean([len(a) == 0 for a in RAW[s]])) for s in
-       ("truth", "mbr", "set0", "set0_gated", "setbest", "post")}
+       ("truth", "mbr", "mbr_gated", "set0", "set0_gated", "setbest", "post")}
 
 if EMPTY_THRESHOLD <= 0.0:
     print("no frozen tau was read, so there is no gate and set0_gated == set0 exactly.")
@@ -1679,21 +1707,27 @@ else:
     print()
     _mm_truth = float(np.mean([len(a) for a in RAW["truth"]]))
     print(f"  {'series':<12}{'P(n=0)':>9}{'vs truth':>10}{'mean mult':>11}{'vs truth':>10}")
-    for s in ("truth", "mbr", "set0", "set0_gated", "setbest", "post"):
+    for s in ("truth", "mbr", "mbr_gated", "set0", "set0_gated", "setbest", "post"):
         mm = float(np.mean([len(a) for a in RAW[s]]))
         d0 = "" if s == "truth" else f"{_n0[s] - _n0['truth']:>+10.3f}"
         dm = "" if s == "truth" else f"{mm - _mm_truth:>+10.3f}"
         print(f"  {s:<12}{_n0[s]:>9.3f}{d0:>10}{mm:>11.3f}{dm:>10}")
     print()
     print("  The empty RATE is fixed by construction -- tau was fitted by rate-matching, so")
-    print("  agreement there is not a result. The residual tables in section 6 are where the")
-    print("  gate has to earn it: they say whether it also picked the right JETS.")
+    print("  agreement there is not a result. The MEAN MULTIPLICITY column beside it is not")
+    print("  fixed by construction, and is where the gate first has to earn its place.")
+    print()
+    print("  Note what CANNOT settle this: section 6's ratio column. A residual exists only")
+    print("  where both sides have a node at t, so every jet the gate touched drops out of")
+    print("  the common-depth pairing entirely and the gated and ungated ratios come back")
+    print("  IDENTICAL. That is the pairing being blind to the decision, not the decision")
+    print("  being harmless -- the marginals above are the measurement.")
     # ...and the honest conditional: the SHAPE comparison, with the emptiness decision
     # removed. Each series' own non-empty subset is NOT the right population -- the series
     # disagree about which jets are empty, so those means would be over different jets and
     # the comparison would be partly a comparison of subsets. Condition on the jets where
     # TRUTH and every compared series are all non-empty, so the rows are identical.
-    _cmp = ("truth", "mbr", "set0", "set0_gated")
+    _cmp = ("truth", "mbr", "mbr_gated", "set0", "set0_gated")
     _both = np.ones(len(RAW["truth"]), dtype=bool)
     for s in _cmp:
         _both &= np.array([len(a) > 0 for a in RAW[s]])
@@ -1745,7 +1779,8 @@ def quantile_bins(vals, n_bins=CONF_BINS):
     return q, [ok & (v > q[b]) & (v <= q[b + 1]) for b in range(n_bins)]
 
 
-def stratified_rms(scalar_name, key, series=("rsd", "mbr", "set0", "set0_gated"),
+def stratified_rms(scalar_name, key,
+                   series=("rsd", "mbr", "mbr_gated", "set0", "set0_gated"),
                    n_bins=CONF_BINS):
     """RMS residual per confidence bin, per series -- the trend IS the measurement."""
     vals = np.array([r[scalar_name] for r in ROWS], dtype=float)
@@ -1771,7 +1806,7 @@ for scalar, direction in (("top_mass", "higher = more confident -> RMS should FA
         if not rows:
             continue
         print(f"\n=== {TLABEL[key]}   by {scalar}   ({direction}) " + "=" * 12)
-        _cols = ("rsd", "mbr", "set0", "set0_gated")
+        _cols = ("rsd", "mbr", "mbr_gated", "set0", "set0_gated")
         print(f"{'bin':<22}{'jets':>7}{'pairs':>8}" +
               "".join(f"{'RMS ' + s:>14}" for s in _cols) + f"{'set0/mbr':>11}")
         for e in rows:
@@ -1793,7 +1828,7 @@ for row_i, scalar in enumerate(("top_mass", "entropy")):
             ax.set_axis_off()
             continue
         x = np.array([0.5 * (e["lo"] + e["hi"]) for e in rows])
-        for s in ("rsd", "mbr", "set0", "set0_gated"):
+        for s in ("rsd", "mbr", "mbr_gated", "set0", "set0_gated"):
             c, ls, lab = STYLE[s]
             y = np.array([e[s]["rms"] for e in rows])
             ax.plot(x, y, ls=ls, color=c, marker="o", ms=4.5, lw=1.8, label=lab)
@@ -1823,7 +1858,7 @@ for scalar in ("top_mass", "entropy"):
         if len(rows) < 2:
             continue
         lo_b, hi_b = (rows[0], rows[-1]) if scalar == "top_mass" else (rows[-1], rows[0])
-        for s in ("mbr", "set0", "set0_gated"):
+        for s in ("mbr", "mbr_gated", "set0", "set0_gated"):
             a, b = lo_b[s]["rms"], hi_b[s]["rms"]
             print(f"{scalar:<12}{TLABEL[key]:<12}{s:<8}{a:>12.3f}{b:>12.3f}"
                   f"{(b / a if a > 0 else float('nan')):>9.3f}")
@@ -2318,6 +2353,12 @@ md(r"""
 - **The set is the deliverable; `setbest` is not.** $d_\text{best}$ uses the truth to choose
   the member, so it measures whether the set is *worth reporting*, never how well the model
   did. It appears in the panels and in §9 with its null, and in no summary table.
+- **§6's ratio column cannot see the emptiness decision, by construction.** A residual
+  exists at $t$ only where *both* sides have a node there, so on the common-depth pairing a
+  jet where any series answered empty contributes no rows at all — and the gated and
+  ungated ratios come back *identical*. Read that as the pairing being blind to the
+  decision, not the decision being harmless. Emptiness is measured by the multiplicity
+  marginals in §5b and §6b; §6 measures the shape, on jets where every series produced one.
 - **A null result in §6 is informative.** If `set0` and `mbr` agree within their bootstrap
   interval, the posterior is effectively unimodal in this metric at this budget — which is
   the plan's own kill criterion, not a failure of the implementation. §7 is where a pooled

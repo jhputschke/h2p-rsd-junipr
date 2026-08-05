@@ -401,6 +401,26 @@ Expect the multiplicity marginals to improve a lot and the per-splitting residua
 comparison on jets where *every* compared series is non-empty so the emptiness decision is
 removed rather than averaged over.
 
+**A reporting wart the gate had, now fixed.** `LundPointEstimate.pretty()` used
+`risk is not None` as the MAP-vs-MBR discriminator, and this gate returns *before*
+`mbr_select` runs — so an MBR decode that answered the empty tree carried no risk and
+**printed itself as a MAP**. The tree was right and the label was wrong, which is the
+failure mode this repo tracks most carefully. Provenance is now explicit on the object, the
+same pattern as `coords_source`:
+
+```python
+estimator: str = "map"    # map | mbr | empty_gate | cluster
+```
+
+set at each decision point, so a gated answer reads `EMPTY-GATED groomed shower: ... (q(N=0|x)
+cleared tau BEFORE any shape decode — no estimator ran)`. The empty-tree footer was
+similarly hard-coded to the MAP's reason ("MAP is immediate stop") for *every* estimator and
+is now per-estimator — MBR reaching empty means the posterior is empty-dominated, which is
+the estimator working rather than collapsing. `inference.clusters.assert_ancestral_draws`
+also rejects a gated tree now: it carries neither `.risk` nor `.cluster_mass`, so a check
+written against those two alone would wave it into a pushforward, and it is every bit as
+much a *decision* as a medoid.
+
 **This raises the priority of the length-head recalibration below.** The composition is
 only as good as τ's ranking of `q(0|x)`, so anything that sharpens that head now improves
 the cluster layer's point summary as well as the point estimator's.

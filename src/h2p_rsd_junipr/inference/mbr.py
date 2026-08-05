@@ -732,6 +732,7 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     if not cand_idx:  # no draws at all -> honest empty tree (reflects the posterior)
         pe = model.describe_cells(xf, nx, [])
         pe.risk = 0.0
+        pe.estimator = "mbr"
         return (pe, {}) if diagnostic_losses else pe
     # match the support's multiplicity marginal to calibrated q(N|x); None == uniform, and
     # the uniform branch of `_reduce_risk` is literally `D.mean(axis=1)` (gate G1).
@@ -746,6 +747,7 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     # genuine drawn tree -> LundPointEstimate, carrying its own sampled coordinates
     pe = model.describe_cells(xf, nx, winner, win_coords)
     pe.risk = float(risk[best])
+    pe.estimator = "mbr"
     if not diagnostic_losses:
         return pe
     eps = bandwidth_quantile(D, loss_quantile)
@@ -859,6 +861,7 @@ def mbr_cluster_set(model, xf, nx, *, draws=None, geom, n_samples=200, n_candida
         pe = model.describe_cells(xf, nx, draws[e], ec)
         pe.cluster_mass = float(cs.masses[j])
         pe.cluster_entropy = float(cs.entropy)
+        pe.estimator = "cluster"
         members.append(pe)
 
     # --- which member is the RECOMMENDED tree: the emptiness decision -------------

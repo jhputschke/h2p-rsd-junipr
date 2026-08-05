@@ -280,7 +280,12 @@ class PosteriorModel(nn.Module, ABC):
 
             pmf = self.length_pmf(xf, nx, mults=[len(d) for d in draws] if draws else None)
             if empty_gate(pmf, tau):
-                return self.describe_cells(xf, nx, [])
+                gated = self.describe_cells(xf, nx, [])
+                # Label it. This tree came from the GATE, not from either estimator -- it
+                # carries no `.risk` because `mbr_select` never ran, and without the label
+                # an MBR decode that answered empty reported itself as a MAP.
+                gated.estimator = "empty_gate"
+                return gated
         if str(decode.get("point_estimator", "map")) == "mbr":
             from ..inference.mbr import mbr_kwargs_from_decode, mbr_select
 
