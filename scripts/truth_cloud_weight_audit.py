@@ -262,6 +262,14 @@ def print_report(rec: dict, res: dict) -> None:
         tag = "moved" if s["excludes_0"] else "straddles 0"
         print(f"    {k:>18} n={s['n']:>4}  {_ci(s):>28}   {tag}")
 
+    print("\nthe PARTITION itself, because it is what actually moves the gates:")
+    print(f"    {'quantity':>22} {'cells (fielded)':>18} {'coords':>18}")
+    for k in ("n_clusters_mean", "frac_multimodal", "top_mass_mean", "entropy_mean",
+              "residual_mass_mean", "unassigned_rate", "pool_covered_rate",
+              "silhouette_mean"):
+        e = res["rates"][k]
+        print(f"    {k:>22} {e['cells']:>18.4f} {e['coords']:>18.4f}")
+
     print("\ngate re-read (docs/PLAN_PosteriorClusters.md G2 / G2' / G3 / G6 / G7):")
     g = res["gates"]
     rows = [
@@ -306,6 +314,18 @@ def print_report(rec: dict, res: dict) -> None:
           "VERDICT: no G2 / G2' / G6 / G7 verdict moves when the draws are placed at "
           "their own coordinates.")
     print("=" * 100)
+    print("Read the two halves separately — they are NOT the same size and only the first\n"
+          "is A3's question:")
+    print("  * the WEIGHT mismatch is the `ratio` and `R|dW|` rows above, isolated on the\n"
+          "    same tree so the real multiplicity imbalance is divided out;")
+    print("  * a gate that moves moves because the whole PARTITION changed — cell-centre\n"
+          "    draws are quantised, so many coincide exactly and hdbscan finds tight lumps;\n"
+          "    continuous draws are all distinct. That is de-quantization, not the weight\n"
+          "    defect, and the two cannot be separated by flipping this switch (the kt\n"
+          "    weight IS exp(v), so fixing the weights IS placing the draws continuously).")
+    print("  * G6 in particular must be read with its Brier RESOLUTION, not its ECE alone:\n"
+          "    a near-constant forecaster is trivially calibrated and carries no\n"
+          "    information, which is a different failure from miscalibration.")
 
 
 # ---------------------------------------------------------------------------

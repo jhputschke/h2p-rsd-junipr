@@ -75,6 +75,9 @@ ARM_ROOT = {
     **{a: "runs/lnz_spline" for a, _ in PAIRS},
     **{c: "runs/prod_test_v1" for _, c in PAIRS},
 }
+# The four `lnz_head="spline"` arms, named once so a sibling script does not re-derive the
+# split from `PAIRS` and get it subtly wrong.
+SPLINE_ARMS_ALL = tuple(a for a, _ in PAIRS)
 DEFAULT_TEST = "data/jet_aux_asym_test.root"
 
 # The published decode tier (`scripts/eval_prod_test_v1.sh` pass B), quoted rather than

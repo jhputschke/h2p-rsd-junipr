@@ -237,7 +237,8 @@ def _truth_cloud(item, geom, **cloud_kw):
     return lund_cloud([row for row in y], geom, **cloud_kw)
 
 
-def _weight_audit(tc, tc_as_drawn, clouds, R: float) -> dict:
+def _weight_audit(tc, tc_as_drawn, clouds, R: float, ground_scale: float | None = None
+                  ) -> dict:
     """What the truth/draw REPRESENTATION mismatch costs, isolated from the real one.
 
     Two different imbalances live on top of each other here and only one is a defect:
@@ -253,7 +254,15 @@ def _weight_audit(tc, tc_as_drawn, clouds, R: float) -> dict:
     So `W_ratio = W_truth / W_truth_as_drawn` is exactly 1 when the two sides agree, and
     `R·|ΔW|` is the spurious charge the EMD adds on every pair — the number to read against
     a typical `d`, because a ratio near 1 is not evidence of a small effect until it is
-    priced in the units the metric charges in."""
+    priced in the units the metric charges in.
+
+    **`ground_scale` is that pricing, and it is backend-dependent.** `pot` writes the
+    imbalance term out by hand at radius `R`; EnergyFlow normalises ground distances by `R`
+    internally, so its charge is `1.0 * |ΔW|` and its distances are `1/R` of `pot`'s
+    (`_empty_value`, and the module docstring's backend note). Defaulting it to `R` and
+    then reading the result against an EnergyFlow `d` would overstate the charge by a
+    factor of 8.485 — so the caller passes the scale its backend actually uses."""
+    scale = float(R if ground_scale is None else ground_scale)
     w_truth = float(np.sum(tc[1]))
     w_as_drawn = float(np.sum(tc_as_drawn[1]))
     w_draws = np.array([float(np.sum(w)) for _, w in clouds], dtype=float)
@@ -263,12 +272,13 @@ def _weight_audit(tc, tc_as_drawn, clouds, R: float) -> dict:
         "W_truth_as_drawn": w_as_drawn,
         "W_draw_mean": float(nz.mean()) if nz.size else float("nan"),
         "W_ratio": (w_truth / w_as_drawn) if w_as_drawn else float("nan"),
-        "R_dW": float(R * abs(w_truth - w_as_drawn)),
+        "R_dW": float(scale * abs(w_truth - w_as_drawn)),
         # For scale only: what the metric charges for the multiplicity difference, which
         # is real and is not the defect. The defect has to be read against THIS, not
         # against zero.
-        "R_dW_physical": float(R * np.abs(w_truth - w_draws).mean()) if w_draws.size
+        "R_dW_physical": float(scale * np.abs(w_truth - w_draws).mean()) if w_draws.size
         else float("nan"),
+        "ground_scale": scale,
     }
 
 
@@ -352,7 +362,11 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
         # ratio is 1 by construction rather than by measurement.
         tc_as_drawn = tc if cloud_source == "coords" else lund_cloud(
             [int(c) for c in item["yc"].tolist()], geometry, **cloud_kw)
-        waudit = _weight_audit(tc, tc_as_drawn, clouds, float(mk["R"]))
+        waudit = _weight_audit(
+            tc, tc_as_drawn, clouds, float(mk["R"]),
+            # EnergyFlow's distances are `1/R` of `pot`'s, so its imbalance charge is
+            # `1.0 * |dW|`. The same convention `_empty_value` takes.
+            ground_scale=(1.0 if ck["backend"] == "energyflow" else float(mk["R"])))
         dt = lund_emd_matrix([tc], clouds, R=mk["R"], beta=mk["beta"], norm=mk["norm"],
                              periodic_phi=mk["periodic_phi"], phi_col=mk["phi_col"],
                              backend=ck["backend"], geom=geometry)[0]
@@ -600,6 +614,7 @@ def summarise_clusters(rows, stability_rows=None, *, alpha=0.32, verbose=True) -
                 _mean(rows, "R_dW") / _mean(rows, "R_dW_physical")
                 if _mean(rows, "R_dW_physical") else float("nan")),
             "matched": bool(abs(_mean(rows, "W_ratio") - 1.0) < 1e-9),
+            "ground_scale": _mean(rows, "ground_scale"),
         },
         # --- G6 ------------------------------------------------------------------
         "G6_reliability": rel,

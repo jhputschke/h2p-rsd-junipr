@@ -1083,3 +1083,133 @@ Silverman, *Density Estimation for Statistics and Data Analysis*, Chapman & Hall
 Stahlberg & Byrne, arXiv:1908.10090 ·
 Talts, Betancourt, Simpson, Vehtari & Gelman, arXiv:1804.06788 ·
 Vovk, Gammerman & Shafer, *Algorithmic Learning in a Random World*, Springer 2005
+
+---
+
+# §18. RESULT — the truth/draw representation mismatch, and what the gates were conditional on
+
+Run 2026-08-06 on branch `nextStepsTrackAB`. Runner: `scripts/truth_cloud_weight_audit.py`.
+Artifact: `runs/truth_cloud_audit/full2-20260806-162840/audit.json`. This is
+`PLAN_next_steps.md` **A3**, whose owner is `PLAN_z_aware.md` §4/WP-3's inset and which
+that plan left orphaned when WP-3 was cancelled (§11.3). WP-3 is now built (A1), so the
+defect has a fix and this section is the measurement §4/WP-3 asked for:
+
+> *"Do not assume the effect is small. Report `W_truth/W_draw` and `R·|ΔW|` against the
+> typical `d`, then re-read G2′, G6 and G7 and say whether any verdict moved."*
+
+**The defect.** `_truth_cloud` builds the truth from the continuous `yraw` rows while every
+draw cloud was built from cell centres, so at the default `mbr_weight="kt"` the truth's
+point weights are `exp(v_continuous)` and the draws' are `exp(v_cell_centre)`.
+`d_top`, `d_best`, `d_mbr`, `d_nearest_draw` and gates G2′/G6/G7 all sit on it.
+
+**The measurement.** One pass on the fielded arm (`v1_contstop_s0`), 600 jets, `K = 200`,
+`energyflow`, `hdbscan`, seed 1234 — the published tier of `per_jet_clusters.json`, quoted
+rather than re-chosen. Draws and coordinates are taken **once** and handed to two
+`run_cluster_diagnostics` calls differing only in `decode.mbr_cloud_source`, so every
+number below is paired jet-by-jet on byte-identical draws.
+
+## 18.1 The weight mismatch itself — small in mass, not small in charge
+
+Isolated on the **same tree** put through both representations, so the genuine multiplicity
+imbalance (a truth of `n_y` emissions against draws of other lengths) is divided out
+instead of mixed in — the first version of this audit did mix them and read 0.53 for a
+quantity that is 1.003.
+
+| | `W_truth` | the same tree as the draws represent it | ratio | `\|ΔW\|` charge |
+|---|---:|---:|---:|---:|
+| **`cells`** *(fielded)* | 5.0735 | 5.0392 | **1.0030** | **0.2131** |
+| `coords` | 5.0735 | 5.0735 | 1.0000 | 0.0000 |
+
+Read against the scales it competes with — all four in the same units, EnergyFlow's
+(its ground distances are `1/R` of `pot`'s, so its imbalance charge is `1·|ΔW|`, not
+`R·|ΔW|`; getting that wrong overstates the effect by 8.485×):
+
+| the spurious charge, as a fraction of | |
+|---|---:|
+| `<d_mbr>` = 1.8592, the typical distance the gates are read at | **9.6%** |
+| `<d_nearest_draw>` = 0.2958, the tightest scale in the table | **72.0%** |
+| the REAL multiplicity-imbalance charge, 2.8758 | 7.4% |
+
+**So the plan was right to say do not assume it is small.** A 0.3% mass inflation buys a
+spurious 0.21 of EMD on every truth-to-draw pair — a tenth of the distances G2′ and G6 are
+scored on, and three-quarters of `d_nearest_draw`, which is the number §2.3 quotes as
+evidence that the model's support is fine.
+
+## 18.2 What moves when the draws are placed at their own coordinates
+
+**And what does not: `d_mbr` — the point estimate's own distance to truth — is unchanged**,
++0.0024 [−0.0185, +0.0241] over 600 paired jets. Nothing in §18 bears on the recommended
+per-jet product.
+
+| paired Δ = `coords` − `cells`, 600 jets | mean | BCa 95% | |
+|---|---:|---|---|
+| `d_mbr` *(the medoid)* | +0.0024 | [−0.0185, +0.0241] | **unchanged** |
+| `d_top` | −0.2039 | [−0.3301, −0.0791] | better |
+| `d_best` *(oracle)* | +0.3852 | [+0.3298, +0.4492] | worse |
+| `d_best_rand` *(the null)* | +0.3312 | [+0.3025, +0.3621] | worse by the same amount |
+| `d_nearest_draw` | −0.0449 | [−0.0589, −0.0322] | better |
+
+`d_best` and its own null move together, which is why **G2′ survives**: gain
++0.523 ± 0.040 → +0.468 ± 0.058, about one standard error apart. The set still carries real
+information over a mass-matched random partition.
+
+**The partition, however, is a different object:**
+
+| | `cells` *(fielded)* | `coords` |
+|---|---:|---:|
+| `<n_clusters>` | 4.96 | **1.82** |
+| `<top_mass>` | 0.377 | **0.581** |
+| `<entropy>` | 1.446 | **0.728** |
+| unassigned rate | 0.383 | 0.295 |
+| silhouette | 0.713 | 0.535 |
+
+## 18.3 Three gate verdicts move — and the reason is de-quantization, not the weights
+
+| gate | `cells` | `coords` | |
+|---|---|---|---|
+| **G2** medoid-in-dominant-cluster | 0.418 → **fails** 0.90 | 0.918 → **passes** | moved |
+| **G2′** gain vs the null | +0.523 ± 0.040 | +0.468 ± 0.058 | **unmoved** |
+| **G3** empty mass vs `q(0\|x)` | 0.00000 | 0.00000 | unmoved (exact both sides) |
+| **G6** ECE (recalibrated) | 0.067 → **fails** 0.05 | 0.044 → **passes** | moved |
+| **G6** Brier **resolution** | 0.0623 | **0.0109** | *collapses* |
+| **G6** slope | 0.990 | **0.145** | *collapses* |
+| **G7** conformal coverage | 0.617, set size 4.96 → fails | 0.705, set size **1.82** → passes | moved |
+
+**The honest reading, and it is not "the defect was hiding three passes".**
+
+1. **The cause is de-quantization, and it cannot be separated from the weight fix.** The
+   `kt` weight *is* `exp(v)`, so putting the draws in the truth's representation *is*
+   placing them continuously. Cell-centre draws are quantised — many coincide exactly, so
+   `D` has large blocks of zeros and HDBSCAN finds tight lumps; continuous draws are all
+   distinct. Nearly the whole of §18.2's partition change is that, and §18.1's 0.3% is not
+   big enough to produce it.
+2. **G6 does not really pass.** Its ECE improves *because the forecaster became nearly
+   constant*: resolution 0.0623 → 0.0109 and slope 0.990 → 0.145. §6's own text says this
+   is the distinction the Brier decomposition exists to make — "calibrated but
+   uninformative" and "miscalibrated" are different failures, and the fielded `cells` arm
+   is the informative one. Reading the ECE alone here would invert the conclusion.
+3. **G7's move is a genuine improvement on both axes** — coverage 0.617 → 0.705 against a
+   nominal 0.68, with the mean set shrinking from 4.96 members to 1.82. That is worth
+   recording and it is *not* worth acting on from this run: it is a partition change
+   observed while measuring something else.
+4. **G2 at 0.918 is close to its 0.90 kill criterion**, which by §13's own rule would close
+   WP4 as unnecessary. On one arm, at one budget, from a run that was not pre-registered to
+   ask it. It is a number, not a verdict.
+
+## 18.4 What this changes, and what it does not
+
+- **The committed G2 / G6 / G7 numbers are conditional on the cell-centre representation,
+  and that conditioning was never stated.** It is stated now. `metrics["clusters"]["config"]`
+  carries `mbr_cloud_source` from this branch on, so no future artifact can be ambiguous
+  about which representation produced it.
+- **The weight defect is fixed** — `decode.mbr_cloud_source="coords"` makes
+  `W_truth/W_truth_as_drawn` exactly 1 — and `run_cluster_diagnostics` now reports the
+  audit (`metrics["weight_audit"]`, and `W_ratio` / `R_dW` per jet) on **every** run, so it
+  is priced rather than assumed on any future pass.
+- **Nothing here recommends flipping the cluster layer to `"coords"`.** Three gates move,
+  one of them (G6) in a direction that looks like a pass and is a loss; the change is a
+  partition change, and a partition change deserves its own pre-registered test rather
+  than arriving as the side effect of a defect fix. That test would be `PLAN_next_steps.md`
+  B4's sibling and is **not** run here.
+- **The recommended per-jet product is untouched**: `d_mbr` does not move, and §2.3's
+  `d(truth, nearest draw)` gets *better*, not worse.

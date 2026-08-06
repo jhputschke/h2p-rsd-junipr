@@ -466,6 +466,11 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
             if lead_mbr is not None:
                 d_mbr.append(lund_distance(lead_mbr, ly, geometry))
                 row["dlund_mbr"] = d_mbr[-1]
+                # The cell itself, so two decodes of the SAME jet can be asked whether the
+                # selection actually moved (`leading_cell_moved_rate`) — a precondition,
+                # not a result: a selection that cannot move cannot deliver anything
+                # (docs/PLAN_z_aware.md §12.2 B3, §14.3's guards).
+                row["mbr_leading_cell"] = int(lead_mbr)
             n_mbr_bias.append(hat.multiplicity - ny_true)
 
         order = np.argsort(-counts)
