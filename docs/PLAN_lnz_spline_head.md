@@ -853,3 +853,110 @@ a training failure to investigate, not a TARP result to report.
 standing ones and are chosen against nothing this produces. No fourth seed is trained if
 the first three disagree — three is the number `SUMMARY` §4.2(4) asked for, and adding
 seeds until a pattern appears is the failure mode `PLAN_z_aware.md` §11 was written about.
+
+---
+
+# §11. RESULT §10 (B1) — **DOES NOT TRANSFER**, and the reference family fails the same rule
+
+Run 2026-08-06 on branch `nextStepsTrackAB`. Trained `contstop_spline_s1`,
+`contstop_spline_s2` and the control `v1_contstop_s2` under
+`presets/prod_test_v1.yaml`; evaluated with `scripts/eval_prod_test_v1.sh` unchanged, so
+TARP is at the standing tier (2000 jets, 200 references, `pooled`, 4000 MC null reps,
+p95 = 0.0275, cpu). Scored by `scripts/lnz_spline_gates.py`; artifact
+`runs/lnz_spline/lnz_spline_gates.json`. **T1 was committed in `7932089`, before any of the
+three arms existed.**
+
+## 11.1 The three paired seeds
+
+| seed pair | control TARP | + spline | Δ | G7 control → spline |
+|---|---:|---:|---:|---|
+| `contstop_spline_s0` vs `v1_contstop_s0` | 0.0200 | 0.0255 | **+0.0055** | pass → pass |
+| `contstop_spline_s1` vs `v1_contstop_s1` | 0.0225 | 0.0195 | **−0.0030** | pass → pass |
+| `contstop_spline_s2` vs `v1_contstop_s2` | **0.0405** | 0.0215 | **−0.0190** | **fail → pass** |
+| | | **mean** | **−0.0055** | |
+
+- Δ < 0 on **2 of 3**, not 3 of 3 → T1's sign precondition **fails**.
+- mean Δ = **−0.0055**, above the **−0.0085** bar → T1's effect-size clause **fails**.
+- Sanity gate holds: the val NLL **regresses on none** of the three pairs.
+
+**VERDICT: T2 — DOES NOT TRANSFER.**
+
+## 11.2 The same rule, applied to the family the effect was measured on
+
+Reported, **not** scored — it uses only §6.4's already-published numbers and the rule fixed
+in `7932089`, and it is a check I did not pre-register:
+
+| family | Δ per seed | sign | mean Δ | T1? |
+|---|---|---:|---:|---|
+| explicit `q(N\|x)` *(§6.4, the reference)* | −0.0200, −0.0085, +0.0065 | 2/3 | **−0.0073** | **fails** |
+| continue/stop *(§11.1, the fielded one)* | +0.0055, −0.0030, −0.0190 | 2/3 | **−0.0055** | **fails** |
+
+**The effect does not clear the bar on either family, and the two families are barely
+distinguishable** — 2/3 by sign each, means −0.0073 and −0.0055, both inside TARP's own MC
+spread (null mean 0.0167 against a p95 of 0.0275, so the statistic's own scale is ~0.01).
+
+That is a **stronger and cleaner statement than the family-specific one §10.3 anticipated**,
+and it changes what T2 implies. §10.3 predicted T2 would make §6.4's row family-specific.
+It does not: it makes it *unresolved everywhere*. §6.4's "TARP moved, mostly the right way"
+was reading a 2/3 sign pattern whose mean is smaller than the statistic's own noise — the
+same shape of error `PLAN_z_aware.md` §11 caught on `d(MBR)`, and the same standing lesson:
+**a consistent sign across a handful of arms is not a small effect, it is an untested one.**
+
+**A criticism of my own pre-registration, stated rather than buried.** T1's bar was taken
+from a *per-seed* quantity (§6.4's weakest improving seed, −0.0085) and applied to a
+*mean*. With one seed of three going the other way, the mean is above the weakest improving
+instance almost by construction, so the clause is stricter than it reads. **The verdict
+stands as written** — the rule was fixed before the arms, and re-cutting it now is the move
+pre-registration exists to prevent — but a future version of this test should either bar
+the mean at a value derived from the statistic's own MC spread, or bar the per-seed
+improvement and require a count.
+
+## 11.3 What did move, on every axis except TARP
+
+Reported beside the verdict as §10.3 required, and it is not a null:
+
+| | `v1_contstop_s0` → spline | `s1` → spline | `s2` → spline |
+|---|---|---|---|
+| val NLL | 3.780 → **3.739** (−0.041) | 3.805 → **3.742** (−0.063) | 3.808 → **3.713** (−0.095) |
+| `pit_ks_max` | 0.0482 → **0.0268** | 0.0315 → **0.0275** | 0.0429 → **0.0341** |
+| `ln z` PIT ×crit | 1.89 → **1.05** | 1.23 → **0.72** | 1.68 → **1.34** |
+| `dv` PIT ×crit | 1.13 → 1.03 | 1.03 → 1.08 | 1.14 → **0.99** |
+| soft-drop / `z>½` leak | 0.0000% both | 0.0000% both | 0.0000% both |
+
+**3/3 on likelihood, 3/3 on `pit_ks_max`, 3/3 on the `ln z` marginal.** `lnz_head="spline"`
+is worth fielding on the continue/stop family for the same reasons it was fielded on the
+explicit one. The TARP claim is the single axis that does not carry.
+
+**G3's `ln z` clause on these three seeds is 1/3** (0.72×, 1.05×, 1.34×) against **5/6** on
+the explicit family (§8.2). §10.3 declared this reported-and-not-scored in advance — G3 was
+pre-registered over the `spline_s*` arms — but the gap is larger than "transfer check"
+suggests and nobody predicted it. It is a question, not a result: three seeds, and the
+`ln z` marginal still improves on all three.
+
+## 11.4 An unanticipated finding about the fielded family itself
+
+**`v1_contstop_s2` fails G7**, at 0.0405 against the p95 of 0.0275, and it exceeds the MC
+null. That control had to be trained for this test and did not exist before.
+
+v1's central attribution — the joint narrowness is the multiplicity factorization — rested
+on *"all six explicit-`q(N|x)` arms fail G7, both continue/stop arms pass"*
+(`PROD_TEST_v1_RESULTS.md`, `SUMMARY` §2.1). With a third seed it is **6/6 explicit failing
+against 1/3 continue/stop failing**. The contrast is still strong and the attribution
+stands; what does not stand is the *absolute* form of it. Two arms were never enough to
+support "both pass" as a property of the family, and that is worth recording wherever the
+sentence appears.
+
+## 11.5 What this closes
+
+- **`SUMMARY` §4.2(4) is done.** It asked for the cheapest way to turn a suggestive result
+  into a statement; the statement is that the result does not survive.
+- **`SUMMARY` §2.5's TARP row must be rewritten**, not annotated: not "the coordinate
+  density was contributing to the joint narrowness too", but *"TARP is unresolved at this
+  bar on both families — 2/3 by sign each, means −0.0073 and −0.0055, against a statistic
+  whose own MC spread is ~0.01."*
+- **`lnz_head="spline"` is unaffected as a fielded choice.** It was fielded on NLL, PIT and
+  support, all of which improve on 3/3 here as well. Its open reservations are unchanged:
+  G3 formally PARTIAL, and now the observation in §11.3 that the `ln z` clause closes on
+  1/3 of continue/stop seeds against 5/6 explicit ones.
+- **§7.3 / §9.4 (the joint coordinate density) is untouched.** Its primary read is `dv`'s
+  marginal PIT, which none of this bears on; the TARP row was never part of its case.
