@@ -37,11 +37,10 @@ itself to, one layer up.
 | **B8** | `kt_floor` scan (1.0 → 0.5 → 0.2 GeV) | `SUMMARY` §4.4(1) | open | regeneration |
 
 **A1–A3 were one piece of work** — the same diff — and A3 was a defect three live gates sat
-on. Of the four items that were "one run", **two came back with the answer the plan
-expected (B3, and B1) and two did not**: A4's cost is nearly 3× the post-hoc estimate it
-would have been scored against, and B4's goal turns out to be unreachable by the route the
-plan named. Both of those are in §8, and both are why the pre-registrations were written
-first.
+on. **Two of the runs did not come back with what the plan expected**, and both are why the
+pre-registrations were written first: A4's cost to the fielded headline is nearly 3× the
+post-hoc estimate a later-written rule would have been scored against, and B4's goal turns
+out to be unreachable by the route the plan named. Both are in §8.
 
 ---
 
