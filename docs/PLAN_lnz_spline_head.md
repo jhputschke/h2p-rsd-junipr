@@ -517,3 +517,51 @@ and §8.5(1) is the experiment that separates the two.
    better than the control band on every one, support unchanged. It does not depend on any
    of the above.
 4. **Only then §7.3**, under the restated trigger.
+
+---
+
+# §9. §8.5(1) — the conditioning experiment, and its PRE-REGISTERED reading
+
+Written before the arms finished training, for the reason §8.1 exists: the last hypothesis
+in this document was elegant, wrong, and the temptation after the fact was to reinterpret it
+rather than to record that it failed. What follows is fixed in advance.
+
+## 9.1 The change
+
+`model.coord_cell_center=true` appends the cell's continuous centre, affinely mapped onto
+`[-1, 1]` by the geometry's own ranges, to the coordinate head's input. Today that input is
+`[decoder state | e(x) | cell embedding]`, and the embedding is a free vector per
+**categorical** id: the head is told *which* cell it is in and nothing about *where* that
+cell is. Neighbouring cells share no parameters, so every cell's within-cell tilt has to be
+learned from its own emissions alone. That is the shape of a defect that more *output*
+flexibility cannot touch — which is what §8.1 measured.
+
+Arms: `cellctr_s{0,1,2}` against `spline_s{0,1,2}` (same seed, `ln z` spline both sides, so
+the row prices the conditioning alone), plus `cellctr_dvspline_s0` against `cellctr_s0` for
+§8.5(2) — does the `dv` spline pay once the conditioning is fixed?
+
+## 9.2 What each outcome means — decided in advance
+
+The hypothesis makes a specific prediction: the per-cell mean-PIT deviations shrink.
+
+- **CONFIRMED** — `dv`'s marginal PIT falls below 1.0× on **all three** seeds. The
+  diagnosis is right, the fix is nearly free (two inputs, +130 parameters), and it should
+  be fielded alongside `lnz_head="spline"`.
+- **PARTIAL** — the per-cell bias measurably shrinks (RMS of `mean PIT − 0.5` across cells
+  down by more than a third) but `dv` does not clear 1.0× on every seed. The mechanism is
+  real and incomplete; the follow-up is more conditioning (the cell's *width*, or the
+  neighbouring cells' occupancies), not a different density.
+- **DEAD** — the per-cell bias is unchanged (RMS within ±20% of the control) and `dv` stays
+  at ≥ 1.0×. Then the conditioning hypothesis is **falsified**, and the counter-argument of
+  §8.4 becomes the live one: a factorized model *can* be forced into a wrong marginal by a
+  correlation it cannot represent, and the joint coordinate density (§7.3) is the indicated
+  next step rather than a deferred one.
+
+The RMS of `mean PIT − 0.5` over populated `ln kt` cells is the statistic, because that is
+the quantity §8.1 showed to be identical under two density families — it is the thing this
+change is supposed to move, and the one that stayed put when the density was made more
+flexible.
+
+**Guards unchanged**: support at 0.0000%, NLL not worse beyond the control's seed spread,
+and TARP / `pit_ks_max` reported beside the verdict. A conditioning fix that buys `dv` by
+spending `ln z` or the joint is not a fix.
