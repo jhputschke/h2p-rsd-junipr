@@ -8,7 +8,8 @@ number links back to a primary record; nothing here is a new measurement.
 Primary records: `PROD_TEST_v0_RESULTS.md`, `PROD_TEST_v1_RESULTS.md`,
 `PROD_TEST_edit_RESULTS.md`, `PLAN_PosteriorClusters.md` (implementation notes),
 `PLAN_StratifiedMBR.md` §1a–§1d, `PLAN_NCeilingProbe.md` §A,
-`PLAN_lnz_spline_head.md` §6 and §8, and the run artifacts under
+`PLAN_lnz_spline_head.md` §6 and §8, `PLAN_z_aware.md` (proposed, not yet run),
+and the run artifacts under
 `runs/prod_test_v1/v1_contstop_s0/…/` (`per_jet_clusters.json`,
 `per_jet_clusters_K1000.json`, `eval_metrics_wp34.json`),
 `runs/n_ceiling_probe/20260805-122832/n_ceiling_probe.json` and
@@ -147,7 +148,7 @@ the v1 arms themselves, same preset and same seeds.
 | **The support closure was not spent** | 0.00000% below soft drop and above `z = ½` on every arm — by construction, since the spline maps the interval onto itself | v1's WP-A property is preserved, not traded |
 | **The residual MOVED to `dv`** | `dv` now fails on all three seeds (1.10× / 1.04× / 1.12×) and `dv × wide_soft` sits at ~1.0×, while `ln z` is 0.47–1.04× | it became the binding coordinate — and §2.6 then measured that the same fix does **not** work on it |
 | **TARP moved, mostly the right way** | `v1_base` s0/s1 cross below the null band (0.0415 → 0.0215, 0.0350 → 0.0265 vs p95 0.0275) and now pass G7; s2 worsens (0.0335 → 0.0400) | the coordinate density was contributing to the joint narrowness too — the factorization was not the only cause. 2/3 with a contrary seed is **suggestive, not a verdict** |
-| **d(MBR) is marginally worse on 4/4** | +0.0047, +0.0113, +0.0091, +0.0031 vs a control seed spread of 0.018 | small and inside the spread in magnitude, but consistently signed. The MBR metric runs on `lnDR_lnkt` and cannot see `ln z`, so a better `ln z` can only perturb which trees are drawn |
+| **d(MBR) is marginally worse on 4/4** | +0.0047, +0.0113, +0.0091, +0.0031 vs a control seed spread of 0.018 | small and inside the spread in magnitude, but consistently signed. The MBR metric runs on `lnDR_lnkt` and cannot see `ln z`, so a better `ln z` can only perturb which trees are drawn. **Both halves of that sentence are now under test** (`PLAN_z_aware.md`, §4.1(4)): these are *unpaired* means on a pairing that is exact, no other estimator from the same draws is 4/4, and `mbr_coords="+lnz"` cannot currently be switched on to check |
 | **A design the measurement rejected** | composing the spline on a *learnable* truncated normal is non-identifiable: `lnz_mean` → −533 on an interval of [−2.303, −0.693], `F_TN` saturated on 100% of emissions, val NLL 4.19 → 19.2 at epoch 4 | the base must be parameter-free. Recorded in `distributions.py` and pinned by a regression test so the appealing-but-broken construction is not re-proposed |
 
 ### 2.6 The follow-up grid — `dv`, more seeds, more bins (`PLAN_lnz_spline_head.md` §8)
@@ -235,9 +236,22 @@ The probe's verdict re-orders everything below it. Two consequences drive the li
 3. **Transfer the `coverage_68` null to one explicit-`q(N|x)` arm** (where TARP *does*
    fail) — one `eval` run with `experiment.coverage_null_reps=20`. Confirms the null
    lands near 0.553 there too, so the correction is family-independent.
-4. **Pin `cluster_min_cluster_size=10` at K=1000** — one notebook run. Separates "more
+4. **Is §2.5's `d(MBR)` regression even resolved, and is it a z-blind metric?**
+   (`PLAN_z_aware.md`.) Two facts make this cheap and make it first: the pairing is exact
+   (`dlund_identity` is bit-identical within all four pairs, so a **per-jet paired**
+   analysis is legitimate and has never been run — every number in §2.5 is an unpaired
+   mean), and only `dlund_mbr` is 4/4 while the medoid, the mode and the continuous
+   geometric median **from the same draws** are 2/4 or 1/4, i.e. the cell posterior did not
+   degrade. Note also that 4/4 on four pairs floors at p = 0.125 and no fifth pair exists.
+   WP-0 is one decode pass per arm and answers *is there a regression to explain* before
+   anything is built; the ruler that would explain it (`dlund3_*_cont`, `dlnz_*`) is free,
+   since the MBR point estimate already carries drawn coordinates. The same plan makes
+   `mbr_coords="+lnz"` actually work — today it is **inert**, because `lund_cloud`
+   hard-codes `lz = 0.0` for the cell-chain draws the pipeline feeds it — and removes a
+   live truth/draw `kt`-weight mismatch under G2′/G6/G7.
+5. **Pin `cluster_min_cluster_size=10` at K=1000** — one notebook run. Separates "more
    draws" from "coarser clustering" and un-confounds G6's cross-K comparison.
-5. **Per-jet rows in the cluster artifact**, so gate G5's paired criterion becomes
+6. **Per-jet rows in the cluster artifact**, so gate G5's paired criterion becomes
    computable instead of falling back to "quote the K=1000 tier".
 
 ### 4.2 Model extensions (pre-authorized, in order)
