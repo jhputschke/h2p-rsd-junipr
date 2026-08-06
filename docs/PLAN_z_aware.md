@@ -849,3 +849,131 @@ Concretely, and bounded by §13.3:
 the same size on control arms as on spline arms (−0.031…−0.041 vs −0.026…−0.047), because it
 is a **decode** fix. And it does not revive §5 — that rule was about whether a z-blind metric
 explained a regression that does not exist, and it stays unscored.
+
+---
+
+# §14. PRE-REGISTRATION — should `+lnz` become the **default** decode?
+
+Written 2026-08-06 on branch `nextStepsTrackAB`, **before the arms it reads exist**, and
+before `scripts/zaware_default_decode.py` was written. It is the arm `§13.4` clause 3
+called for and `PLAN_next_steps.md` A4 owns.
+
+**§13 asked** whether the `ln z`-blind selection was worth *building*. Answer: BUILD, and
+it is built (A1). **§14 asks** the separate question §13 deliberately did not: should it be
+**on by default**, or continue to ship the way `mbr_n` and `dv_head="spline"` ship —
+measured, available, documented, off.
+
+## 14.1 What §13 left open, stated exactly
+
+§12.2's **B2** — "the `(u, v)` half must not be bought with `ln z`" — was written against
+the **continuous** `(u, v)` ruler and passed 0/4 violations. The *fielded* headline is
+`dlund_mbr`, which compares leading-emission **cell centres**, and it was not in B2.
+Measured post-hoc from the stored cell ids (§13.3):
+
+> Δ`dlund_mbr` = cont-3D − cells-2D: **+0.0042 [+0.0004, +0.0081]** pooled (n = 6560),
+> 6/8 positive, **1/8 significant** per arm.
+
+**That number is known, and this pre-registration is written knowing it.** Pretending
+otherwise would be worse than saying so. Two things are therefore done differently, and
+both are what make §14 a test rather than a ratification:
+
+1. **A disjoint population.** §11, §12 and §13 all scored jets `[0, 1000)` of
+   `data/jet_aux_asym_test.root`. §14 scores jets **`[1000, 2000)`** of the same file —
+   97 018 jets long, so the slice is free and has never been decoded by anything in this
+   repo. Nothing below is fitted to jets it will be scored on.
+2. **The fielded code path, not a bespoke script.** §13 scored the *coordinate table's*
+   leading emission inside `scripts/zaware_selection_ceiling.py`. §14 goes through
+   `run_closure` — `map_or_mbr` → `mbr_select` → `describe_cells` → `leading_emission_cell`
+   on `hat.nodes` — i.e. the decode a user gets. That path did not exist when §13 ran; A1
+   built it. If the §13 gain does not survive it, that is a finding about the shipped knob.
+
+## 14.2 The measurement
+
+Per arm, ONE pass, in order: seed → `draws_by_jet` (one `sample_batch` per jet) →
+`coords_by_jet` (one batched `coords_for_draws` per jet, **unfiltered**) → **two
+`run_closure` calls off byte-identical draws and coordinates**, differing only in
+
+| arm | `mbr_cloud_source` | `mbr_coords` | |
+|---|---|---|---|
+| `fielded` | `cells` | `lnDR_lnkt` | the default decode |
+| `lnz` | `coords` | `+lnz` | the candidate |
+
+Sharing the draws makes the comparison paired **within** an arm, which is strictly stronger
+than §11's across-arm pairing: the two sides are the same model on the same jets with the
+same pool, so the only difference is the ground metric. `dlund_identity` is
+model-independent and must be identical to floating point within each arm — the pairing
+certificate, asserted rather than assumed.
+
+**Arms:** the same eight as §11/§13 — `runs/lnz_spline/{spline_s0,s1,s2,
+contstop_spline_s0}` and `runs/prod_test_v1/{v1_base_s0,s1,s2, v1_contstop_s0}` — so the
+family-independence §13 found is checkable rather than assumed.
+
+**Held fixed at the fielded values,** quoted from `scripts/eval_prod_test_v1.sh` pass B and
+not re-chosen: `K = 200`, `mbr_n_candidates = 64`, `mbr_R = 8.485`, `β = 1`, `weight = kt`,
+`min_emissions = 0`, `pot`, **cpu** (cuda is a different RNG stream *and* different float
+kernels). 1000 jets per arm. Paired BCa 95%, 10 000 resamples, seed 20260806 —
+`mbr_zaware_ab.bca_bootstrap`, unchanged.
+
+## 14.3 The verdict rule — fixed before the run
+
+**D1 — the primary read, and it is `dlund_mbr`.** Δ = `lnz` − `fielded`, per jet, paired.
+
+- **D1a** the **pooled** 95% CI's **upper bound is below +0.010**;
+- **D1b** the per-arm CI excludes 0 **upward** on **≤ 2 of 8** arms.
+
+*Where +0.010 comes from, and it is not this measurement.* §11.1 measured the pooled paired
+resolution of **this exact ruler** at **±0.01 over 3273 paired jets** — the largest
+degradation `dlund_mbr` cannot distinguish from zero. That number was produced on
+2026-08-06 for a different question (spline vs control), before §12 was written and before
+any selection arm existed. *Where ≤ 2 of 8 comes from:* §12.2's B2 allowed violations on
+fewer than 2 of 4 arms, i.e. a **25% rate**; 2 of 8 is the same rate on twice the arms, and
+B2 was committed (`e5e3d38`) before §13's numbers existed.
+
+**D2 — the gain has to survive the fielded pipeline.** Δ(`dlnz_mbr`) **≤ −0.020** with the
+per-arm CI excluding 0 on **≥ 6 of 8**. Same −0.020 as §12.2's B1, same justification (≈5%
+of the 0.41 baseline, 2× the ruler's own resolution), committed before §13. This is a real
+risk and not a formality: §13 scored the coordinate table directly, while `run_closure`
+scores `hat.nodes` after `describe_cells`, through the empty gate and the `min_emissions`
+floor.
+
+**D3 — nothing else on the fielded row moves.** `mult_bias_mbr` changes by less than 0.05
+emissions and `p_empty_pred` by less than 0.02 on ≥ 7 of 8 arms. A decode that buys `ln z`
+by shifting the multiplicity or the emptiness rate has changed a different product.
+`dlund_posterior_medoid` and `dlund_identity` are **controls**: both are built from the
+same draws without any EMD, so both must be **exactly** unchanged, and a nonzero delta
+there means the two sides did not share their pool.
+
+### The verdict, three-way and stated now
+
+| | condition | verdict |
+|---|---|---|
+| **DEFAULT** | D1 **and** D2 **and** D3 | flip `decode.mbr_cloud_source` to `"coords"` and `decode.mbr_coords` to `"+lnz"` in `configs/decode/default.yaml`, and say so in `USAGE.md` / `CONFIGURATION.md` |
+| **AVAILABLE-NOT-DEFAULT** | D2 **and not** D1 | keep §13.4 clause 3: the gain is real and is bought with a **measurable** loss on the deliverable. Ships as it does today |
+| **RECONSIDER-THE-BUILD** | **not** D2 | the §13 gain does not reach the fielded pipeline or does not reproduce on fresh jets. A1 then ships a knob that does not do what §13 said it does, and that has to be recorded in §13 rather than in a footnote |
+| **INCONCLUSIVE** | D2 holds, D1 holds, D3 fails | the trade is not the one priced. Report and stop; do **not** re-cut D3 |
+
+### The position on the trade, written before the numbers
+
+Required by `PLAN_next_steps.md` A4, and it is the content of D1. **The fielded headline
+may not measurably degrade at the resolution of the instrument that defines it.** Inside
+±0.010 the headline is unchanged *as far as `dlund_mbr` can tell*, and then the `ln z` gain
+— an order of magnitude larger and 8/8-significant in §13 — is what decides. Outside it,
+the headline is measurably worse and a diagnostic improvement does not buy that, however
+much larger it is: `dlund_mbr` is what the product is quoted on.
+
+Two facts are put beside the verdict rather than into it, because both are context and
+neither is a threshold: the gain is ≈10× the cost in absolute terms; and `dlund_mbr`
+**already** loses to the free one-node `dlund_posterior_medoid` by ≈0.020 on all eight arms
+(§3, reading 4), so a +0.0042 would be a fifth of a gap the decode already carries. That
+second fact is an argument for tolerating the cost and it is deliberately **not** encoded
+in D1 — it would have been invented after §13.3, which is exactly the move §13.3 declined
+to make.
+
+**Guards printed beside the verdict:** `ground_diameter` vs `R` at both gdims (8.485
+against 4.243 and 4.925 — asserted, not assumed), `winner_moved_rate`,
+`leading_cell_moved_rate`, `n` on every row, the `dlund_identity` /
+`dlund_posterior_medoid` controls, and the jet slice actually scored.
+
+**Anti-circularity:** `R`, `K`, `mbr_n_candidates` and `lnkt_cut` are the fielded values and
+are tuned against nothing. The two thresholds (+0.010, −0.020) both predate §13. No arm,
+tier or key below is chosen after seeing a §14 number.

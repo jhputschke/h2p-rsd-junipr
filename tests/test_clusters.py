@@ -642,17 +642,17 @@ def test_truth_and_draws_share_a_representation_only_under_coords(small_jets):
     kw = dict(lnkt_cut=-1e9, weight="kt", coords="lnDR_lnkt")
 
     tc = _truth_cloud(item, geom, **kw)
-    cells_cloud = lund_cloud(cells, geom, **kw)
+    cells_cloud = lund_cloud(cells, geom, **kw)          # the DRAWS' representation
     coords_cloud = lund_cloud([row for row in yraw], geom, **kw)
 
-    mismatched = _weight_audit(tc, [cells_cloud], R=8.485)
-    matched = _weight_audit(tc, [coords_cloud], R=8.485)
+    mismatched = _weight_audit(tc, cells_cloud, [cells_cloud], R=8.485)
+    matched = _weight_audit(tc, coords_cloud, [coords_cloud], R=8.485)
     assert matched["W_ratio"] == pytest.approx(1.0, abs=1e-12)
-    assert matched["R_dW_mean"] == pytest.approx(0.0, abs=1e-9)
+    assert matched["R_dW"] == pytest.approx(0.0, abs=1e-9)
     # ...and the "cells" side is NOT ~0: the truth carries a different total mass from the
     # cell-centre representation of the very same emissions.
     assert abs(mismatched["W_ratio"] - 1.0) > 1e-6
-    assert mismatched["R_dW_mean"] > 1e-6
+    assert mismatched["R_dW"] > 1e-6
 
 
 @pytest.mark.skipif(not _POT_OK, reason="POT not installed")
@@ -700,8 +700,18 @@ def test_run_cluster_diagnostics_reports_the_weight_audit(small_jets):
                                 n_jets=8, decode=decode_params(cfg), verbose=False,
                                 null_reps=2)
     wa = m["weight_audit"]
-    for k in ("W_truth_over_W_draw", "R_dW_mean", "R_dW_over_d_nearest_draw", "matched"):
+    for k in ("W_truth_over_W_truth_as_drawn", "R_dW_mean", "R_dW_physical_mean",
+              "R_dW_over_d_nearest_draw", "R_dW_over_R_dW_physical", "matched"):
         assert k in wa
     assert wa["matched"] is False          # the fielded "cells" path IS mismatched
-    assert all("W_ratio" in r and "R_dW_mean" in r for r in m["per_jet"])
+    assert all("W_ratio" in r and "R_dW" in r for r in m["per_jet"])
     assert m["config"]["mbr_cloud_source"] == "cells"
+
+    # ...and under "coords" the same call reports it matched, exactly (the ratio is 1 by
+    # construction there, not by measurement).
+    mc = run_cluster_diagnostics(model, ds, jets, geom, torch.device("cpu"), K=10,
+                                 n_jets=8, verbose=False, null_reps=2,
+                                 decode={**decode_params(cfg),
+                                         "mbr_cloud_source": "coords"})
+    assert mc["weight_audit"]["matched"] is True
+    assert mc["weight_audit"]["R_dW_mean"] == pytest.approx(0.0, abs=1e-9)

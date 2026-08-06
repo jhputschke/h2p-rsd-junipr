@@ -237,22 +237,37 @@ def _truth_cloud(item, geom, **cloud_kw):
     return lund_cloud([row for row in y], geom, **cloud_kw)
 
 
-def _weight_audit(tc, clouds, R: float) -> dict:
-    """How much total mass the truth cloud carries against the draws' — the A3 audit.
+def _weight_audit(tc, tc_as_drawn, clouds, R: float) -> dict:
+    """What the truth/draw REPRESENTATION mismatch costs, isolated from the real one.
 
-    `W_truth / <W_draw>` is 1.0 when the two sides are built in the same representation.
-    `R·|ΔW|` is what the EMD's imbalance term charges for the difference, and is the
-    number to compare against a typical `d`: a ratio near 1 is not evidence of a small
-    effect until it is priced in the units the metric actually uses."""
+    Two different imbalances live on top of each other here and only one is a defect:
+
+      * a truth tree of `n_y` emissions against draws of other multiplicities carries a
+        genuinely different total mass. That is **physics** — the EMD's imbalance term
+        exists to charge it, and `W_draw_mean` is reported only as the scale it happens on.
+      * the truth's OWN emissions weighted by `exp(v_continuous)` while the identical
+        emissions, had they been drawn, would be weighted by `exp(v_cell_centre)`. That is
+        the **defect** (docs/PLAN_z_aware.md §4/WP-3's inset), and it is what `tc_as_drawn`
+        isolates: the same tree, put through the representation the draws use.
+
+    So `W_ratio = W_truth / W_truth_as_drawn` is exactly 1 when the two sides agree, and
+    `R·|ΔW|` is the spurious charge the EMD adds on every pair — the number to read against
+    a typical `d`, because a ratio near 1 is not evidence of a small effect until it is
+    priced in the units the metric charges in."""
     w_truth = float(np.sum(tc[1]))
+    w_as_drawn = float(np.sum(tc_as_drawn[1]))
     w_draws = np.array([float(np.sum(w)) for _, w in clouds], dtype=float)
     nz = w_draws[w_draws > 0]
-    w_draw = float(nz.mean()) if nz.size else float("nan")
     return {
         "W_truth": w_truth,
-        "W_draw_mean": w_draw,
-        "W_ratio": (w_truth / w_draw) if w_draw else float("nan"),
-        "R_dW_mean": float(R * np.abs(w_truth - w_draws).mean()) if w_draws.size
+        "W_truth_as_drawn": w_as_drawn,
+        "W_draw_mean": float(nz.mean()) if nz.size else float("nan"),
+        "W_ratio": (w_truth / w_as_drawn) if w_as_drawn else float("nan"),
+        "R_dW": float(R * abs(w_truth - w_as_drawn)),
+        # For scale only: what the metric charges for the multiplicity difference, which
+        # is real and is not the defect. The defect has to be read against THIS, not
+        # against zero.
+        "R_dW_physical": float(R * np.abs(w_truth - w_draws).mean()) if w_draws.size
         else float("nan"),
     }
 
@@ -332,7 +347,12 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
         # --- the truth, and every draw's distance to it ------------------------------
         ny = int(item["ny"])
         tc = _truth_cloud(item, geometry, **cloud_kw)
-        waudit = _weight_audit(tc, clouds, float(mk["R"]))
+        # The SAME tree in the representation the draws use — the A3 comparison. Under
+        # `"coords"` the draws are continuous too, so it is the truth cloud itself and the
+        # ratio is 1 by construction rather than by measurement.
+        tc_as_drawn = tc if cloud_source == "coords" else lund_cloud(
+            [int(c) for c in item["yc"].tolist()], geometry, **cloud_kw)
+        waudit = _weight_audit(tc, tc_as_drawn, clouds, float(mk["R"]))
         dt = lund_emd_matrix([tc], clouds, R=mk["R"], beta=mk["beta"], norm=mk["norm"],
                              periodic_phi=mk["periodic_phi"], phi_col=mk["phi_col"],
                              backend=ck["backend"], geom=geometry)[0]
@@ -555,18 +575,30 @@ def summarise_clusters(rows, stability_rows=None, *, alpha=0.32, verbose=True) -
         # --- G5 ------------------------------------------------------------------
         "top_mass_mc_error": mc_err,
         # --- A3: the truth/draw weight audit (docs/PLAN_z_aware.md §4/WP-3 inset) ---
-        # `W_ratio` is 1 and `R_dW` is 0 exactly when the truth and the draws are built
-        # in the same representation. Quoted beside `d_nearest_draw_mean`, which is the
-        # scale `R_dW` has to be read against — a charge of 0.05 on a typical d of 1.5 is
-        # a different statement from the same charge on a d of 0.1.
+        # `W_ratio` is 1 and `R_dW` is 0 exactly when the truth and the draws are built in
+        # the same representation — the SAME tree through both, so the genuine
+        # multiplicity imbalance (`R_dW_physical`) is divided out rather than mixed in.
+        # Quoted beside `d_nearest_draw_mean`, which is the scale `R_dW` has to be read
+        # against: a charge of 0.05 on a typical d of 1.5 is a different statement from
+        # the same charge on a d of 0.1.
         "weight_audit": {
-            "W_truth_over_W_draw": _mean(rows, "W_ratio"),
-            "R_dW_mean": _mean(rows, "R_dW_mean"),
+            "W_truth_over_W_truth_as_drawn": _mean(rows, "W_ratio"),
+            "R_dW_mean": _mean(rows, "R_dW"),
             "W_truth_mean": _mean(rows, "W_truth"),
+            "W_truth_as_drawn_mean": _mean(rows, "W_truth_as_drawn"),
             "W_draw_mean": _mean(rows, "W_draw_mean"),
+            "R_dW_physical_mean": _mean(rows, "R_dW_physical"),
+            # Two denominators, because they answer different questions: `d_mbr` is the
+            # TYPICAL distance the gates are read at, and `d_nearest_draw` is the tightest
+            # scale in the table — the one a spurious charge could plausibly swamp.
+            "R_dW_over_d_mbr": (_mean(rows, "R_dW") / _mean(rows, "d_mbr")
+                                if _mean(rows, "d_mbr") else float("nan")),
             "R_dW_over_d_nearest_draw": (
-                _mean(rows, "R_dW_mean") / _mean(rows, "d_nearest_draw")
+                _mean(rows, "R_dW") / _mean(rows, "d_nearest_draw")
                 if _mean(rows, "d_nearest_draw") else float("nan")),
+            "R_dW_over_R_dW_physical": (
+                _mean(rows, "R_dW") / _mean(rows, "R_dW_physical")
+                if _mean(rows, "R_dW_physical") else float("nan")),
             "matched": bool(abs(_mean(rows, "W_ratio") - 1.0) < 1e-9),
         },
         # --- G6 ------------------------------------------------------------------
@@ -669,13 +701,16 @@ def _print_clusters(m: dict) -> None:
           f"(a metric-convention bug if this is not ~0)")
     wa = m.get("weight_audit")
     if wa:
-        print(f"  truth/draw weight audit: W_truth/W_draw = "
-              f"{wa['W_truth_over_W_draw']:.4f}   R|dW| = {wa['R_dW_mean']:.4f}"
-              f"  ({wa['R_dW_over_d_nearest_draw']:.1%} of <d_nearest_draw>)"
-              + ("   -- matched: truth and draws are in the SAME representation"
+        print(f"  truth/draw weight audit: W_truth / W_truth_as_drawn = "
+              f"{wa['W_truth_over_W_truth_as_drawn']:.4f}   spurious R|dW| = "
+              f"{wa['R_dW_mean']:.4f}"
+              f"  ({wa['R_dW_over_d_mbr']:.1%} of <d_mbr>,"
+              f" {wa['R_dW_over_d_nearest_draw']:.1%} of <d_nearest_draw>,"
+              f" {wa['R_dW_over_R_dW_physical']:.1%} of the real imbalance charge)"
+              + ("\n      -- matched: truth and draws are in the SAME representation"
                  if wa["matched"] else
-                 "   -- MISMATCHED: the truth is continuous and the draws are cell "
-                 "centres, so\n      the kt weights differ per point (set "
+                 "\n      -- MISMATCHED: the truth is continuous and the draws are cell "
+                 "centres, so the kt\n         weights differ per point (set "
                  "decode.mbr_cloud_source=coords to remove it)"))
     r, rT = m["G6_reliability"], m["G6_reliability_recalibrated"]
     print(f"  gate G6: ECE = {r['ece']:.4f} raw -> {rT['ece']:.4f} at T = "
