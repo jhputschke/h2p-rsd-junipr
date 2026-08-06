@@ -647,3 +647,87 @@ unrelated to the question this document answered.
 **Recorded in:** `SUMMARY_Model_Status.md` §2.7 (new), §2.5 (row withdrawn), §3, §4.1(4),
 §4.5(1) and §5; `PLAN_lnz_spline_head.md` §6.2 (withdrawn), §6.5, §8.5, §9.4 and §9.5a;
 `CONFIGURATION.md` (the new closure keys, and the raise); `USAGE.md`.
+
+---
+
+# §12. PRE-REGISTRATION — is the `ln z`-blind **selection** worth fixing?
+
+Written 2026-08-06, **before the arms it reads run**. This is a *different question* from §5
+and must not be confused with it.
+
+**§5 asked** whether `d(MBR)`'s regression was an artifact of a z-blind metric. WP-0 killed
+its premise: there is no regression (§11.1). §5 stays unscored and untouched.
+
+**§12 asks** something WP-0 did not address and could not have: the decode reports the MBR
+winner's `ln z`, which is a **single draw** from `q(ln z | cells, x)`, where a centrality-based
+estimate off the *same* draws is measurably closer to the truth. Measured within-arm, paired,
+1000 jets:
+
+| within-arm paired Δ | result |
+|---|---|
+| MBR winner's `ln z` − identity(x)'s `ln z` | −0.008…+0.008, **0/8 CIs exclude 0** |
+| posterior geo-median's `ln z` − MBR winner's `ln z` | **−0.047 … −0.071, 8/8 CIs exclude 0** |
+
+So `≈0.065` of `|Δ ln z|` — about 16% of the 0.41 baseline — sits between what the decode
+reports and what the same posterior already knows. The question is how much of that a
+selection **restricted to the drawn pool** (`H = {pool}`, the standing discipline) can
+actually recover, and whether it costs the `(u, v)` half.
+
+This is the same shape of argument `medoid_cell` already won one coordinate over — *"the mode
+is the estimator for a loss nobody is measuring"*, mode 1.030× identity vs medoid 0.944× — and
+it is **family-independent**: it is a decode fix, not a spline result. Nothing here reopens
+§2.5.
+
+## 12.1 The measurement
+
+Per arm, ONE pass, in order: seed → `draws_by_jet` → `coords_by_jet` (one batched
+`sample_coordinates_many`, index-aligned) → **three selections off byte-identical draws and
+coordinates, differing only in the ground metric**:
+
+| arm | cloud source | gdim | isolates |
+|---|---|---|---|
+| `cells-2D` | cell centres | 2 | **the fielded selection** |
+| `cont-2D` | coordinate rows | 2 | de-quantization alone |
+| `cont-3D` | coordinate rows | 3 (`+lnz`) | de-quantization **+** `ln z` |
+
+`cont-2D` is not optional: "+lnz vs cells" changes *two* things at once (§4/WP-4), and without
+it a win is unattributable.
+
+Two reference points bound what any pool-restricted rule could reach, both free numpy:
+
+- **`pool-medoid(ln z)`** — the draw minimising mean `|Δ ln z|` to the other draws. The best a
+  selection obeying `H = {pool}` can do **on the `ln z` axis alone**, i.e. the realistic ceiling.
+- **`free-median(ln z)`** — the unrestricted L1 Bayes point. The 0.065 figure above.
+
+Held fixed at the fielded values: `K = 200`, `mbr_n_candidates = 64`, `pot`, `R = 8.485`,
+`β = 1`, `weight = kt`, `lnkt_cut` inherited, cpu. 1000 jets, 8 arms.
+
+## 12.2 The verdict rule — fixed before the run
+
+**BUILD WP-3 iff all three hold:**
+
+- **B1** `Δ(dlnz) = cont-3D − cells-2D` is **≤ −0.020** on ≥ 3/4 spline arms, with the paired
+  95% CI excluding 0 on ≥ 3/4. *(0.020 is ≈5% of the 0.41 baseline and 2× this ruler's own
+  pooled resolution from §11.1; the decode-layer precedent for "worth fielding" is the
+  medoid's ~8% over the mode.)*
+- **B2** `Δ(dlund_cont 2-D) = cont-3D − cells-2D` does **not** exceed **+0.020** with CI
+  excluding 0 on ≥ 2/4. *The `(u, v)` half must not be bought with `ln z`* — C3's spirit,
+  and the reason `dlund_mbr` stays the headline.
+- **B3** `winner_moved_rate ≥ 0.05` on ≥ 3/4. *A selection that cannot move cannot deliver
+  anything* — the §5 NOT-SCORED clause, restated as a precondition rather than an excuse.
+
+**DON'T BUILD otherwise.** If B1 fails specifically, the finding is that the 0.065 lever is
+**real but unreachable by this mechanism** — the same shape as §2.4's oracle-N, and it should
+be recorded as a stop-sign so the obvious fix is not re-proposed.
+
+**Attribution clause, declared now:** if `cont-2D` alone accounts for most of the Δ, the
+effect is **de-quantization**, not `ln z`, and `+lnz` is not what earned it. Reported either
+way, and it changes what gets built.
+
+**Guards printed beside the verdict:** `ground_diameter` vs `R` at both dimensions (8.485
+against 4.243 and 4.925 — clears, asserted not assumed), the pool-restricted and free `ln z`
+ceilings, `winner_moved_rate`, `leading_cell_moved_rate`, and the absolute `|Δ ln z|` of every
+arm so the deltas are readable against their own scale.
+
+**Anti-circularity:** `R`, `K`, `mbr_n_candidates` and `lnkt_cut` are the fielded values and
+are not tuned against any number this produces.
