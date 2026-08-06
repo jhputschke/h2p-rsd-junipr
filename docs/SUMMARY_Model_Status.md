@@ -8,7 +8,7 @@ number links back to a primary record; nothing here is a new measurement.
 Primary records: `PROD_TEST_v0_RESULTS.md`, `PROD_TEST_v1_RESULTS.md`,
 `PROD_TEST_edit_RESULTS.md`, `PLAN_PosteriorClusters.md` (implementation notes),
 `PLAN_StratifiedMBR.md` §1a–§1d, `PLAN_NCeilingProbe.md` §A,
-`PLAN_lnz_spline_head.md` §6, §8 and §9, `PLAN_z_aware.md` §11 (WP-0 run; WP-3/WP-4 not),
+`PLAN_lnz_spline_head.md` §6, §8 and §9, `PLAN_z_aware.md` §11 and §13 (WP-0 null; WP-3 indicated),
 and the run artifacts under
 `runs/prod_test_v1/v1_contstop_s0/…/` (`per_jet_clusters.json`,
 `per_jet_clusters_K1000.json`, `eval_metrics_wp34.json`),
@@ -17,7 +17,8 @@ and the run artifacts under
 `runs/lnz_spline/offset_head_diagnostic.json` and
 `runs/lnz_spline/offset_head_diagnostic_cellctr.json` and
 `runs/zaware_wp0/full-20260806-131513/wp0.json` (300 jets) and
-`runs/zaware_wp0/esc1000-20260806-132207/wp0.json` (the 1000-jet escalation).
+`runs/zaware_wp0/esc1000-20260806-132207/wp0.json` (the 1000-jet escalation) and
+`runs/zaware_sel/full-20260806-143047/ceiling.json` (the §12/§13 selection ceiling).
 
 ---
 
