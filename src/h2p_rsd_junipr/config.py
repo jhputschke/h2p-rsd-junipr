@@ -179,6 +179,18 @@ class ARJuniprConfig:
     # `du` is deliberately NOT given one: it has no measured defect (0/6 seeds).
     dv_head: str = "truncnorm"          # truncnorm | spline
     dv_spline_bins: int = 8             # spline pieces; only read when dv_head=spline
+    # --- the coordinate head's CONDITIONING (docs/PLAN_lnz_spline_head.md §8.5) --
+    # The `dv` spline measured that the residual is a per-cell LOCATION bias reproduced
+    # identically by a truncated normal and by a spline with strictly more freedom — a
+    # limit on what the head can PREDICT, not on what it can express. The most likely
+    # reason is that the cell reaches the head only as a learned embedding of a
+    # CATEGORICAL id, so nothing tells it that cell 437 and cell 438 are neighbours and
+    # every cell's within-cell tilt has to be learned from its own emissions alone.
+    # True appends the cell's continuous centre, affinely mapped onto [-1, 1] by the
+    # geometry's own ranges — a FIXED transform, never data-dependent, so a checkpoint
+    # means the same thing on a new sample (the `features.py` standardization rule).
+    # False is the default and is bit-identical: no extra input, no extra buffer.
+    coord_cell_center: bool = False
 
 
 @dataclass

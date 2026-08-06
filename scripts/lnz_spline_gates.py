@@ -64,6 +64,14 @@ ARMS: dict[str, tuple[str | None, str, str]] = {
     "dvspline_s2": ("spline_s2", "run", "dv"),
     "spline_k16_s2": ("spline_s2", "run", "k16"),
     "contstop_spline_s0": ("v1_contstop_s0", "control", "transfer"),
+    # §8.5(1): the conditioning experiment. Control is the SAME seed's ln z-spline arm, so
+    # the row prices the cell-centre input alone.
+    "cellctr_s0": ("spline_s0", "run", "cellctr"),
+    "cellctr_s1": ("spline_s1", "run", "cellctr"),
+    "cellctr_s2": ("spline_s2", "run", "cellctr"),
+    # §8.5(2): does the dv spline pay once the conditioning is fixed? Control is the
+    # cell-centre arm WITHOUT the dv spline, again isolating one change.
+    "cellctr_dvspline_s0": ("cellctr_s0", "run", "cellctr_dv"),
 }
 COORDS = ("du", "dv", "ln_z", "psi")
 

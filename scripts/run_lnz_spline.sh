@@ -66,6 +66,17 @@ ARMS=(
   # --- §7.2b: is seed 2's 4% miss expressiveness or variance? K was chosen, not fitted.
   #     ONE arm, on the seed that missed, and K is NOT tuned across seeds afterwards.
   "spline_k16_s2|trainer.seed=2 model.lnz_spline_bins=16"
+  # --- §8.5(1): the CONDITIONING experiment. The dv spline failed because the residual
+  #     is a per-cell LOCATION bias identical under both density families — a limit on
+  #     what the head can predict, not express. The cell reaches it only as a learned
+  #     embedding of a categorical id; this adds the cell's continuous centre. Control is
+  #     spline_s0/1/2, so the row prices the conditioning change alone.
+  "cellctr_s0|trainer.seed=0 model.coord_cell_center=true"
+  "cellctr_s1|trainer.seed=1 model.coord_cell_center=true"
+  "cellctr_s2|trainer.seed=2 model.coord_cell_center=true"
+  # --- §8.5(2): does the dv spline pay ONCE the conditioning is fixed? One seed, because
+  #     it only becomes a question if cellctr_* moves the per-cell bias at all.
+  "cellctr_dvspline_s0|trainer.seed=0 model.coord_cell_center=true model.dv_head=spline"
 )
 
 EXTRA="model.lnz_head=spline"

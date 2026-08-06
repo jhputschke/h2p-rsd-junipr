@@ -187,6 +187,15 @@ class ARJunipr(PosteriorModel):
         # slots 0..3 keep their meaning and an older checkpoint still reads correctly.
         self.dv_n_params = (rq_spline_n_params(self.dv_spline_bins) if self.dv_spline else 2)
         self.offset_n_params = 2 + self.dv_n_params
+        # Continuous cell centre as a coordinate-head input (docs/PLAN_lnz_spline_head.md
+        # §8.5). The affine map onto [-1, 1] is built from the geometry's own ranges and
+        # kept as plain floats, so NO buffer is added and the off-path state_dict stays
+        # byte-identical — the same reason `_ln_zcut` is a float rather than a buffer.
+        self.coord_cell_center = bool(getattr(m, "coord_cell_center", False))
+        lo_u, hi_u = geometry.ln_invdelta_range
+        lo_v, hi_v = geometry.ln_kt_range
+        self._cc_u_mid, self._cc_u_scale = (lo_u + hi_u) / 2.0, 2.0 / max(hi_u - lo_u, 1e-9)
+        self._cc_v_mid, self._cc_v_scale = (lo_v + hi_v) / 2.0, 2.0 / max(hi_v - lo_v, 1e-9)
 
         emb = int(cfg.encoder.emb_dim)  # shared emb dim (encoder x_feat <-> decoder y_embed)
         self.emb_dim = emb
@@ -241,8 +250,8 @@ class ARJunipr(PosteriorModel):
         # exactly today's 8 outputs in today's order (parity) and every spline spends its
         # width on itself rather than carrying unused numbers.
         self.coord_head = _mlp(
-            self.dec_dim + self.ctx_dim + emb, self.dec_dim,
-            self.offset_n_params + self.lnz_n_params + 2,
+            self.dec_dim + self.ctx_dim + emb + (2 if self.coord_cell_center else 0),
+            self.dec_dim, self.offset_n_params + self.lnz_n_params + 2,
             int(m.coord_head_layers),
         )
 
@@ -315,6 +324,25 @@ class ARJunipr(PosteriorModel):
         return self._apply_xattn(out, kv)
 
     # -- continuous coordinate head -----------------------------------------
+    def _coord_input(self, eh: torch.Tensor, yc: torch.Tensor) -> torch.Tensor:
+        """The coordinate head's input, built in ONE place.
+
+        `[decoder state | e(x)]` and the cell EMBEDDING, plus — when
+        `model.coord_cell_center` — the cell's continuous centre on `[-1, 1]`.
+
+        Why the centre can matter at all, given the embedding already identifies the cell:
+        the embedding is a free vector per categorical id, so the head is told *which* cell
+        it is in and nothing about *where* that cell is. Neighbouring cells share no
+        parameters, and each cell's within-cell tilt has to be learned from its own
+        emissions. The centre is the one input that makes the cell grid a geometry rather
+        than 900 unrelated labels (docs/PLAN_lnz_spline_head.md §8.5)."""
+        emb = self.y_embed(yc)
+        if not self.coord_cell_center:
+            return torch.cat([eh, emb], dim=-1)
+        cx = (self.cell_cx[yc] - self._cc_u_mid) * self._cc_u_scale
+        cy = (self.cell_cy[yc] - self._cc_v_mid) * self._cc_v_scale
+        return torch.cat([eh, emb, cx.unsqueeze(-1), cy.unsqueeze(-1)], dim=-1)
+
     def _coord_params(self, coord_in: torch.Tensor) -> CoordParams:
         """The per-node coordinate-head parameters, as a NAMED tuple.
 
@@ -523,8 +551,7 @@ class ARJunipr(PosteriorModel):
             split_ll = (split_per * split_mask).sum(1)
 
             if self.continuous_coords:
-                cell_emb = self.y_embed(yc.clamp(min=0))
-                params = self._coord_params(torch.cat([eh_t, cell_emb], dim=-1))
+                params = self._coord_params(self._coord_input(eh_t, yc.clamp(min=0)))
                 cx, cy = self.cell_cx[yc], self.cell_cy[yc]
                 coord_per = self._coord_logprob(
                     params, yraw[..., 0], yraw[..., 1], yraw[..., 2], yraw[..., 3], cx, cy
@@ -562,7 +589,7 @@ class ARJunipr(PosteriorModel):
         e = self.encode(xf, nx)
         out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
         eh_t = torch.cat([out[:, :L, :], e.unsqueeze(1).expand(-1, L, -1)], dim=-1)
-        p = self._coord_params(torch.cat([eh_t, self.y_embed(yc.clamp(min=0))], dim=-1))
+        p = self._coord_params(self._coord_input(eh_t, yc.clamp(min=0)))
         cx, cy = self.cell_cx[yc], self.cell_cy[yc]
         du = (yraw[..., 0] - cx).clamp(-self.half_u, self.half_u)
         dv = (yraw[..., 1] - cy).clamp(-self.half_v, self.half_v)
@@ -842,7 +869,7 @@ class ARJunipr(PosteriorModel):
             e = e.expand(B, -1)
         out = self._decode_states(yc, e, self.xattn_kv(xf, nx))
         eh = torch.cat([out, e.unsqueeze(1).expand(-1, L + 1, -1)], dim=-1)[:, :L, :]
-        return self._coord_params(torch.cat([eh, self.y_embed(yc)], dim=-1))
+        return self._coord_params(self._coord_input(eh, yc))
 
     @torch.inference_mode()
     def coord_head_params(self, xf, nx, cells) -> CoordParams | None:
@@ -916,8 +943,7 @@ class ARJunipr(PosteriorModel):
             kappa_col = [None] * L
             psi_flag: list = [None] * L
             if self.continuous_coords:
-                cell_emb = self.y_embed(yc)
-                params = self._coord_params(torch.cat([eh_t, cell_emb], dim=-1))
+                params = self._coord_params(self._coord_input(eh_t, yc))
                 du_mean, mu, kappa = params.du_mean, params.mu, params.kappa
                 dv_mean = self._dv_point(params)
                 kappa_col = [float(kappa[0, t]) for t in range(L)]

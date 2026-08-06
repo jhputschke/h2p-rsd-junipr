@@ -392,3 +392,53 @@ def test_unknown_dv_head_raises():
     geom = Geometry.from_config(cfg.geometry)
     with pytest.raises(ValueError, match="model.dv_head must be"):
         build_model(cfg, geom)
+
+
+# ---------------------------------------------------------------------------
+# the coordinate head's CONDITIONING (PLAN_lnz_spline_head.md §8.5)
+# ---------------------------------------------------------------------------
+def test_cell_center_default_is_bit_identical():
+    """PARITY: off, the head's input width and every number are unchanged."""
+    a, _ = _model(coord_cell_center=False)
+    b, _ = _model()
+    assert a.coord_head[0].in_features == b.coord_head[0].in_features
+    ka, kb = a.state_dict(), b.state_dict()
+    assert ka.keys() == kb.keys()
+    assert max(float((ka[k] - kb[k]).abs().max()) for k in ka) == 0.0
+
+
+def test_cell_center_adds_exactly_two_normalised_inputs():
+    """On, the head gains two columns — the cell centre affinely mapped onto [-1, 1] by
+    the geometry's own ranges, which is a FIXED transform and not data-dependent.
+
+    The point of the feature is that neighbouring cells become NEARBY inputs rather than
+    unrelated categorical ids, so the test asserts the ordering as well as the range."""
+    base, _ = _model()
+    cc, geom = _model(coord_cell_center=True)
+    assert cc.coord_head[0].in_features == base.coord_head[0].in_features + 2
+
+    n = geom.n_cells
+    eh = torch.zeros(1, 3, cc.dec_dim + cc.ctx_dim)
+    with torch.no_grad():
+        centres = cc._coord_input(eh, torch.tensor([[0, n // 2, n - 1]]))[0, :, -2:]
+        # cells 1 and 2 differ by one step along ln kt (cell = ix * n_bins + iy)
+        near = cc._coord_input(eh, torch.tensor([[1, 2, 3]]))[0, :, -2:]
+    assert bool((centres.abs() <= 1.0).all()), "the centres must be normalised to [-1, 1]"
+    # first cell is the low corner, last is the high corner, and they are distinct
+    assert float(centres[0, 0]) < float(centres[-1, 0])
+    assert float(centres[0, 1]) < float(centres[-1, 1])
+    # Adjacent cells land one grid step apart — the property a categorical embedding does
+    # not have, and the whole point of the feature. The full range maps onto [-1, 1], so
+    # one cell is exactly 2/n_bins wide; asserting that rather than a loose bound is what
+    # makes this a statement about the geometry instead of about a threshold.
+    step = 2.0 / geom.n_bins
+    assert float(near[1, 1] - near[0, 1]) == pytest.approx(step, rel=1e-5)
+    assert float(near[1, 0] - near[0, 0]) == pytest.approx(0.0, abs=1e-6)  # same ln 1/dR row
+
+
+def test_cell_center_adds_no_buffer():
+    """The affine map is kept as plain floats, so no state_dict key appears and an older
+    checkpoint still loads strictly (the `_ln_zcut` precedent)."""
+    base, _ = _model()
+    cc, _ = _model(coord_cell_center=True)
+    assert set(cc.state_dict()) == set(base.state_dict())
