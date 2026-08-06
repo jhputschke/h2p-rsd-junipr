@@ -759,3 +759,97 @@ question is settled. That is the same trap §6.2 fell into.
    of a caveat. Everything else about §7.3 (the pre-registered `dv`-PIT primary read, the
    3 seeds, the cost, and §9.4's caveat against firing at all) is untouched: nothing in
    `PLAN_z_aware.md` §11 bears on the factorization.
+
+---
+
+# §10. PRE-REGISTRATION — does the spline's TARP gain transfer to the FIELDED family?
+
+Written 2026-08-06 on branch `nextStepsTrackAB`, **before `contstop_spline_s1`,
+`contstop_spline_s2` and `v1_contstop_s2` are trained.** This is `PLAN_next_steps.md` **B1**
+and `SUMMARY_Model_Status.md` §4.2(4); §6.4 is the finding it settles, and §6.4's own last
+line asked for exactly this arm.
+
+## 10.1 The question, and why one arm cannot answer it
+
+§6.4 measured, on the **explicit-`q(N|x)`** family:
+
+| seed | control | + spline | Δ | vs the MC null p95 = 0.0275 |
+|---|---:|---:|---:|---|
+| s0 | 0.0415 | **0.0215** | **−0.0200** | crosses below — now passes G7 |
+| s1 | 0.0350 | **0.0265** | **−0.0085** | crosses below — now passes G7 |
+| s2 | 0.0335 | 0.0400 | **+0.0065** | still fails |
+
+Two of three, with a contrary seed. §6.4 recorded that as *suggestive, not a verdict*.
+
+**But the fielded family is continue/stop**, and there it has exactly **one** arm, which
+moved the *other* way:
+
+| seed | control | + spline | Δ | |
+|---|---:|---:|---:|---|
+| s0 | 0.0200 | 0.0255 | **+0.0055** | both pass; the spline is *worse* |
+
+One seed, going the wrong way, on the family that is actually shipped. That is the state
+this pre-registration exists to resolve, and it is a genuinely open question in both
+directions: the coordinate density is shared between the families, so the gain either
+transfers or it was a property of a posterior that was too narrow to begin with.
+
+## 10.2 The arms
+
+Three trainings, all `presets/prod_test_v1.yaml` — the same preset, data, geometry,
+encoder, aux columns, epochs and batch size as every arm above:
+
+| arm | overrides | role |
+|---|---|---|
+| `contstop_spline_s1` | `trainer.seed=1 model.use_multiplicity_head=false model.lnz_head=spline` | spline, seed 1 |
+| `contstop_spline_s2` | `trainer.seed=2 model.use_multiplicity_head=false model.lnz_head=spline` | spline, seed 2 |
+| `v1_contstop_s2` | `trainer.seed=2 model.use_multiplicity_head=false` | the **missing control** |
+
+`contstop_spline_s0`, `v1_contstop_s0` and `v1_contstop_s1` already exist, so this
+completes three paired seeds. Evaluated with `scripts/eval_prod_test_v1.sh` — the standing
+two-pass command, unchanged — so TARP is computed at the same tier as every number above:
+**2000 jets, 200 references, `pooled`, 4000 MC null reps, p95 = 0.0275, cpu**.
+
+## 10.3 The verdict rule — fixed before the arms are trained
+
+Primary read: **paired Δ(`tarp_max_dev`) = spline − control**, seed by seed, on the three
+continue/stop pairs.
+
+- **T1 — TRANSFERS** iff Δ < 0 on **3 of 3** seeds **and** the mean Δ is **≤ −0.0085**.
+- **T2 — DOES NOT TRANSFER** otherwise.
+
+*Where −0.0085 comes from, and it is not this measurement.* It is the **weakest improving
+instance of the effect being transferred** — s1's −0.0085 in the table above, measured in
+§6.4 and committed long before this section. A transfer has to be at least as large as the
+smallest instance of the thing it transfers, or it is not the same effect. It is also
+comparable to the explicit family's own control seed spread (0.0415/0.0350/0.0335, range
+0.0080), so it is about one seed-to-seed fluctuation — the scale below which three seeds
+cannot distinguish an effect from a draw.
+
+*Why 3/3 and not 2/3.* A two-sided sign test on three pairs floors at **p = 0.25**, so the
+sign alone can never be evidence here — `SUMMARY` §5's standing lesson, which cost this
+repo a withdrawn conclusion one campaign ago. The sign clause is therefore a *precondition*
+and the effect-size clause is what carries the verdict; neither is sufficient alone.
+
+**Both outcomes are useful, and what each implies is fixed now:**
+
+- **T1 (TRANSFERS)** → §6.4's finding is a property of the coordinate density, not of the
+  family. `SUMMARY` §2.5's TARP row is upgraded from "suggestive" to a statement, and
+  `lnz_head="spline"` gains a second axis on the fielded family.
+- **T2 (DOES NOT TRANSFER)** → §6.4's TARP row must be quoted as **family-specific** from
+  now on: the coordinate density helps a joint posterior that is too narrow (the explicit
+  family, which fails G7 on all six arms) and does nothing measurable for one that already
+  passes. That is not a mark against the spline — it was fielded on NLL, PIT and support,
+  none of which this touches — and it *removes* a claim the roadmap is currently carrying.
+
+**Reported beside the verdict, and NOT scored** (so the arm cannot be re-read into a
+different verdict afterwards): `tarp_exceeds_null` and `tarp_exceeds_null_mc` per arm
+against the same 4000-rep band; val NLL; `pit_ks_max`; the `ln z` and `dv` PIT KS ratios;
+and G3's clause on the three new seeds. One clause is a **sanity gate rather than a
+read**: the val NLL must not *regress* on any of the three pairs — the spline improved it
+by −0.041 on `contstop_spline_s0` and on 4/4 arms overall, and a seed where it does not is
+a training failure to investigate, not a TARP result to report.
+
+**Anti-circularity:** the preset, the seeds, the eval tier and the TARP null band are the
+standing ones and are chosen against nothing this produces. No fourth seed is trained if
+the first three disagree — three is the number `SUMMARY` §4.2(4) asked for, and adding
+seeds until a pattern appears is the failure mode `PLAN_z_aware.md` §11 was written about.

@@ -284,6 +284,32 @@ CONF_BINS = 4          # quantile bins of top_mass / entropy in section 7
 SHOWCASE_JET = None    # None -> auto-pick the most AMBIGUOUS jet (see pick_showcase)
 
 WRITE_ARTIFACTS = True   # per_jet_clusters.json beside the checkpoint
+# One row per jet in that artifact (docs/PLAN_next_steps.md B5, SUMMARY 4.1(6)). Gate G5
+# compares `top_mass` / `entropy` across BUDGETS, and without per-jet rows the two tiers
+# can only be compared as means -- which is the unpaired comparison this repo has already
+# been caught by twice (SUMMARY section 5). The rows are a curated subset, not `ROWS`
+# verbatim: the coordinate arrays are the bulk of a row and none of them is a gate input.
+WRITE_PER_JET = True
+
+# --- budget overrides from the environment ----------------------------------
+# The three knobs a BUDGET arm varies, so re-running at another tier is a command rather
+# than an edit to a generated notebook -- and so the tier that produced an artifact is
+# recoverable from the shell history. Nothing else is overridable: these are the only
+# knobs whose variation is a measurement rather than a different question.
+#
+#   PJC_K_DRAWS=1000 PJC_MIN_CLUSTER_SIZE=10 jupyter nbconvert --execute ...
+#
+# docs/PLAN_next_steps.md B4: at K = 200 the `0 -> max(5, ceil(0.05 K))` default IS 10,
+# and at K = 1000 it is 50 -- so the committed cross-K comparison varied the budget AND
+# the clustering granularity together, and G6's cross-K row is unscored because of it.
+import os as _os
+
+for _name, _cast in (("N_JETS", int), ("K_DRAWS", int),
+                     ("CLUSTER_MIN_CLUSTER_SIZE", int), ("SEED", int)):
+    _env = _os.environ.get(f"PJC_{_name}")
+    if _env is not None:
+        globals()[_name] = _cast(_env)
+        print(f"[env] {_name} = {globals()[_name]}   (PJC_{_name})")
 
 # --- guards (plan section 4; every one RAISES rather than warning) -----------
 assert MBR_N_CANDIDATES == 0, (
@@ -2596,6 +2622,12 @@ if WRITE_ARTIFACTS:
             "cluster_min_cluster_size": int(CLUSTER_MIN_CLUSTER_SIZE),
             "cluster_split": bool(CLUSTER_SPLIT), "set_alpha": float(SET_ALPHA),
             "loss_quantile": float(LOSS_QUANTILE), "null_reps": int(NULL_REPS),
+            # What `0` resolved to. Recorded because `min_cluster_size` scales with K by
+            # default, so "the same setting" is a DIFFERENT granularity at another budget
+            # -- the confound docs/PLAN_next_steps.md B4 exists to remove.
+            "cluster_min_cluster_size_effective": int(
+                CLUSTER_MIN_CLUSTER_SIZE
+                or max(5, math.ceil(CLUSTER_MIN_MASS * K_DRAWS))),
         },
         "scalars": {
             "top_mass_mean": float(np.mean([r["top_mass"] for r in ROWS])),
@@ -2643,10 +2675,52 @@ if WRITE_ARTIFACTS:
             f"{scalar}|{key}": rows for (scalar, key), rows in CONF_TABLE.items()
         },
     }
+    if WRITE_PER_JET:
+        # ONE ROW PER JET (docs/PLAN_next_steps.md B5). `i` is the index into the jet file,
+        # so two tiers of the SAME file pair on it exactly and gate G5's paired criterion
+        # becomes computable instead of falling back to "quote the K=1000 tier". The shape
+        # precedent is on both halves of the suite already: `eval/clusters.py`'s
+        # `metrics["per_jet"]` and, since WP-1, `run_closure(per_jet=True)`.
+        #
+        # Curated, not `ROWS` verbatim: a row also carries the coordinate arrays of eight
+        # estimators plus the cluster object, which are the bulk of it and none of which is
+        # a gate input. Everything a gate reads is here.
+        _PJ_KEYS = (
+            "i", "weight", "ln_pt", "K", "n_true",
+            # G5 -- the two budget-stable scalars, and the one honest +/-
+            "top_mass", "entropy", "radius_top", "n_clusters", "masses", "radii",
+            "residual_mass", "silhouette", "separation", "precondition",
+            # G2 / G2' -- the medoid's placement, and the oracle distances with their null
+            "medoid_in_top", "medoid_cluster", "d_top", "d_best", "d_mbr",
+            "d_best_rand", "d_medoid_cluster", "d_nearest_draw", "d_median_draw",
+            "n_top", "n_second",
+            # G6 / G7 -- the reliability pair and the conformal score
+            "truth_in_top", "truth_unassigned", "truth_cluster", "cum_mass_to_truth",
+            # G3 and the emptiness decision
+            "q0", "empty_draw_mass", "empty_cluster", "empty_gate_fired", "gate_moved",
+            # the N ladder (docs/PLAN_StratifiedMBR.md), so its deltas can be paired too
+            "n_hat", "n_used", "n_hat_realized", "stratum_size", "n_medoid",
+            "d_mbr_n", "d_mbr_nmed", "d_mbr_ntrue", "d_oracle_stratum",
+        )
+        METRICS["per_jet"] = [
+            {k: (v.tolist() if hasattr(v, "tolist") else v)
+             for k, v in r.items() if k in _PJ_KEYS}
+            for r in ROWS
+        ]
+        METRICS["per_jet_note"] = (
+            "one row per scored jet, keyed by `i` = the index into the jet file, so two "
+            "budget tiers of the same file pair on it exactly. Curated: the per-estimator "
+            "coordinate arrays are omitted because no gate reads them."
+        )
     # K-suffixed off the default, so a budget arm can never clobber the K=200 record the
-    # gate verdicts were read from (docs/PLAN_StratifiedMBR.md WP2).
-    _name = ("per_jet_clusters.json" if K_DRAWS == 200
-             else f"per_jet_clusters_K{K_DRAWS}.json")
+    # gate verdicts were read from (docs/PLAN_StratifiedMBR.md WP2) -- and
+    # min_cluster_size-suffixed too, because `0 -> max(5, ceil(min_mass * K))` means the
+    # SAME K can be run at two granularities and B4 is exactly that arm.
+    _auto_mcs = max(5, math.ceil(CLUSTER_MIN_MASS * K_DRAWS))
+    _mcs = int(CLUSTER_MIN_CLUSTER_SIZE or _auto_mcs)
+    _name = ("per_jet_clusters.json" if K_DRAWS == 200 and _mcs == _auto_mcs
+             else f"per_jet_clusters_K{K_DRAWS}.json" if _mcs == _auto_mcs
+             else f"per_jet_clusters_K{K_DRAWS}_mcs{_mcs}.json")
     out = save_metrics(METRICS, (REPO / CKPT_PATH).parent / _name)
     print(f"wrote {out.relative_to(REPO)}")
 else:
