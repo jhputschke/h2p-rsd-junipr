@@ -977,3 +977,109 @@ against 4.243 and 4.925 — asserted, not assumed), `winner_moved_rate`,
 **Anti-circularity:** `R`, `K`, `mbr_n_candidates` and `lnkt_cut` are the fielded values and
 are tuned against nothing. The two thresholds (+0.010, −0.020) both predate §13. No arm,
 tier or key below is chosen after seeing a §14 number.
+
+---
+
+# §15. RESULT §14 — **AVAILABLE-NOT-DEFAULT.** The fielded headline pays more than the band
+
+Run 2026-08-06, branch `nextStepsTrackAB`. Runner: `scripts/zaware_default_decode.py`,
+8 arms × 1000 jets × 2 decodes off byte-identical draws **and** coordinates, ~19 min/arm at
+concurrency 6. Artifact: `runs/zaware_default/full-20260806-163256/default.json`. §14.3's
+D1/D2/D3 were committed (`fa45c9f`) before this runner was written.
+
+**Jets `[1000, 2000)`** of `data/jet_aux_asym_test.root`, disjoint from everything §11, §12
+and §13 scored, and through the **fielded** `run_closure` path that A1 built.
+
+## 15.1 D1 — the primary read, and it fails
+
+Δ`dlund_mbr` = `lnz` − `fielded`, per jet, paired **within** each arm:
+
+| arm | n | mean | paired BCa 95% | |
+|---|---:|---:|---|---|
+| `spline_s0` | 813 | +0.0092 | [−0.0013, +0.0199] | straddles 0 |
+| `spline_s1` | 812 | +0.0114 | [+0.0000, +0.0228] | **worse** |
+| `spline_s2` | 816 | +0.0045 | [−0.0060, +0.0153] | straddles 0 |
+| `contstop_spline_s0` | 808 | +0.0217 | [+0.0113, +0.0325] | **worse** |
+| `v1_base_s0` | 821 | +0.0099 | [−0.0006, +0.0202] | straddles 0 |
+| `v1_base_s1` | 812 | +0.0053 | [−0.0054, +0.0162] | straddles 0 |
+| `v1_base_s2` | 813 | +0.0183 | [+0.0082, +0.0289] | **worse** |
+| `v1_contstop_s0` | 810 | +0.0111 | [+0.0001, +0.0225] | **worse** |
+| **pooled** | **6505** | **+0.0114** | **[+0.0075, +0.0152]** | |
+
+- **D1a FAILS**: the pooled upper bound is **+0.0152**, above the +0.010 band.
+- **D1b FAILS**: the CI excludes 0 upward on **4 of 8** arms, above the ≤ 2 allowed.
+
+**The cost is ~2.7× what the post-hoc estimate said**, and that is the whole return on
+§14.1's two design choices. §13.3 computed +0.0042 [+0.0004, +0.0081] from stored cell ids
+on jets `[0, 1000)`; measured on a disjoint slice through the code a user actually runs it
+is **+0.0114 [+0.0075, +0.0152]**. A rule written to the §13.3 number — anything with a
+threshold near +0.005 — would have been scored against an estimate that was low by a factor
+of nearly three.
+
+## 15.2 D2 — the gain does survive the fielded pipeline
+
+| Δ`dlnz_mbr` | mean | paired BCa 95% |
+|---|---:|---|
+| `spline_s0` | **−0.0287** | [−0.0457, −0.0120] |
+| `spline_s1` | −0.0159 | [−0.0337, +0.0013] |
+| `spline_s2` | **−0.0441** | [−0.0618, −0.0279] |
+| `contstop_spline_s0` | **−0.0268** | [−0.0441, −0.0103] |
+| `v1_base_s0` | **−0.0320** | [−0.0496, −0.0148] |
+| `v1_base_s1` | **−0.0329** | [−0.0503, −0.0157] |
+| `v1_base_s2` | **−0.0268** | [−0.0435, −0.0103] |
+| `v1_contstop_s0` | **−0.0243** | [−0.0407, −0.0078] |
+| **pooled** | **−0.0289** | **[−0.0349, −0.0230]** |
+
+**D2 PASSES: 7 of 8** arms clear the −0.020 bar significantly (the bar and the count were
+fixed in advance). This was a real risk — §13 scored the coordinate table directly, while
+this goes through `describe_cells`, the empty gate and the `min_emissions` floor — and it
+held on fresh jets. **A1 ships a knob that does what §13 said it does.**
+
+## 15.3 D3 — nothing else moves, and the pairing is certified
+
+**D3 PASSES, 8/8.** `|Δ mult_bias_mbr|` ≤ 0.032 and `|Δ p_empty_pred|` ≤ 0.007 everywhere,
+against bounds of 0.05 and 0.02. Both no-EMD controls — `dlund_identity` and
+`dlund_posterior_medoid` — are **exactly 0.0000 on every arm**, which certifies that the two
+decodes saw the same pool: a nonzero delta there would have meant the sharing failed.
+
+`leading_cell_moved_rate` **40.6–45.8%** (§13 measured 44–49% for the same comparison);
+`n_hat` moves on 7.5–9.6% of jets.
+
+## 15.4 The context rows, and one that changes a §13 statement
+
+| pooled Δ, n = 6505 | mean | BCa 95% | arms significantly worse |
+|---|---:|---|---:|
+| `dlund_mbr` — cell centres *(the headline)* | +0.0114 | [+0.0075, +0.0152] | 4/8 |
+| `dlund_mbr_cont` — the winner's own `(u, v)` | **+0.0054** | **[+0.0014, +0.0092]** | 2/8 |
+| `dlund3_mbr_cont` — the same emission with `ln z` | **−0.0169** | **[−0.0224, −0.0114]** | 0/8 *(5/8 better)* |
+
+**§12.2's B2 ruler now shows a cost too.** B2 was written on `dlund_mbr_cont` and passed
+0/4 violations in §13; on this population it is +0.0054 with the pooled CI excluding 0.
+That does **not** retroactively fail B2 — B2 was scored on the data it was pre-registered
+for, and it passed there — but it removes the reading that "the `(u, v)` half is free". It
+is not free on either ruler; it is *small*, and on the 3-D ruler the trade is clearly
+positive.
+
+## 15.5 Verdict
+
+**AVAILABLE-NOT-DEFAULT** — D2 and D3 pass, D1 fails, which §14.3 mapped to this branch
+before the run. §13.4's clause 3 stands, now on a rule rather than on a caveat:
+
+> *the gain is real and is bought with a **measurable** loss on the deliverable.*
+
+`configs/decode/default.yaml` keeps `mbr_cloud_source: cells` and `mbr_coords: lnDR_lnkt`.
+`+lnz` ships measured, available and documented, like `mbr_n` and `dv_head="spline"` — with
+the difference that this one won *both* of its pre-registered gates (§12.2's B1/B2/B3, and
+§14.3's D2/D3) and lost only the one that asks whether it should displace the default.
+
+**What would change the verdict, stated so it is not re-litigated informally.** D1 is a
+statement about `dlund_mbr`, which compares leading-emission **cell centres** and is
+quantisation-limited by construction (cells are 0.2 wide against distances of ~0.6). If the
+fielded headline ever moves off the cell grid — to `dlund_mbr_cont` or `dlund3_mbr_cont` —
+then §14 has to be re-scored against whatever the new headline is, and on today's numbers
+the 3-D ruler would flip it. That is a decision about **what the product is quoted on**, not
+about this decode, and it is not made here.
+
+**Not touched by any of this:** `dlund_mbr` already loses to the free one-node
+`dlund_posterior_medoid` by ≈0.020 on all eight arms (§3, reading 4). The +0.0114 measured
+here is about half of a gap the decode carries whatever `mbr_cloud_source` is set to.

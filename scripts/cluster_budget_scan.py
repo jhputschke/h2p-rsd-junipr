@@ -9,21 +9,29 @@ artifacts therefore differ in the budget *and* in the clustering granularity at 
 > across K (residual mass 0.284→0.362, unassigned 35.7%→43.5% while the pool support
 > improved) — G6's cross-K row is unscored"*
 
-Three cells, and the third is the one that does not exist yet:
+**Four cells, not the three the plan item names**, and the reason is a knob interaction the
+plan item does not mention. "Hold the granularity fixed" is ambiguous because the cluster
+layer has *two* granularity knobs that scale differently with `K`: `min_cluster_size` is a
+COUNT and `min_mass` is a FRACTION. Pinning only the count at `K = 1000` asks HDBSCAN for
+many small clusters and then lets `min_mass = 0.05` (= 50 draws there) fold nearly all of
+them into the residual bucket — the partition collapses to about one reportable cluster.
+That cell is run and reported, and a fourth holds **every** granularity knob at its
+`K = 200` value in absolute draws:
 
-    K200_mcs10    200 draws, min_cluster_size 10   -- the committed K=200 tier
-    K1000_mcs10  1000 draws, min_cluster_size 10   -- NEW: more draws, granularity FIXED
-    K1000_mcs50  1000 draws, min_cluster_size 50   -- the committed K=1000 tier
+    K200_mcs10         200 draws, mcs 10, min_mass 0.05 (= 10 draws)  -- committed K=200
+    K1000_mcs50       1000 draws, mcs 50, min_mass 0.05 (= 50 draws)  -- committed K=1000
+    K1000_mcs10       1000 draws, mcs 10, min_mass 0.05 (= 50 draws)  -- B4 LITERALLY
+    K1000_mcs10_mm01  1000 draws, mcs 10, min_mass 0.01 (= 10 draws)  -- the clean arm
 
-so the confounded comparison decomposes into two clean ones:
+so the confounded comparison decomposes:
 
-    K200_mcs10  -> K1000_mcs10   the effect of MORE DRAWS
-    K1000_mcs10 -> K1000_mcs50   the effect of COARSER CLUSTERING
-    K200_mcs10  -> K1000_mcs50   what the committed pair actually measured
+    K200_mcs10       -> K1000_mcs10_mm01   the effect of MORE DRAWS, granularity fixed
+    K1000_mcs10_mm01 -> K1000_mcs50        the effect of COARSER CLUSTERING, draws fixed
+    K200_mcs10       -> K1000_mcs50        what the committed pair actually measured
 
 **Nested by construction.** One sampling pass of `K = 1000` per jet; the `K = 200` cell is
-its first 200 draws. So the three cells are paired jet-by-jet *and* the small pool is a
-subsample of the large one — a stronger design than two independent runs, and free.
+its first 200 draws. So the cells are paired jet-by-jet *and* the small pool is a subsample
+of the large one — a stronger design than two independent runs, and free.
 
 This is a re-read of `PLAN_PosteriorClusters.md`'s G2/G2'/G3/G5/G6/G7, not a new gate.
 
@@ -54,9 +62,29 @@ from truth_cloud_weight_audit import _resolve  # noqa: E402 -- same arm-resoluti
 # `run` block): 600 jets, seed 1234, energyflow, hdbscan, min_mass 0.05, 20 null reps.
 TIER = dict(n_jets=600, k_big=1000, k_small=200, seed=1234, null_reps=20)
 DEFAULT_ARM = "runs/prod_test_v1/v1_contstop_s0"
-# (label, K, min_cluster_size). `mcs` is PINNED on every cell — never `0` — because `0` is
-# exactly the K-dependence this scan exists to remove.
-CELLS = (("K200_mcs10", 200, 10), ("K1000_mcs10", 1000, 10), ("K1000_mcs50", 1000, 50))
+# (label, K, min_cluster_size, min_mass). `mcs` is PINNED on every cell — never `0` —
+# because `0` is exactly the K-dependence this scan exists to remove.
+#
+# **Why there are FOUR cells and not the three SUMMARY §4.1(5) asks for.** "Hold the
+# clustering granularity fixed" has two knobs, and they scale differently:
+#
+#   `cluster_min_cluster_size` is a COUNT      -> pinning it at 10 makes the density
+#                                                 smoothing 5x finer at K = 1000
+#   `cluster_min_mass`         is a FRACTION   -> 0.05 is 10 draws at K = 200 and
+#                                                 50 draws at K = 1000
+#
+# So `mcs = 10, min_mass = 0.05` at K = 1000 asks HDBSCAN for many small clusters and then
+# folds nearly all of them into the residual bucket, and the partition collapses to ~1
+# reportable cluster. That is the plan item taken literally, and it is reported as such —
+# but it does not isolate anything, so the fourth cell holds **every** granularity knob at
+# its K = 200 value in ABSOLUTE draw counts (`min_mass = 10/1000 = 0.01`). That is the
+# comparison that separates "more draws" from "coarser clustering".
+CELLS = (
+    ("K200_mcs10", 200, 10, 0.05),      # the committed K=200 tier (mcs = 5% of K)
+    ("K1000_mcs50", 1000, 50, 0.05),    # the committed K=1000 tier (mcs = 5% of K)
+    ("K1000_mcs10", 1000, 10, 0.05),    # B4 literally — degenerate, and reported so
+    ("K1000_mcs10_mm01", 1000, 10, 0.01),   # every knob fixed in ABSOLUTE draws
+)
 
 
 def run(arm: str, *, n_jets: int, k_big: int, k_small: int, device: str, backend: str,
@@ -119,17 +147,17 @@ def run(arm: str, *, n_jets: int, k_big: int, k_small: int, device: str, backend
         "seconds_sampling": round(t_sample, 1),
         "cells": {},
     }
-    for label, K, mcs in cells:
+    for label, K, mcs, mm in cells:
         dbj = [d[:K] for d in draws_big]
         t1 = time.time()
         m = run_cluster_diagnostics(
             model, val_ds, dm.val_jets, geom, dev, K=K, n_jets=n_jets, decode=dec,
             verbose=False, draws_by_jet=dbj, null_reps=int(null_reps),
-            cluster_kwargs={"min_cluster_size": int(mcs)},
+            cluster_kwargs={"min_cluster_size": int(mcs), "min_mass": float(mm)},
         )
         m["seconds"] = round(time.time() - t1, 1)
         out["cells"][label] = m
-        print(f"[b4] {label:>12}  <n_clusters> = {m['n_clusters_mean']:.2f}"
+        print(f"[b4] {label:>17}  <n_clusters> = {m['n_clusters_mean']:.2f}"
               f"  <top_mass> = {m['top_mass_mean']:.3f}  <H> = {m['entropy_mean']:.3f}"
               f"  G6 ECE(T) = {m['G6_reliability_recalibrated']['ece']:.4f}"
               f"  ({m['seconds']:.0f}s)")
@@ -158,14 +186,18 @@ GATES = (("G2_medoid_in_top", "{:.4f}"), ("truth_in_top_rate", "{:.4f}"),
          ("entropy_mean", "{:.4f}"), ("residual_mass_mean", "{:.4f}"),
          ("silhouette_mean", "{:.4f}"), ("top_mass_mc_error", "{:.5f}"),
          ("G3_empty_mass_vs_q0", "{:.5f}"))
-CONTRASTS = (("more draws", "K1000_mcs10", "K200_mcs10"),
-             ("coarser clustering", "K1000_mcs50", "K1000_mcs10"),
-             ("the committed pair (CONFOUNDED)", "K1000_mcs50", "K200_mcs10"))
+# Each contrast changes ONE thing. The first is the one that answers B4.
+CONTRASTS = (
+    ("more draws, granularity FIXED in absolute draws", "K1000_mcs10_mm01", "K200_mcs10"),
+    ("coarser clustering, draws fixed", "K1000_mcs50", "K1000_mcs10_mm01"),
+    ("the committed pair (CONFOUNDED)", "K1000_mcs50", "K200_mcs10"),
+    ("B4 taken literally (mcs pinned, min_mass not)", "K1000_mcs10", "K200_mcs10"),
+)
 
 
 def analyse(rec: dict) -> dict:
     cells = rec["cells"]
-    present = [c for c, _, _ in CELLS if c in cells]
+    present = [c[0] for c in CELLS if c[0] in cells]
     out = {"cells": {}, "contrasts": {}, "tier": rec["tier"], "arm": rec["arm"]}
     for c in present:
         m = cells[c]
@@ -197,8 +229,9 @@ def analyse(rec: dict) -> dict:
     # question: a quantity that moves under "more draws" AND under "coarser clustering" in
     # the same direction was never attributable in the committed pair.
     verdict = {}
-    if all(lbl in out["contrasts"] for lbl, _, _ in CONTRASTS):
-        d, g = out["contrasts"]["more draws"], out["contrasts"]["coarser clustering"]
+    if all(lbl in out["contrasts"] for lbl, _, _ in CONTRASTS[:3]):
+        d = out["contrasts"]["more draws, granularity FIXED in absolute draws"]
+        g = out["contrasts"]["coarser clustering, draws fixed"]
         for k in SCALARS:
             dd, gg = d["paired"][k], g["paired"][k]
             verdict[k] = {
@@ -221,10 +254,10 @@ def print_report(res: dict) -> None:
     names = list(cells)
     print("\n" + "=" * 108)
     print("B4 — the cluster budget scan: does K move the gates, or does min_cluster_size?")
-    print(f"    {'quantity':>26} " + " ".join(f"{n:>16}" for n in names))
+    print(f"    {'quantity':>26} " + " ".join(f"{n:>17}" for n in names))
     for k, fmt in GATES:
         print(f"    {k:>26} " + " ".join(
-            f"{fmt.format(cells[n][k]) if cells[n][k] is not None else 'n/a':>16}"
+            f"{fmt.format(cells[n][k]) if cells[n][k] is not None else 'n/a':>17}"
             for n in names))
     for k, fmt in (("G2_pass_wp4_closed", "{}"), ("precondition_rate", "{:.4f}"),
                    ("G2prime_gain", "{:+.4f}"), ("G2prime_gain_sem", "{:.4f}"),
@@ -234,7 +267,7 @@ def print_report(res: dict) -> None:
                    ("G7_coverage", "{:.4f}"), ("G7_mean_set_size", "{:.3f}"),
                    ("G7_pass", "{}")):
         print(f"    {k:>26} " + " ".join(
-            f"{fmt.format(cells[n][k]) if cells[n][k] is not None else 'n/a':>16}"
+            f"{fmt.format(cells[n][k]) if cells[n][k] is not None else 'n/a':>17}"
             for n in names))
 
     for label, cont in res["contrasts"].items():
@@ -285,7 +318,8 @@ def main(argv=None) -> int:
     else:
         if args.fast:
             args.n_jets, args.k_big, args.k_small, args.null_reps = 8, 64, 16, 3
-            cells = (("K200_mcs10", 16, 5), ("K1000_mcs10", 64, 5), ("K1000_mcs50", 64, 12))
+            cells = (("K200_mcs10", 16, 5, 0.30), ("K1000_mcs50", 64, 12, 0.30),
+                     ("K1000_mcs10", 64, 5, 0.30), ("K1000_mcs10_mm01", 64, 5, 0.075))
         if args.device == "auto":
             import torch
 

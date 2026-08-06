@@ -132,7 +132,9 @@ def run_arm(arm: str, *, test_file: str, n_jets: int, k_draws: int, null_reps: i
         "coverage": {k: calib.get(k) for k in
                      ("coverage_68", "coverage_68_ci", "n_coverage",
                       "coverage_68_null", "coverage_68_null_ci", "n_coverage_null",
-                      "coverage_68_vs_null", "coverage_68_null_explains_deficit")},
+                      "coverage_68_vs_null", "coverage_68_null_explains_deficit",
+                      "coverage_68_vs_null_ci",
+                      "coverage_68_null_explains_deficit_paired")},
         "sbc": {k: calib.get(k) for k in
                 ("sbc_chi2_uniform", "sbc_chi2_dof", "sbc_chi2_crit95",
                  "sbc_rank_mean", "pit_mean")},
@@ -143,18 +145,58 @@ def run_arm(arm: str, *, test_file: str, n_jets: int, k_draws: int, null_reps: i
 
 
 # ---------------------------------------------------------------------------
+def point_in_ci_false_reject_rate(n_obs: int, n_null: int, p: float, reps: int = 20_000,
+                                  seed: int = 20260806) -> float:
+    """How often "is the observation inside the null's interval" rejects a PERFECT model.
+
+    Simulated, not asserted — the repo's own rule (`SUMMARY` §5, *simulate the reference,
+    never assume it*), and it is the rule the test being checked here failed to follow.
+    Draw `coverage_68` from `Binomial(n_obs, p)` and the null from `Binomial(n_null, p)`,
+    i.e. from the SAME `p`, then apply the test. Anything above 5% is over-rejection."""
+    from h2p_rsd_junipr.eval.calibration import wilson_interval
+
+    rng = np.random.default_rng(int(seed))
+    k_obs = rng.binomial(int(n_obs), float(p), size=int(reps))
+    k_nul = rng.binomial(int(n_null), float(p), size=int(reps))
+    miss = 0
+    for a, b in zip(k_obs, k_nul):
+        lo, hi = wilson_interval(int(b), int(n_null))
+        if not (lo <= a / n_obs <= hi):
+            miss += 1
+    return float(miss) / int(reps)
+
+
 def analyse(arms: dict) -> dict:
+    from h2p_rsd_junipr.eval.calibration import wilson_diff_interval
+
     rows = []
     for name, rec in arms.items():
-        c = rec["coverage"]
+        c = dict(rec["coverage"])
+        # Recompute the paired test here too, so an artifact produced before
+        # `wilson_diff_interval` shipped is still scored the right way.
+        k_obs = int(round(c["coverage_68"] * c["n_coverage"]))
+        k_nul = int(round(c["coverage_68_null"] * c["n_coverage_null"]))
+        lo, hi = wilson_diff_interval(k_obs, c["n_coverage"], k_nul, c["n_coverage_null"])
+        c["coverage_68_vs_null_ci"] = [lo, hi]
+        c["coverage_68_null_explains_deficit_paired"] = bool(lo <= 0.0 <= hi)
         rows.append({
             "arm": name, "family": rec["family"],
             "explicit_qn": bool(rec["has_multiplicity_head"]),
-            **{k: c.get(k) for k in c},
+            **c,
         })
     expl = [r for r in rows if r["explicit_qn"]]
     ctrl = [r for r in rows if not r["explicit_qn"]]
     nulls = np.array([r["coverage_68_null"] for r in expl], dtype=float)
+    n_nul = np.array([r["n_coverage_null"] for r in expl], dtype=float)
+
+    # THE TRANSFER CLAIM, and it is about the NULL: is it ~0.553 on this family too?
+    # Pooled over the seeds, then compared with the reference as a DIFFERENCE of two
+    # proportions — not by asking whether a point lands in an interval.
+    k_pool = float(np.sum(nulls * n_nul))
+    n_pool = float(n_nul.sum())
+    ref_n = 8841  # §1c's own pseudo-truth count, recorded with its number
+    p_lo, p_hi = wilson_diff_interval(k_pool, n_pool,
+                                      REFERENCE["coverage_68_null"] * ref_n, ref_n)
     out = {
         "rows": rows,
         "reference": REFERENCE,
@@ -164,19 +206,28 @@ def analyse(arms: dict) -> dict:
             "null_min": float(nulls.min()) if nulls.size else float("nan"),
             "null_max": float(nulls.max()) if nulls.size else float("nan"),
             "null_spread": float(nulls.max() - nulls.min()) if nulls.size else float("nan"),
-            # The transfer claim: every arm's null sits inside the interval §1c published.
-            "inside_reference_ci": [
-                bool(REFERENCE["null_ci"][0] <= r["coverage_68_null"]
-                     <= REFERENCE["null_ci"][1]) for r in expl],
-            # ...and the deficit is explained on each arm by its OWN null.
-            "deficit_explained": [bool(r["coverage_68_null_explains_deficit"])
-                                  for r in expl],
+            "null_pooled": float(k_pool / n_pool) if n_pool else float("nan"),
+            "n_pooled": int(n_pool),
+            "pooled_vs_reference": float(k_pool / n_pool - REFERENCE["coverage_68_null"])
+            if n_pool else float("nan"),
+            "pooled_vs_reference_ci": [p_lo, p_hi],
+            "null_agrees_with_reference": bool(p_lo <= 0.0 <= p_hi),
+            # ...and, per arm, whether its OWN deficit is explained by its OWN null.
+            "deficit_explained_paired": [
+                bool(r["coverage_68_null_explains_deficit_paired"]) for r in expl],
+            # the strict-and-wrong scoring, kept so the difference is visible
+            "deficit_explained_point_in_ci": [
+                bool(r["coverage_68_null_explains_deficit"]) for r in expl],
         },
     }
-    out["explicit_qn"]["n_inside_reference_ci"] = int(
-        sum(out["explicit_qn"]["inside_reference_ci"]))
-    out["explicit_qn"]["n_deficit_explained"] = int(
-        sum(out["explicit_qn"]["deficit_explained"]))
+    e = out["explicit_qn"]
+    e["n_deficit_explained_paired"] = int(sum(e["deficit_explained_paired"]))
+    e["n_deficit_explained_point_in_ci"] = int(sum(e["deficit_explained_point_in_ci"]))
+    if expl:
+        r0 = expl[0]
+        e["point_in_ci_false_reject_rate"] = point_in_ci_false_reject_rate(
+            int(r0["n_coverage"]), int(r0["n_coverage_null"]),
+            float(REFERENCE["coverage_68_null"]))
     if ctrl:
         r = ctrl[0]
         out["control"] = {
@@ -190,10 +241,11 @@ def analyse(arms: dict) -> dict:
         out["control"]["repro_ok"] = bool(out["control"]["abs_diff"] <= G_REPRO_TOL)
     n = len(expl)
     out["verdict"] = (
-        "FAMILY-INDEPENDENT" if n and out["explicit_qn"]["n_inside_reference_ci"] == n
-        and out["explicit_qn"]["n_deficit_explained"] == n
-        else "PARTIAL" if n and out["explicit_qn"]["n_deficit_explained"] == n
-        else "NOT CONFIRMED" if n else "NOT SCORED")
+        "NOT SCORED" if not n else
+        "FAMILY-INDEPENDENT" if e["null_agrees_with_reference"]
+        and e["n_deficit_explained_paired"] == n
+        else "TRANSFERS, WITH A RESIDUAL" if e["null_agrees_with_reference"]
+        else "NOT CONFIRMED")
     return out
 
 
@@ -201,14 +253,18 @@ def print_report(res: dict) -> None:
     print("\n" + "=" * 104)
     print("B3 — `coverage_68` against its OWN null, transferred to the explicit-q(N|x) family")
     print(f"    {'arm':>20} {'family':>28} {'coverage_68':>22} {'its null':>22} "
-          f"{'inside?':>8}")
+          f"{'difference (Newcombe 95%)':>28}")
     for r in res["rows"]:
         cov = (f"{r['coverage_68']:.3f} [{r['coverage_68_ci'][0]:.3f}, "
                f"{r['coverage_68_ci'][1]:.3f}]")
         nul = (f"{r['coverage_68_null']:.3f} [{r['coverage_68_null_ci'][0]:.3f}, "
                f"{r['coverage_68_null_ci'][1]:.3f}]")
+        d = r["coverage_68"] - r["coverage_68_null"]
+        dd = (f"{d:+.3f} [{r['coverage_68_vs_null_ci'][0]:+.3f}, "
+              f"{r['coverage_68_vs_null_ci'][1]:+.3f}]")
+        tag = "ok" if r["coverage_68_null_explains_deficit_paired"] else "BELOW"
         print(f"    {r['arm']:>20} {r['family']:>28} {cov:>22} {nul:>22} "
-              f"{'yes' if r['coverage_68_null_explains_deficit'] else 'NO':>8}")
+              f"{dd:>22} {tag:>5}")
         print(f"    {'':>20} {'':>28} {'on ' + str(r['n_coverage']) + ' jets':>22} "
               f"{'on ' + str(r['n_coverage_null']) + ' pseudo-truths':>22}")
     ref = res["reference"]
@@ -222,11 +278,20 @@ def print_report(res: dict) -> None:
               f"   |diff| = {c['abs_diff']:.4f}   "
               f"{'OK' if c['repro_ok'] else 'FAIL'} (tol {c['tol']:.2f})")
     e = res["explicit_qn"]
-    print(f"\n    explicit-q(N|x) nulls: {e['null_min']:.4f} .. {e['null_max']:.4f} "
-          f"(mean {e['null_mean']:.4f}, spread {e['null_spread']:.4f}) over "
-          f"{e['n_arms']} seeds")
-    print(f"    inside the reference interval on {e['n_inside_reference_ci']}/{e['n_arms']};"
-          f"  own deficit explained on {e['n_deficit_explained']}/{e['n_arms']}")
+    print(f"\n    THE TRANSFER — explicit-q(N|x) nulls: {e['null_min']:.4f} .. "
+          f"{e['null_max']:.4f} (spread {e['null_spread']:.4f}) over {e['n_arms']} seeds;"
+          f"\n    pooled {e['null_pooled']:.4f} on {e['n_pooled']:,} pseudo-truths, vs the "
+          f"reference {ref['coverage_68_null']:.3f}: {e['pooled_vs_reference']:+.4f} "
+          f"[{e['pooled_vs_reference_ci'][0]:+.4f}, {e['pooled_vs_reference_ci'][1]:+.4f}]"
+          f"  ->  {'AGREES' if e['null_agrees_with_reference'] else 'DIFFERS'}")
+    print(f"    own deficit explained (Newcombe, both errors priced) on "
+          f"{e['n_deficit_explained_paired']}/{e['n_arms']}")
+    if "point_in_ci_false_reject_rate" in e:
+        print(f"    [the strict 'is the observation inside the null's interval' test says "
+              f"{e['n_deficit_explained_point_in_ci']}/{e['n_arms']}, and it is WRONG:\n"
+              f"     simulated on a PERFECT model at these sample sizes it rejects "
+              f"{e['point_in_ci_false_reject_rate']:.1%} of the time, because it discards "
+              f"the observation's\n     own error, which is the larger of the two]")
     print("\n" + "=" * 104)
     print(f"VERDICT: {res['verdict']}")
     print("    The HPD-68 is built from K draws and cannot contain a cell of probability")

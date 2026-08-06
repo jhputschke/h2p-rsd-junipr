@@ -32,6 +32,8 @@ returns exactly the v1 metric dict, so CI numbers and published tables are stabl
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 
@@ -60,6 +62,33 @@ def wilson_interval(k, n, z=1.96) -> tuple[float, float]:
     centre = (p + z * z / (2 * n)) / d
     half = (z / d) * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
     return (float(max(0.0, centre - half)), float(min(1.0, centre + half)))
+
+
+def wilson_diff_interval(k1, n1, k2, n2, z=1.96) -> tuple[float, float]:
+    """95% interval for the DIFFERENCE of two independent proportions, `p1 - p2`
+    (Newcombe, *Statist. Med.* **17** (1998) 873, his method 10 — the hybrid score).
+
+    Built from the two Wilson intervals, so it inherits their behaviour at the edges and
+    needs no scipy:
+
+        lower = (p1 - p2) - sqrt((p1 - l1)^2 + (u2 - p2)^2)
+        upper = (p1 - p2) + sqrt((u1 - p1)^2 + (p2 - l2)^2)
+
+    **Why this exists rather than "is p1 inside p2's interval".** That test throws away
+    p1's own error, so it is anti-conservative exactly when p1 is the *noisier* of the two
+    — which is the case it is usually reached for. `coverage_68` is measured on ~500 jets
+    (Wilson half-width ≈ 0.044) and its null on ~8 800 pseudo-truths (≈ 0.010), so asking
+    whether the observation lands inside the null's interval rejects a **perfectly
+    calibrated** arm most of the time. Returns `(nan, nan)` if either `n` is 0."""
+    if int(n1) <= 0 or int(n2) <= 0:
+        return (float("nan"), float("nan"))
+    p1, p2 = float(k1) / int(n1), float(k2) / int(n2)
+    l1, u1 = wilson_interval(k1, n1, z)
+    l2, u2 = wilson_interval(k2, n2, z)
+    d = p1 - p2
+    lo = d - math.sqrt((p1 - l1) ** 2 + (u2 - p2) ** 2)
+    hi = d + math.sqrt((u1 - p1) ** 2 + (p2 - l2) ** 2)
+    return (float(lo), float(hi))
 
 
 def chi2_crit95(dof: int) -> float:
@@ -550,12 +579,26 @@ def run_calibration(model, val_ds, geometry, device, K=200, n_jets=300, n_rank_b
         metrics["coverage_68_null_explains_deficit"] = (
             bool(n_lo <= metrics["coverage_68"] <= n_hi) if nul.size and cov_hits.size
             else None)
+        # ...and the SAME question asked properly. The key above compares a point estimate
+        # against the other estimate's interval, which discards `coverage_68`'s own error —
+        # and that is the larger of the two by ~4x (a few hundred jets against a few
+        # thousand pseudo-truths), so it rejects a perfectly calibrated arm most of the
+        # time. `wilson_diff_interval` prices both (docs/PLAN_next_steps.md B3). The old
+        # key is kept, unchanged in value, because it is in committed artifacts.
+        d_lo, d_hi = wilson_diff_interval(cov_hits.sum(), cov_hits.size,
+                                          nul.sum(), nul.size)
+        metrics["coverage_68_vs_null_ci"] = [d_lo, d_hi]
+        metrics["coverage_68_null_explains_deficit_paired"] = (
+            bool(d_lo <= 0.0 <= d_hi) if np.isfinite(d_lo) else None)
         metrics["coverage_68_null_note"] = (
             "the empirical HPD-68 is built from K draws and cannot contain a cell of "
             "probability < 1/K, so it under-covers even a PERFECT model. Read "
-            "coverage_68 against this null, not against 0.68: inside the null's interval "
-            "means the deficit is the statistic; below it means the posterior really is "
-            "too narrow."
+            "coverage_68 against this null, not against 0.68. Score it with "
+            "`coverage_68_null_explains_deficit_paired`, which is the Newcombe interval "
+            "on the DIFFERENCE and prices both errors; "
+            "`coverage_68_null_explains_deficit` asks the narrower question 'is the "
+            "observation inside the null's own interval', which ignores the observation's "
+            "error and is therefore too strict."
         )
     if verbose:
         print("\nposterior calibration (SBC / PIT / coverage):")
