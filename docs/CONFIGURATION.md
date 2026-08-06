@@ -1287,10 +1287,22 @@ from the `K` posterior draws themselves, so it cannot contain a cell of probabil
 model**, and by an amount set by `K`, not by the posterior's width.
 `coverage_null_reps=M` measures exactly that — `M` extra held-out draws per jet, scored as
 pseudo-truths through the identical construction — and reports `coverage_68_null`,
-`coverage_68_vs_null` and `coverage_68_null_explains_deficit` beside the raw number. On the
+`coverage_68_vs_null`, `coverage_68_vs_null_ci` and
+`coverage_68_null_explains_deficit_paired` beside the raw number. On the
 fielded checkpoint at `K = 200` the null is **0.553** [0.543, 0.563] on 8 841 pseudo-truths
-against an observed **0.546**: inside its own interval, so the "0.55 vs 0.68 ⇒ the
+against an observed **0.546**: consistent with it, so the "0.55 vs 0.68 ⇒ the
 posterior is too narrow" reading that stood through v1 was the *estimator*, not the model.
+It is **family-independent** — pooled over three explicit-`q(N|x)` seeds the null is
+0.5504 on 26 334 pseudo-truths, −0.0026 [−0.0145, +0.0094] from that value.
+
+**Read the `_paired` key, not `coverage_68_null_explains_deficit`.** The latter asks
+whether the observation lies inside the *null's* interval, which discards the
+observation's own error — the larger of the two by ~4×, since `coverage_68` is a
+few-hundred-jet proportion and its null a few-thousand-pseudo-truth one. Simulated on a
+model drawn from the null itself at those sizes it rejects **64.8%** of the time.
+`coverage_68_null_explains_deficit_paired` is `wilson_diff_interval` (Newcombe,
+*Statist. Med.* **17** (1998) 873, method 10) on the **difference** and prices both. The
+old key keeps its value because committed artifacts carry it.
 Never quote `coverage_68` without its `K`. The draws are taken inside `torch.random.fork_rng`,
 so switching the diagnostic on cannot move any other number in the run — a switch that
 perturbs the statistic it exists to explain would be worse than no switch. TARP is

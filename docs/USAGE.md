@@ -584,8 +584,8 @@ How to read them:
   `< 1/K` that a genuine draw still visits: **a perfect model under-covers**, by an amount
   set by `K`. Set `experiment.coverage_null_reps=20` to get the reference — 20 extra
   held-out draws per jet, scored as pseudo-truths through the identical construction —
-  which adds `coverage_68_null`, `coverage_68_vs_null` and
-  `coverage_68_null_explains_deficit` to the JSON and one line to the printout:
+  which adds `coverage_68_null`, `coverage_68_vs_null`, **`coverage_68_vs_null_ci`** and
+  **`coverage_68_null_explains_deficit_paired`** to the JSON and one line to the printout:
 
   ```
     leading-cell 68% coverage = 0.55  95% Wilson [0.51, 0.59] on 600 jets   (target 0.68 — OUTSIDE the interval)
@@ -594,9 +594,20 @@ How to read them:
   ```
 
   That is a measured checkpoint at `K=200`, and it retired a standing "the posterior is
-  too narrow" conclusion. TARP is unaffected — it carries its own MC null. Costs one extra
-  `sample_batch` of `M` draws per jet, taken inside `fork_rng` so no other number in the
-  run moves.
+  too narrow" conclusion. It is **family-independent**: pooled over three explicit-`q(N|x)`
+  seeds the null is 0.5504 on 26 334 pseudo-truths, −0.0026 [−0.0145, +0.0094] from the
+  continue/stop value ([`PLAN_StratifiedMBR.md` §1e](PLAN_StratifiedMBR.md)). TARP is
+  unaffected — it carries its own MC null. Costs one extra `sample_batch` of `M` draws per
+  jet, taken inside `fork_rng` so no other number in the run moves.
+
+  > **Score it with `coverage_68_null_explains_deficit_paired`, not with
+  > `coverage_68_null_explains_deficit`.** The latter asks whether the observation lies
+  > inside the *null's* interval, which throws away the observation's own error — and that
+  > is the larger of the two by about 4× (a few hundred jets against a few thousand
+  > pseudo-truths). Simulated on a model drawn from the null itself at the fielded sample
+  > sizes, it rejects **64.8%** of the time. The `_paired` key is the Newcombe hybrid-score
+  > interval on the **difference** and prices both. The old key is kept, unchanged in
+  > value, because it appears in committed artifacts.
 - **`sbc_chi2_uniform`** is quoted against the 95% point of `χ²(n_rank_bins − 1)` (16.90 at
   the default 10 bins) — and for **SBC on the multiplicity that is the wrong null**. `N` is
   discrete and typically takes a handful of values, so its mid-rank statistic lands on a
@@ -785,10 +796,10 @@ coordinate-density campaign ([`PLAN_lnz_spline_head.md`](PLAN_lnz_spline_head.md
 
 ```bash
 bash scripts/run_lnz_spline.sh                       # the arms: spline_s{0..5}, dvspline_s*,
-                                                     #   cellctr_s*, spline_k16_s2, contstop_spline_s0
+                                                     #   cellctr_s*, spline_k16_s2, contstop_spline_s{0,1,2}
 bash scripts/run_lnz_spline.sh --smoke --only spline_s0    # one tiny arm, to check the plumbing
 bash scripts/eval_prod_test_v1.sh --run-root runs/lnz_spline --device cpu
-python scripts/lnz_spline_gates.py                   # -> gate G3 / G3-dv verdicts + guards
+python scripts/lnz_spline_gates.py                   # -> G3 / G3-dv / §10's TARP transfer + guards
 python scripts/offset_head_diagnostic.py             # why dv fails its PIT and du does not
 ```
 
@@ -798,6 +809,27 @@ same seeds with the truncated-normal head, already trained. `lnz_spline_gates.py
 the guards with the verdict — the support audit must stay at 0.0000%, NLL must not worsen
 beyond the control's seed spread, and TARP / `pit_ks_max` / `d(MBR)` are printed beside it
 — because a PIT improvement can always be bought with something else.
+
+The **decode-metric** campaign ([`PLAN_z_aware.md`](PLAN_z_aware.md)) is decode-time only —
+no retraining, existing checkpoints — and runs the same way: pre-register, then run, then
+score with the rule that was committed first. Each writes to `runs/<campaign>/<stamp>/` and
+**never beside a checkpoint**, because `h2p-rsd-junipr eval` would overwrite an arm's
+committed `eval_metrics.json`:
+
+```bash
+python scripts/mbr_zaware_ab.py                  # WP-0: is there a d(MBR) regression at all?
+python scripts/zaware_selection_ceiling.py       # §12: is the ln z-blind SELECTION worth fixing?
+python scripts/zaware_default_decode.py          # §14: should `+lnz` be the DEFAULT decode?
+python scripts/truth_cloud_weight_audit.py       # A3: the truth/draw representation mismatch
+python scripts/cluster_budget_scan.py            # B4: does K move the gates, or min_cluster_size?
+python scripts/coverage_null_transfer.py         # B3: is `coverage_68`'s null family-independent?
+python scripts/zaware_wp3_bitidentity.py --out a.json   # the "additions only" differ
+```
+
+Every one takes `--fast` for a smoke run and `--analyze <dir>` to re-score an existing set
+of arm JSONs without re-running the models — which is how a verdict rule can be re-read
+without paying for the decode again. Their answers are in
+[`PLAN_next_steps.md` §8](PLAN_next_steps.md).
 
 The N-information ceiling probe ([`PLAN_NCeilingProbe.md`](PLAN_NCeilingProbe.md)) answers a
 different kind of question — *is this a modelling failure or an information limit?* — with a
@@ -827,6 +859,31 @@ notebook editor opens comfortably, so edit the generator and re-run it:
 `make_inference_demo_cluster_nb.py` (and `make_prod_closure_nb.py`, which also has a
 `--check` mode for CI staleness). [`notebooks/README.md`](../notebooks/README.md) says what
 each one measures.
+
+`per_jets_estimation_cluster` writes `per_jet_clusters*.json` beside the checkpoint, and
+its **budget** knobs are overridable from the environment so a second tier is a command
+rather than an edit to a generated file:
+
+```bash
+PYTHONPATH=src PJC_K_DRAWS=1000 PJC_MIN_CLUSTER_SIZE=10 \
+  jupyter nbconvert --to notebook --execute --inplace \
+  notebooks/per_jets_estimation_cluster.ipynb
+```
+
+(`PJC_N_JETS` and `PJC_SEED` too, and nothing else — these are the knobs whose variation is
+a *measurement* rather than a different question.) The artifact name carries `K` and, when
+it differs from the K-dependent auto value, `min_cluster_size`, so a budget arm can never
+clobber the record a gate verdict was read from. It also carries **one row per jet**
+(`per_jet`, keyed by the jet-file index), which is what makes gate G5's paired criterion
+computable across tiers.
+
+> `cluster_min_cluster_size = 0` resolves to `max(5, ceil(cluster_min_mass · K))` — 10 at
+> `K = 200` and 50 at `K = 1000` — so "the same setting" is a **different granularity** at
+> another budget. `run.cluster_min_cluster_size_effective` records what it resolved to.
+> Pinning it does **not** make two tiers comparable: `min_cluster_size` is a count and
+> `min_mass` a fraction, and no setting of the former reproduces the `K = 200` partition at
+> `K = 1000` ([`PLAN_PosteriorClusters.md` §19](PLAN_PosteriorClusters.md)).
+> `scripts/cluster_budget_scan.py` is the measurement that shows it.
 
 ### Reproduce the v2 reference (acceptance tests)
 
