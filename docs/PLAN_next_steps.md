@@ -17,24 +17,31 @@ itself to, one layer up.
 
 ## 1. The order, in one table
 
-| # | item | owner | state | cost |
+> **Executed 2026-08-06 on branch `nextStepsTrackAB` — A1–A4 then B4, B3, B5, B1.**
+> The `state` column below is now the OUTCOME; **§8 records what each one found** and names
+> the owning document's result section, which is where the numbers live.
+
+| # | item | owner | state | result |
 |---|---|---|---|---|
-| **A1** | **WP-3 — thread the coordinates** | `PLAN_z_aware.md` §4/WP-3, §13.4 | **decided, unbuilt** | 1–2 days |
-| **A2** | WP-3's test clauses | `PLAN_z_aware.md` §6 | decided, unbuilt | ½ day, with A1 |
-| **A3** | `_truth_cloud` `kt`-weight mismatch + its measurement | `PLAN_z_aware.md` §4/WP-3 inset | **live defect** | with A1 |
-| **B4** | Pin `cluster_min_cluster_size=10` at K=1000 | `SUMMARY` §4.1(5) | decided, unrun | one notebook run |
-| **B3** | Transfer the `coverage_68` null to an explicit-`q(N\|x)` arm | `SUMMARY` §4.1(3) | decided, unrun | one `eval` |
-| **B5** | Per-jet rows in the cluster artifact | `SUMMARY` §4.1(6) | decided, unbuilt | small |
-| **B1** | 3-seed continue/stop spline arm | `SUMMARY` §4.2(4) | decided, unrun | training grid |
+| **A1** | **WP-3 — thread the coordinates** | `PLAN_z_aware.md` §4/WP-3, §13.4 | **BUILT** | `decode.mbr_cloud_source`; bit-identical off, verified |
+| **A2** | WP-3's test clauses | `PLAN_z_aware.md` §6 | **SHIPPED** | +24 tests across four files |
+| **A3** | `_truth_cloud` `kt`-weight mismatch + its measurement | `PLAN_z_aware.md` §4/WP-3 inset | **FIXED + MEASURED** | `PLAN_PosteriorClusters.md` §18 — small in mass, 9.6% of `<d_mbr>` in charge |
+| **A4** | Should `+lnz` become the **default** decode? | `PLAN_z_aware.md` §14 (pre-reg), §15 | **AVAILABLE-NOT-DEFAULT** | D1 fails, D2/D3 pass; the headline pays 2.7× the post-hoc estimate |
+| **B4** | Pin `cluster_min_cluster_size=10` at K=1000 | `SUMMARY` §4.1(5) | **RUN — goal unreachable** | `PLAN_PosteriorClusters.md` §19: the partition is not budget-invariant either way |
+| **B3** | Transfer the `coverage_68` null to an explicit-`q(N\|x)` arm | `SUMMARY` §4.1(3) | **TRANSFERS** | `PLAN_StratifiedMBR.md` §1e — pooled 0.5504 vs 0.553; and a shipped test was wrong |
+| **B5** | Per-jet rows in the cluster artifact | `SUMMARY` §4.1(6) | **SHIPPED** | `METRICS["per_jet"]`, keyed by the jet-file index |
+| **B1** | 3-seed continue/stop spline arm | `SUMMARY` §4.2(4), `PLAN_lnz_spline_head.md` §10 (pre-reg), §11 | **RUN** | see §8 |
 | **B2** | Sequence-level N probe | `SUMMARY` §4.1(2) | decided, unrun | ~1 day |
-| **A4** | Should `+lnz` become the **default** decode? | `PLAN_z_aware.md` §13.3 | **needs a pre-registered arm** | 1 pass-set |
 | **B6** | §7.3 joint coordinate density | `PLAN_lnz_spline_head.md` §7.3, §9.4 | **needs an explicit decision** | new density + retrain |
-| **B7** | Turn the N ambiguity into a better product | `SUMMARY` §4.3 | open | — |
+| **B7** | Turn the N ambiguity into a better product | `SUMMARY` §4.3 | open — **and B4 is now an argument for it** | — |
 | **B8** | `kt_floor` scan (1.0 → 0.5 → 0.2 GeV) | `SUMMARY` §4.4(1) | open | regeneration |
 
-**A1–A3 are one piece of work** — the same diff — and A3 is a defect three live gates sit on
-today. **B4 and B3 are one-run cleanups** that un-block currently-unscored gate rows. Every
-item below B2 is either a decision someone has to make (A4, B6) or genuinely later work.
+**A1–A3 were one piece of work** — the same diff — and A3 was a defect three live gates sat
+on. Of the four items that were "one run", **two came back with the answer the plan
+expected (B3, and B1) and two did not**: A4's cost is nearly 3× the post-hoc estimate it
+would have been scored against, and B4's goal turns out to be unreachable by the route the
+plan named. Both of those are in §8, and both are why the pre-registrations were written
+first.
 
 ---
 
@@ -288,3 +295,149 @@ versions with the incident that produced each one are in `SUMMARY` §5.
 | **the order and the file-level specs** | **this document** |
 
 When this document and an owner disagree, **the owner wins** — and this one gets fixed.
+
+---
+
+# §8. RESULTS — what the execution found, 2026-08-06
+
+Branch `nextStepsTrackAB`. **This section is a pointer, not a record**: every number below
+lives in the owning document's own result section, and when the two disagree the owner
+wins (§7). What is here is the outcome and the one thing worth carrying forward.
+
+## 8.1 A1 / A2 — WP-3 is built
+
+`decode.mbr_cloud_source` (`"cells"` | `"coords"`) ships. `coords_for_draws` draws the
+jet's coordinate table **once**, unfiltered and index-aligned, and the same array feeds
+both the clouds and the winner's `describe_cells` — so the tree that comes back sits at the
+coordinates its own cloud was built from and a double draw is structurally impossible.
+`posterior_distances` never draws and raises naming `coords_for_draws`. The 4-tuple return
+is preserved; all six unpack sites, including the two inside notebook-generator string
+literals, are untouched.
+
+**Definition of done, all four clauses:**
+
+1. `+lnz` / `+psi` / `mbr_weight="z"` work under `"coords"` and still raise under `"cells"`.
+2. **Bit-identical with the switch off**, verified the way WP-1 was:
+   `scripts/zaware_wp3_bitidentity.py` dumps the closure *and* cluster metric dicts from a
+   reset RNG state — **both** streams, since `decode_generator` persists — and diffs them
+   against a pristine HEAD worktree. **1569 → 1641 leaf keys; ADDED 72, REMOVED 0,
+   MOVED 0.**
+3. A2's clauses pass (+24 tests: `test_mbr.py` ×13, `test_clusters.py` ×4,
+   `test_shared_draws.py` ×4, `test_config.py`, `test_calibration_v2.py` ×2); the full
+   suite is green; `scripts/verify_parity.py` reproduces the v2 reference at
+   `max |Δ| = 0.000e+00`.
+4. `tests/test_notebooks.py` green.
+
+One incidental fix the raise needed: `build_model` now stamps `model.model_name`. One class
+serves `ar_junipr_v1..v4` and only v1 lacks a coordinate density, so `type(model).__name__`
+cannot name the family — and `skeleton_search_spec`'s existing `getattr(self,
+'model_name', '?')` had been printing a literal `?` since it was written.
+
+## 8.2 A3 — the weight mismatch is small in mass and not small in charge
+
+**`PLAN_PosteriorClusters.md` §18.** Isolated on the *same* tree through both
+representations, so the genuine multiplicity imbalance is divided out:
+`W_truth / W_truth_as_drawn` = **1.0030**, buying a spurious `|ΔW|` of **0.213** —
+**9.6% of `<d_mbr>`** and **72% of `<d_nearest_draw>`**. The plan's *"do not assume the
+effect is small"* was right.
+
+`d_mbr` does **not** move when the draws are placed at their own coordinates
+(+0.0024 [−0.0185, +0.0241], 600 paired jets), so the recommended per-jet product is
+untouched. G2, G6 and G7 verdicts all flip to *pass*, and §18.3 declines to bank them: the
+cause is de-quantization, which cannot be separated from the weight fix because the `kt`
+weight **is** `exp(v)`, and G6's ECE only improves because the forecaster becomes nearly
+constant (Brier resolution 0.0623 → 0.0109).
+
+**Carry forward:** the committed G2/G6/G7 numbers are conditional on the cell-centre
+representation and that was never stated. `metrics["clusters"]["config"]` now carries
+`mbr_cloud_source`, and `metrics["clusters"]["weight_audit"]` prices the residual on every
+run.
+
+*Two corrections to my own first pass, both material and both caught before the write-up:*
+the first audit divided `W_truth` by the mean **draw** weight, mixing the physical
+multiplicity imbalance into the representation defect (it read 0.53 for a quantity that is
+1.003); and it charged `R·|ΔW|` while the run used `energyflow`, whose distances are `1/R`
+of `pot`'s — an 8.485× overstatement. `_weight_audit` now takes the backend's own ground
+scale, the convention `_empty_value` already used.
+
+## 8.3 A4 — AVAILABLE-NOT-DEFAULT, on a rule fixed before the run
+
+**`PLAN_z_aware.md` §14 (pre-registration, `fa45c9f`) → §15 (result).** 8 arms × 1000 jets
+× 2 decodes off byte-identical draws and coordinates, on jets **`[1000, 2000)`** — disjoint
+from everything §11/§12/§13 scored — through the **fielded** `run_closure` path A1 built.
+
+| | rule | measured | |
+|---|---|---|---|
+| **D1** *(primary, `dlund_mbr`)* | pooled CI upper < +0.010 **and** ≤ 2/8 arms significantly worse | +0.0114 **[+0.0075, +0.0152]**; **4/8** | **FAIL** |
+| **D2** | Δ`dlnz_mbr` ≤ −0.020, CI excluding 0, on ≥ 6/8 | **7/8**; pooled −0.0289 [−0.0349, −0.0230] | **PASS** |
+| **D3** | nothing else moves; both no-EMD controls exactly 0 | 8/8; controls `max|Δ| = 0.00e+00` | **PASS** |
+
+**The single most useful number in this whole execution is the D1 one.** §13.3's post-hoc
+estimate, computed from stored cell ids on jets `[0, 1000)`, was **+0.0042 [+0.0004,
++0.0081]**. Measured on a disjoint slice through the code a user actually runs, the cost is
+**+0.0114** — low by a factor of nearly three. Any rule with a threshold near +0.005 would
+have been scored against an estimate that was wrong in the direction that flatters the
+answer. §14.1's two design choices — a disjoint population and the real code path — are
+the entire reason that is visible.
+
+D2 passing was not a formality either: §13 scored the coordinate table directly, while this
+goes through `describe_cells`, the empty gate and the `min_emissions` floor. **A1 ships a
+knob that does what §13 said it does.**
+
+## 8.4 B4 — the goal is unreachable by the route the plan named
+
+**`PLAN_PosteriorClusters.md` §19.** "Hold the granularity fixed" is two instructions:
+`cluster_min_cluster_size` is a **count** and `cluster_min_mass` is a **fraction**. Pinning
+only the count at `K = 1000` gives **1.2** reportable clusters per jet (79% of the mass in
+the residual bucket); pinning both in absolute draws gives **30.1**; the committed
+fraction convention gives 4.1; the `K = 200` target is 4.9. All four were run.
+
+The decomposition resolves exactly three quantities — `d_mbr`, `d_nearest_draw`,
+`pool_bound` — and they are the three that are **not** statements about the partition. The
+granularity contrast moves them by exactly **0.0000**, which is the design's own check.
+Every partition statistic is confounded, and the two effects run in **opposite directions
+at comparable size**, so the committed cross-K pair's small deltas are a near-cancellation
+rather than a null.
+
+**So §2.2's "G6's cross-K row is unscored" stands — now with a reason rather than a
+caveat**, and one more run of B4 as written would not change it. It becomes an independent
+argument for `SUMMARY` §4.3(1) (stratify by `N` first): that partition's top level is
+`q(N|x)`, which does not move with `K` at all.
+
+**A clean by-product**, and the first statement in this repo of what `K` buys separated
+from the partition: going 200 → 1000 draws improves `d_mbr` by **−0.0426 [−0.0695,
+−0.0194]**, `d_nearest_draw` by −0.0681 and `pool_bound` by −0.2672. About 7% of the N
+lever, bought with compute rather than information.
+
+## 8.5 B3 — the null transfers, and the test that read it was wrong
+
+**`PLAN_StratifiedMBR.md` §1e.** Positive control first: this runner re-measures §1c's
+`v1_contstop_s0` at `coverage_68` 0.5478 (recorded 0.546) and null 0.5476 (recorded 0.553).
+
+Pooled over three `v1_base` seeds the explicit-`q(N|x)` null is **0.5504** on 26 334
+pseudo-truths against §1c's 0.553: **−0.0026 [−0.0145, +0.0094]**. **The correction is
+family-independent**, as the mechanism predicts, and the stop-sign now rests on two
+families and four arms instead of one and one. One residual is reported rather than
+smoothed: `v1_base_s1` is −0.067 [−0.112, −0.022] below its own null.
+
+**And it found a defect in shipped code.** `coverage_68_null_explains_deficit` asks whether
+the observation lies inside the *null's* interval, discarding the observation's own error —
+the larger of the two by ~4×. **Simulated** at the fielded sample sizes on a model drawn
+from the null itself, it rejects **64.8%** of the time. Fixed additively:
+`wilson_diff_interval` (Newcombe 1998, method 10) plus `coverage_68_vs_null_ci` and
+`coverage_68_null_explains_deficit_paired`. The old key keeps its value; its note now says
+what it actually tests.
+
+## 8.6 B5 — per-jet rows in the cluster artifact
+
+`METRICS["per_jet"]` in `scripts/make_per_jets_cluster_nb.py`, keyed by `i` = the index
+into the jet file, so two budget tiers of the same file pair exactly. Curated rather than
+`ROWS` verbatim — a row also carries eight estimators' coordinate arrays and the cluster
+object, and no gate reads them. Verified end-to-end by executing the notebook at a reduced
+tier: 40 rows, 44 keys each.
+
+Two things landed with it. The artifact name now carries `min_cluster_size` when it differs
+from the K-dependent auto value, and `run.cluster_min_cluster_size_effective` records what
+`0` resolved to — that resolution *is* B4's confound. And the three budget knobs are
+overridable from the environment (`PJC_N_JETS`, `PJC_K_DRAWS`, `PJC_MIN_CLUSTER_SIZE`,
+`PJC_SEED`), so a budget arm is a command rather than an edit to a generated notebook.
