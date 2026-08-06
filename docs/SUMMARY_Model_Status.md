@@ -8,13 +8,14 @@ number links back to a primary record; nothing here is a new measurement.
 Primary records: `PROD_TEST_v0_RESULTS.md`, `PROD_TEST_v1_RESULTS.md`,
 `PROD_TEST_edit_RESULTS.md`, `PLAN_PosteriorClusters.md` (implementation notes),
 `PLAN_StratifiedMBR.md` §1a–§1d, `PLAN_NCeilingProbe.md` §A,
-`PLAN_lnz_spline_head.md` §6 and §8, `PLAN_z_aware.md` (proposed, not yet run),
+`PLAN_lnz_spline_head.md` §6, §8 and §9, `PLAN_z_aware.md` (proposed, not yet run),
 and the run artifacts under
 `runs/prod_test_v1/v1_contstop_s0/…/` (`per_jet_clusters.json`,
 `per_jet_clusters_K1000.json`, `eval_metrics_wp34.json`),
 `runs/n_ceiling_probe/20260805-122832/n_ceiling_probe.json` and
 `runs/lnz_spline/lnz_spline_gates.json` and
-`runs/lnz_spline/offset_head_diagnostic.json`.
+`runs/lnz_spline/offset_head_diagnostic.json` and
+`runs/lnz_spline/offset_head_diagnostic_cellctr.json`.
 
 ---
 
@@ -163,6 +164,7 @@ the positive one would have been**.
 | **G3 over six seeds: 5/6** | `ln z` 0.47 / 0.64 / **1.04** / 0.72 / 0.90 / 0.64×, mean 0.74× | §7.2a's question answered: **1-in-6, not 1-in-3**. Formally still PARTIAL (the gate says every seed), but five of six sit comfortably under the line |
 | **`K = 16` is inconclusive and confounded** | seed 2's `ln z` 1.04→0.80×, but `psi` **0.61→1.49×** and `pit_ks_max` 0.0287→0.0380; and changing `K` changes the parameter count, hence the init, hence the draw | cannot separate "more capacity" from "a different draw", and it broke an untouched coordinate. Read as variance; **`K` stays 8 and was not selected against G3** |
 | **The six-seed NLL band** | 3.834–3.862 vs the control's 3.904–3.924 | tighter than *and* entirely below the control — `lnz_head="spline"` is worth fielding on its own numbers |
+| **The conditioning fix changes nothing either** (§8.5(1), `PLAN_lnz_spline_head.md` §9.3) | pre-registered verdict **DEAD**: giving the head the cell's continuous centre leaves `dv` at 1.08 / 1.12 / 1.13× (**0/3** below critical) and the per-cell bias RMS at 0.0295 / 0.0303 / 0.0314 against 0.0300 / 0.0302 / 0.0303 — **within ±4%** of a ±20% band; NLL unmoved | **two mechanisms proposed for `dv`, two falsified.** The defect's existence is solid (13/13 arms); its cause is not established. Every fix *inside* the per-coordinate factorization has now failed |
 
 ---
 
@@ -192,7 +194,7 @@ around.
 |---|---|---|
 | **N channel** | ~0.63 EMD (oracle-N 1.72 vs medoid 2.35) | **CLOSED as a lever** (§2.4). The discriminative probe ties `q(N\|x)` on identical jets (p = 0.91) while beating both trivial predictors and sitting on a flat learning curve — no evidence that `x` carries more N information than the model already extracts. The lever is *real* (the oracle keeps its +0.63) and *unreachable*: at 45% accuracy an N decision is worse than none. It is now a **product**, not a target — the calibrated ambiguity of the set layer is the honest way to report N. |
 | **ln z shape** | was 2.16× critical PIT in the quadrant holding 94% of emissions | **SPENT, and it paid — partially** (§2.5). The RQ-spline head is built, trained and measured: `ln z` falls to 0.47–1.04×, NLL improves on every seed, support unchanged. G3 is **PARTIAL** (2/3 seeds), and the residual moved to `dv`. |
-| **`dv` shape** *(exposed by §2.5)* | `dv` at 1.02–1.22× on **every** arm measured, under both density families | **TRIED AND FAILED as a density problem** (§2.6). The spline does not fix it; the per-cell bias is identical under both families. The defect is the head's **conditioning**, not its density, and the next experiment is §2.6's follow-up: give the coordinate head the cell's continuous centre, not just a learned per-cell embedding. `PLAN_lnz_spline_head.md` §8.5(1). |
+| **`dv` shape** *(exposed by §2.5)* | `dv` fails on **13 of 13** arms measured — across two density families and with/without cell-centre conditioning (1.02–1.22×) | **Both cheap fixes are spent** (§2.6). Neither more density freedom nor better conditioning moved the per-cell bias by more than a few percent. What is left is that the *factorization* cannot represent the right marginal — which is what the joint coordinate density addresses, and why §4.5(1) is now **indicated rather than deferred**. `PLAN_lnz_spline_head.md` §9.4. |
 
 **Explicit stop-signs** (measured dead ends — do not respend effort here):
 - new selection rules over the existing posterior (three straight losses);
@@ -265,16 +267,16 @@ The probe's verdict re-orders everything below it. Two consequences drive the li
    work, and the experiment falsified that: the per-cell bias is **identical** under both
    density families. `dv_head="spline"` ships measured-and-not-recommended.
 
-2. **Give the coordinate head the cell's continuous centre `(c_x, c_y)`** — the experiment
-   §2.6's negative result points at, and the cheapest live hypothesis. Today the cell enters
-   the head only as a *learned embedding of a categorical id*, so nothing tells it that
-   neighbouring cells are neighbours and every cell's within-cell tilt must be learned from
-   its own emissions alone. That is exactly the shape of a per-cell location bias which more
-   output flexibility cannot touch. Two extra columns in one `torch.cat`, one flag, one
-   grid — then re-read the per-cell mean-PIT table. **If the bias shrinks the diagnosis is
-   confirmed and the fix is nearly free; if it does not, the conditioning hypothesis is dead
-   and the joint-density argument becomes the live one.** Either outcome is worth the hour,
-   which is what makes it the right next experiment.
+2. ~~**Give the coordinate head the cell's continuous centre `(c_x, c_y)`**~~ — **done, and
+   also FAILED** (§2.6, `PLAN_lnz_spline_head.md` §9.3). The verdict was pre-registered as
+   three named outcomes before the arms ran, and it landed on **DEAD**: `dv` 0/3 below
+   critical, per-cell bias RMS within ±4% of a ±20% band, NLL unmoved. Telling the head
+   *where* the cells are changed nothing. `model.coord_cell_center` is implemented,
+   bit-identical off, and ships unfielded.
+
+   The pre-registration also fixed what DEAD implies, so the consequence is not a
+   post-hoc reading: **the joint-density argument becomes the live one**, and 4.5(1) below
+   moves from deferred to indicated.
 
 3. ~~**Settle seed 2**~~ — **done** (§2.6). Six seeds give **5/6**, so it is a 1-in-6
    marginal seed rather than a 1-in-3 failure rate; and the `K = 16` arm is confounded with
@@ -343,22 +345,39 @@ both cost a regeneration + retrain and should be costed before being started.
    but the evidence points the other way; if it is tried, the §2.4 probe fed secondary-plane
    summaries is the cheap pre-test to run first.
 
-### 4.5 Exploring new models (structural, only if the above stall)
+### 4.5 Exploring new models (structural)
 
 1. **Per-node joint coordinate density** (cINN-coords / CFM-coords, `PLAN_UPDATES.md`
-   WP1) — the second fired escalation; structurally motivated by the exact kinematic
-   identity `ln z = u + v − ln p_T,sum`, which no per-coordinate head can express.
-   **Still not the next step, and §2.6 sharpened why again.** Its trigger as written is
-   "the spline closes the marginal PIT but TARP still fails" — a clean isolation, because it
-   leaves the factorization as the only thing standing. That is *not* the situation: `dv`
-   fails on 10 of 10 arms under **both** density families, so a TARP failure today is
-   confounded with a marginal that is still wrong and would not be attributable. And §2.6's
-   measured defect is a per-cell *location* bias identical across families — a limit on the
-   head's **conditioning**, which a joint density does not change (it alters the family, and
-   reads the same inputs). The trigger is therefore **restated**: §7.3 fires when every
-   per-coordinate marginal PIT is below its critical value on every seed **and** TARP still
-   exceeds its own MC null band. `PLAN_lnz_spline_head.md` §8.4 carries the argument, and
-   the counter-argument against my own reading.
+   WP1) — **now INDICATED rather than deferred**, which reverses what this section said one
+   experiment ago, on evidence that changed (`PLAN_lnz_spline_head.md` §9.4).
+
+   The reversal is the honest reading of two failures. `dv` fails on **13 of 13** arms, and
+   both cheap ways of fixing it *inside* the per-coordinate factorization are now spent:
+   more density freedom (§2.6, the spline) and better conditioning (§2.6, the cell centre)
+   each moved the per-cell bias by less than a few percent. What survives is the argument
+   this section previously recorded *against* its own conclusion — a marginal PIT is uniform
+   only if the model's marginal-given-cell is right, and that marginal is obtained by
+   integrating the true joint, so a factorized model **can** be forced into a wrong marginal
+   by a correlation it cannot represent. The kinematic identity `ln z = u + v − ln p_T,sum`
+   makes independence-given-cell false by construction, so this is a mechanism with a
+   derivation rather than another hypothesis.
+
+   The earlier restated trigger ("wait until every marginal closes") is **withdrawn**: it
+   waits for a condition the diagnosis says is unreachable inside the current factorization,
+   which is a deadlock rather than caution.
+
+   **Pre-register before running**, and note the primary read is *not* TARP: does `dv`'s
+   marginal PIT fall below 1.0× on every seed? That is the question two per-coordinate fixes
+   failed and the one a joint density claims to answer; a joint density that fixes TARP while
+   leaving `dv` at 1.1× has not explained the defect. 3 seeds, `lnz_head="spline"` both
+   sides, the usual guards, and `d(MBR)` read with `PLAN_z_aware.md`'s caveat in view.
+
+   **The caveat against firing, so the call is made with it visible.** `dv`'s miss is small
+   (KS 0.026–0.029 vs a 0.0255 critical, 2–13% over) and it is now the *only* failing
+   coordinate — `du`, `ln z` and `psi` are all comfortably under. A joint density is the most
+   expensive change in this line of work. Whether that is worth spending on one coordinate's
+   10% marginal miss is a judgement about how much joint-posterior correctness is worth, not
+   a conclusion the data forces.
 2. **Not currently justified** (triggers measured false, listed so they are not
    re-proposed by default): the edit transducer as the fielded family (lost the
    head-to-head); consensus/lattice MBR or any decode that leaves `H = {pool}`; any
@@ -404,9 +423,16 @@ Recorded because each one caught a wrong conclusion this cycle:
   the within-cell shapes were fine; the elegant mechanism was weighted over the direct
   observation and cost a training grid. When the two disagree, the observation wins.
 - **A negative result that explains itself is worth more than a positive one that does
-  not.** The `dv` spline failing told us something the success would have hidden: the bias
-  is *identical* under two density families, so it is a conditioning limit, and the next
-  experiment is about the head's inputs rather than its outputs.
+  not** — but check that the explanation survives its own test. The `dv` spline's failure
+  said "conditioning limit", the conditioning experiment then failed too, and the second
+  failure is what actually moved the roadmap. Two mechanisms proposed for one defect, two
+  falsified by the experiments that tested them: the *existence* of the `dv` defect is solid
+  at 13/13 arms, and its *cause* is still not established.
+- **Pre-register the CONSEQUENCE, not only the verdict.** §8.5(1) fixed three named outcomes
+  *and what each would imply* before the arms ran. It landed on DEAD, which promoted the
+  joint density from deferred to indicated — the opposite of the conclusion reached one
+  experiment earlier. Because the implication was written first, that reversal is a result
+  rather than a rationalisation.
 - **A parameterization can be correct and still untrainable.** Composing the spline on a
   *learnable* truncated normal is exactly right as mathematics — it makes the old head the
   identity special case — and it diverges, because the two parameterizations are redundant

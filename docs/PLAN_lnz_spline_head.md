@@ -17,9 +17,15 @@ Status: **implemented, trained and measured, twice.** §6 is the `ln z` spline's
   express — so more density freedom cannot fix it, and neither would the joint-density
   escalation (§8.4).
 
-**Result in one line:** one of the two coordinate fixes paid and the other did not, and the
-one that did not says the next question is about the head's *inputs*, not its density —
-which is why §7.3 is not the right next step (§8.4) and §8.5(1) is.
+- **Giving the head the cell's continuous centre changes nothing either** (§9.3).
+  Pre-registered verdict **DEAD**: `dv` is 0/3 below its critical value and the per-cell
+  bias RMS moves by less than 4%. Two mechanisms proposed for `dv`, two falsified by the
+  experiments that tested them.
+
+**Result in one line:** the `ln z` spline paid; every attempt to fix `dv` **inside** the
+per-coordinate factorization has failed — more density freedom and better conditioning both
+left the per-cell bias where it was — and that is what promotes §7.3, the joint coordinate
+density, from deferred to indicated (§9.4), reversing §8.4 on evidence that changed.
 
 ---
 
@@ -565,3 +571,95 @@ flexible.
 **Guards unchanged**: support at 0.0000%, NLL not worse beyond the control's seed spread,
 and TARP / `pit_ks_max` reported beside the verdict. A conditioning fix that buys `dv` by
 spending `ln z` or the joint is not a fix.
+
+## 9.3 RESULT — **DEAD**. The conditioning hypothesis is falsified.
+
+Run 2026-08-05. Arms `cellctr_s{0,1,2}` against `spline_s{0,1,2}` (same seed, `ln z` spline
+both sides), plus `cellctr_dvspline_s0`. Artifacts: `runs/lnz_spline/lnz_spline_gates.json`,
+`offset_head_diagnostic_cellctr.json`.
+
+**Primary criterion — `dv` below 1.0× on all three seeds: 0/3.**
+
+| seed | control | + cell centre | `ln z` | was | `du` | `psi` | Δ NLL | Δ d(MBR) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 1.10× | **1.08×** | 0.82× | 0.47× | 0.73× | 0.75× | −0.001 | −0.019 |
+| 1 | 1.04× | **1.12×** | 0.92× | 0.64× | 0.81× | 0.42× | +0.002 | +0.002 |
+| 2 | 1.12× | **1.13×** | 1.05× | 1.04× | 0.76× | 0.90× | +0.003 | +0.009 |
+| `cellctr_dvspline_s0` | 1.08×¹ | 1.03× | 0.94× | 0.82×¹ | 0.72× | 0.54× | +0.018 | +0.009 |
+
+¹ control is `cellctr_s0`, so this row prices the `dv` spline **on top of** the conditioning.
+
+**Secondary criterion — the per-cell bias RMS, the statistic §9.2 named in advance because
+§8.1 showed it is identical under two density families: within ±4%, far inside the ±20%
+DEAD band.**
+
+| seed | control | + cell centre | change |
+|---|---:|---:|---:|
+| 0 | 0.0300 | 0.0295 | −1.7% |
+| 1 | 0.0302 | 0.0303 | +0.3% |
+| 2 | 0.0303 | 0.0314 | +3.6% |
+
+Held-out NLL is unmoved (3.845 / 3.863 / 3.863 against 3.846 / 3.861 / 3.860) and the
+support guard holds at 0.0000% on every arm. **Telling the head where the cells are changed
+nothing.** The per-cell location bias is not caused by the cell arriving as a bare
+categorical id.
+
+**Two mechanisms proposed for `dv`, two falsified by the experiments that tested them.** The
+tilt budget (§8.1) and now the conditioning. The honest summary is that the *existence* of
+the `dv` defect is solid — it fails on every arm of every configuration measured, 13 of 13 —
+and its *cause* is not established by anything in this document.
+
+**An instrument caveat, recorded because a reader comparing the two tables will see it.**
+`offset_head_diagnostic.py` and the `eval` pipeline disagree on the absolute `dv` ratio by
+0.03–0.13 (e.g. `cellctr_s0` reads 0.95× in the diagnostic and 1.08× in the gate) because
+they select marginally different 2000-jet populations. The verdict does not turn on it: the
+*paired* control-vs-arm comparison has the same sign and magnitude under both instruments,
+and the bias RMS above is computed on identical populations within one instrument. The
+**gate** numbers are the quotable ones, being from the same pipeline as every other number
+in this work package.
+
+## 9.4 What this promotes — §7.3 is now the indicated next step
+
+§9.2 fixed this consequence in advance, and it is the opposite of §8.4's conclusion two
+experiments ago. That is what the evidence did, so it is what the document says.
+
+The argument §8.4 put on the record *against* its own reading is now the surviving one:
+
+> A marginal PIT is only uniform if the model's *marginal-given-cell* is right, and the true
+> marginal-given-cell is obtained by integrating the true joint — so a factorized model can
+> be forced into a wrong marginal by a correlation it cannot represent.
+
+Two independent attempts to fix `dv` **inside** the factorization have now failed: more
+density freedom (§8.1) and better conditioning (§9.3). Neither moved the per-cell bias by
+more than a few percent. What remains is the possibility the factorization itself cannot
+represent the right marginal — and the kinematic identity `ln z = u + v − ln p_T,sum` says
+independence-given-cell is false by construction, so this is a mechanism with a derivation
+rather than another hypothesis of mine.
+
+**The restated trigger of §8.4 is therefore not met and should not be waited for.** It asked
+for the marginals to close before firing §7.3 — but the two cheap ways of closing `dv` are
+now spent, and the reason a marginal *cannot* close is precisely what §7.3 addresses.
+Waiting for a condition that the diagnosis says is unreachable inside the current
+factorization is not caution, it is a deadlock. §7.3 fires.
+
+**What it must be run with, so the result is readable.** The confound §8.4 worried about is
+real and has to be handled by design rather than by hope:
+- 3 seeds at the v1 budget, `lnz_head="spline"` on both sides so the row prices the
+  factorization alone;
+- **pre-registered before the run**: does `dv`'s marginal PIT fall below 1.0× on every seed?
+  That is the question two per-coordinate fixes failed, and it is the one a joint density is
+  claimed to answer. TARP is the *secondary* read, not the primary — a joint density that
+  fixes TARP while leaving `dv` at 1.1× has not explained the defect;
+- the same guards: support at 0.0000%, NLL within the control's seed spread, and `d(MBR)`
+  reported (see `PLAN_z_aware.md` for why `d(MBR)` may be the wrong ruler for a coordinate
+  the metric cannot see).
+
+**One caveat against firing, stated so the decision is made with it in view.** `dv`'s failure
+is small in absolute terms — KS 0.026–0.029 against a critical 0.0255, i.e. 2–13% over — and
+it is the *only* coordinate still failing, with `du`, `ln z` and `psi` now all comfortably
+under. A joint coordinate density is the most expensive change in this line of work. If the
+`ln z`-aware decode metric of `PLAN_z_aware.md` shows the `d(MBR)` regression is an
+artifact, the fielded product is in good shape on every axis except a 10% miss on one
+coordinate's marginal — and "run the expensive structural change for that" is a judgement
+call about how much the joint posterior's correctness is worth, not a conclusion the data
+forces.

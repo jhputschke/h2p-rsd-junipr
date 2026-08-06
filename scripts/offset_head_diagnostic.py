@@ -133,6 +133,7 @@ def pit_by_kt_cell(model, geom, batch) -> list[dict]:
     dv = u[..., 1][mask]
     rows = [{"scope": "all", "n": int(dv.size), "ks": ks(dv),
              "ratio": ks(dv) / critical(dv.size), "mean_pit": float(dv.mean())}]
+    per_cell_bias = []
     for cell in range(geom.n_bins):
         m = iv == cell
         if m.sum() < 100:
@@ -145,6 +146,12 @@ def pit_by_kt_cell(model, geom, batch) -> list[dict]:
             "ratio": ks(dv[m]) / critical(int(m.sum())),
             "mean_pit": float(dv[m].mean()),
         })
+        per_cell_bias.append(float(dv[m].mean()) - 0.5)
+    # THE pre-registered statistic of §9: the RMS per-cell location bias. §8.1 showed this
+    # is identical under a truncated normal and a spline, so it is precisely what a
+    # CONDITIONING change is supposed to move and a DENSITY change provably does not.
+    rows[0]["bias_rms"] = float(np.sqrt(np.mean(np.square(per_cell_bias))))
+    rows[0]["n_cells"] = len(per_cell_bias)
     return rows
 
 
@@ -161,7 +168,9 @@ def tilt_budget(model, batch, needs: dict) -> dict:
     e = model.encode(batch["xf"], batch["nx"])
     out = model._decode_states(batch["yc"], e, model.xattn_kv(batch["xf"], batch["nx"]))
     eh = torch.cat([out[:, :L, :], e.unsqueeze(1).expand(-1, L, -1)], dim=-1)
-    p = model._coord_params(torch.cat([eh, model.y_embed(batch["yc"].clamp(min=0))], dim=-1))
+    # the model's OWN input builder, so this follows any conditioning change (e.g.
+    # `coord_cell_center`) instead of silently mismatching the head's width
+    p = model._coord_params(model._coord_input(eh, batch["yc"].clamp(min=0)))
     m = torch.arange(L).unsqueeze(0) < batch["ny"].unsqueeze(1)
     res = {}
     for name, mean, sig, h in (("du", p.du_mean, p.du_sig, model.half_u),
@@ -213,7 +222,8 @@ def main(argv=None) -> int:
         report["truth_shape"] = needs
 
         print(f"\n===== {arm} =====")
-        print(f"  1. dv PIT by ln kt cell   (overall {rows[0]['ratio']:.2f}x on n={rows[0]['n']})")
+        print(f"  1. dv PIT by ln kt cell   (overall {rows[0]['ratio']:.2f}x on n={rows[0]['n']}"
+              f";  per-cell bias RMS = {rows[0]['bias_rms']:.4f} over {rows[0]['n_cells']} cells)")
         print(f"     {'cell':<28}{'n':>7}{'KS':>9}{'ratio':>8}{'mean PIT':>10}")
         for r in rows[1:]:
             edge = "  <- touches kt_floor" if r.get("touches_kt_floor") else ""
