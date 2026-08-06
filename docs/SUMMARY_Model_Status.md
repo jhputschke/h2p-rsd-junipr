@@ -1,15 +1,18 @@
 # SUMMARY — model status, findings, and where improvement lives
 
-Last updated: 2026-08-06, branch `zAwareMetric`. This document consolidates the state of
-the hadron→parton posterior — what has been tested, what fell, what stands, and what to do
-next — so the conclusions do not have to be reassembled from eight plan documents. Every
+Last updated: 2026-08-06, branch `nextStepsTrackAB`. This document consolidates the state
+of the hadron→parton posterior — what has been tested, what fell, what stands, and what to
+do next — so the conclusions do not have to be reassembled from eight plan documents. Every
 number links back to a primary record; nothing here is a new measurement.
 
 Primary records: `PROD_TEST_v0_RESULTS.md`, `PROD_TEST_v1_RESULTS.md`,
-`PROD_TEST_edit_RESULTS.md`, `PLAN_PosteriorClusters.md` (implementation notes),
-`PLAN_StratifiedMBR.md` §1a–§1d, `PLAN_NCeilingProbe.md` §A,
-`PLAN_lnz_spline_head.md` §6, §8 and §9, `PLAN_z_aware.md` §11 and §13 (WP-0 null; WP-3 indicated),
-`PLAN_next_steps.md` (the ordered execution list),
+`PROD_TEST_edit_RESULTS.md`, `PLAN_PosteriorClusters.md` (implementation notes, **§18** the
+truth/draw representation audit, **§19** the budget scan),
+`PLAN_StratifiedMBR.md` §1a–§1d and **§1e** (the `coverage_68` null transfer),
+`PLAN_NCeilingProbe.md` §A,
+`PLAN_lnz_spline_head.md` §6, §8, §9 and **§10/§11** (the continue/stop TARP transfer),
+`PLAN_z_aware.md` §11 and §13 (WP-0 null; WP-3 indicated) and **§14/§15** (the default-decode arm),
+`PLAN_next_steps.md` (the ordered execution list, **§8** its results),
 and the run artifacts under
 `runs/prod_test_v1/v1_contstop_s0/…/` (`per_jet_clusters.json`,
 `per_jet_clusters_K1000.json`, `eval_metrics_wp34.json`),
@@ -19,7 +22,11 @@ and the run artifacts under
 `runs/lnz_spline/offset_head_diagnostic_cellctr.json` and
 `runs/zaware_wp0/full-20260806-131513/wp0.json` (300 jets) and
 `runs/zaware_wp0/esc1000-20260806-132207/wp0.json` (the 1000-jet escalation) and
-`runs/zaware_sel/full-20260806-143047/ceiling.json` (the §12/§13 selection ceiling).
+`runs/zaware_sel/full-20260806-143047/ceiling.json` (the §12/§13 selection ceiling) and
+`runs/zaware_default/full-20260806-163256/default.json` (the §14/§15 default-decode arm) and
+`runs/truth_cloud_audit/full2-20260806-162840/audit.json` (the §18 representation audit) and
+`runs/cluster_budget/full-20260806-171520/budget.json` (the §19 budget scan) and
+`runs/coverage_null/full-20260806-164231/coverage_null.json` (the §1e null transfer).
 
 ---
 
@@ -94,7 +101,7 @@ flowchart LR
 | G7 conformal coverage, exemplar rule | 0.617 [0.577, 0.655] vs nominal 0.68 — **unreachable** | the ceiling is the **reporting rule**: same sets at the pool's own resolution cover **0.793** (see §2.3) |
 | G8′ empty-clique dominance | bounded argmin collapses to empty on **24.5%** vs a 1% ceiling | WP4b (bounded loss) stays closed, independently confirmed |
 | the mass argmax as a point estimate | `set0` 11–14% worse RMS than the medoid, CIs excluding 1; over-selects empty **0.455** (hdbscan) vs true 0.167 — a granularity artifact (the N=0 stratum is atomic, the rest fragments) | **`members[0]` is not a tree to ship**; the frozen-τ gate fixes the emptiness completely (0.455→0.130) and moves nothing else |
-| K=1000 arm | silhouette precondition 46.2%→**66.3%**, `<n_clusters>` 4.89→3.95, G2′ up | the "unresolvable half" was partly budget; **but** `min_cluster_size ∝ K` confounds G6 across K (residual mass 0.284→0.362, unassigned 35.7%→43.5% while the pool support *improved*) — G6's cross-K row is unscored |
+| K=1000 arm | silhouette precondition 46.2%→**66.3%**, `<n_clusters>` 4.89→3.95, G2′ up | the "unresolvable half" was partly budget; **but** `min_cluster_size ∝ K` confounds G6 across K (residual mass 0.284→0.362, unassigned 35.7%→43.5% while the pool support *improved*) — G6's cross-K row is unscored, **and §19 shows it cannot be un-confounded by that knob at all** — budget and granularity move every partition statistic in opposite directions at comparable size, so the committed pair's small deltas are a near-cancellation. What K *does* buy, cleanly separated: `d_mbr` −0.0426 [−0.0695, −0.0194] |
 
 ### 2.3 Stratified MBR + the two audits (`PLAN_StratifiedMBR.md` §1a–§1c)
 
@@ -152,7 +159,7 @@ the v1 arms themselves, same preset and same seeds.
 | **The first change to improve likelihood AND calibration together** | NLL −0.041 to −0.078 nat on 4/4 arms against a control seed spread of **0.020**; `pit_ks_max` better on 4/4 | every earlier intervention moved one or neither. Worth fielding on its own numbers |
 | **The support closure was not spent** | 0.00000% below soft drop and above `z = ½` on every arm — by construction, since the spline maps the interval onto itself | v1's WP-A property is preserved, not traded |
 | **The residual MOVED to `dv`** | `dv` now fails on all three seeds (1.10× / 1.04× / 1.12×) and `dv × wide_soft` sits at ~1.0×, while `ln z` is 0.47–1.04× | it became the binding coordinate — and §2.6 then measured that the same fix does **not** work on it |
-| **TARP moved, mostly the right way** | `v1_base` s0/s1 cross below the null band (0.0415 → 0.0215, 0.0350 → 0.0265 vs p95 0.0275) and now pass G7; s2 worsens (0.0335 → 0.0400) | the coordinate density was contributing to the joint narrowness too — the factorization was not the only cause. 2/3 with a contrary seed is **suggestive, not a verdict** |
+| ~~**TARP moved, mostly the right way**~~ — **REWRITTEN 2026-08-06: TARP is unresolved at this bar on BOTH families** | the explicit arms are −0.0200, −0.0085, +0.0065 (2/3 by sign, mean **−0.0073**); the fielded continue/stop arms, measured for the first time on three seeds, are +0.0055, −0.0030, −0.0190 (2/3 by sign, mean **−0.0055**). Both means sit inside TARP's own MC spread (null mean 0.0167, p95 0.0275). A pre-registered bar of −0.0085 on the mean is cleared by **neither** | not "the coordinate density was contributing to the joint narrowness too" — that read a 2/3 sign pattern whose mean is smaller than the statistic's noise. §4.2(4) asked for the arm that would settle it and it settled the other way. `PLAN_lnz_spline_head.md` §10/§11 |
 | ~~**d(MBR) is marginally worse on 4/4**~~ — **WITHDRAWN 2026-08-06: `d(MBR)` is unchanged within its own per-jet noise** | the 4/4 signing (+0.0047, +0.0113, +0.0091, +0.0031) was four *unpaired* means. Paired per-jet at the same tier: **95% CI contains 0 on 4/4**, each ~±0.03 wide against a +0.005 effect. At the pre-declared 1000-jet escalation the **signing itself does not survive** — 3/4, with `spline_s0` significantly *better* (−0.0211 [−0.0357, −0.0065]) — and the pool over **3273 paired jets is −0.0014 [−0.0089, +0.0062]** | the sentence is **rewritten, not explained** — that consequence was fixed in advance (`PLAN_z_aware.md` §4/WP-0), and an explanation is not owed for a number that is not resolved. The *other* half fails too: under the new ruler that does see `ln z`, the MBR winner's own `\|Δ ln z\|` is flat (+0.0003 [−0.0109, +0.0117]), so there was no hidden gain for a blind ruler to miss. **Both open reservations about `lnz_head="spline"` are now one** (G3 formally PARTIAL at 5/6). `PLAN_z_aware.md` §11 |
 | **A design the measurement rejected** | composing the spline on a *learnable* truncated normal is non-identifiable: `lnz_mean` → −533 on an interval of [−2.303, −0.693], `F_TN` saturated on 100% of emissions, val NLL 4.19 → 19.2 at epoch 4 | the base must be parameter-free. Recorded in `distributions.py` and pinned by a regression test so the appealing-but-broken construction is not re-proposed |
 
@@ -190,6 +197,25 @@ escalation this plan declared in advance.
 | **…but the ln z-blind SELECTION *is* worth fixing** (§12/§13, a separate pre-registered test) | the MBR winner's `ln z` is a single **draw**: it ties identity(x) (0/8 significant) while a centrality estimate off the *same* draws beats it by 0.047–0.071 on 8/8. Putting `ln z` in the EMD ground metric recovers **47–70% (mean ≈59%)** of that — `\|Δ ln z\|` 0.395–0.420 → **0.361–0.375**, −0.026…−0.047 with **8/8 CIs excluding 0**. De-quantization alone delivers **nothing** (0/8), so the gain is attributable to `ln z` specifically. B1/B2/B3 all PASS | **BUILD WP-3, default off.** The knob currently raises (WP-2) and something now wants it. **Not** the default decode: the fielded cell-centre `dlund_mbr` degrades +0.0042 [+0.0004, +0.0081] pooled, which B2 (written against the *continuous* `(u,v)` ruler) did not cover — a gap in the pre-registration, reported not resolved. Family-independent: the same size on control arms |
 | **What is still open, and unrelated** | `_truth_cloud` weights the truth by `exp(v_continuous)` and every draw cloud by `exp(v_cell_centre)` — a per-point mismatch of `exp(±0.1)` plus a Jensen inflation of the truth's total mass, which the EMD charges at `R·\|ΔW\|`. `d_top`, `d_best`, `d_mbr`, `d_nearest_draw` and gates G2′/G6/G7 sit on it | a **real latent defect**, found while writing this plan and fixed only as a side effect of the WP-3 threading that did not run. It does not touch `dlund_mbr` (a plain Euclidean distance, no EMD), so it is not this section's subject — but it is not closed either |
 
+### 2.8 Track A/B execution — WP-3 built, and four measurements (`PLAN_next_steps.md` §8)
+
+The ordered list of `PLAN_next_steps.md`, run end to end on 2026-08-06: A1–A4, then B4, B3,
+B5, B1. Two pre-registrations were committed before the arms they read
+(`PLAN_z_aware.md` §14 in `fa45c9f`; `PLAN_lnz_spline_head.md` §10 in `7932089`).
+
+| finding | evidence | consequence |
+|---|---|---|
+| **WP-3 is built, and bit-identical off** | `decode.mbr_cloud_source` (`"cells"`/`"coords"`); `coords_for_draws` draws the table **once**, unfiltered and index-aligned, feeding both the clouds and the winner's `describe_cells`. Verified by diffing the closure **and** cluster metric dicts against a pristine checkout from a reset RNG state (both streams): 1569 → 1641 leaf keys, **ADDED 72, REMOVED 0, MOVED 0**. +24 tests; suite green; parity at `max\|Δ\| = 0.000e+00` | `mbr_coords="+lnz"` and `mbr_weight="z"` are **functional** instead of fatal, and the fielded path is untouched. `PLAN_next_steps.md` §8.1 |
+| **`+lnz` is NOT the default decode, on a rule fixed first** | jets `[1000, 2000)` — disjoint from everything §11/§12/§13 scored — through the fielded `run_closure`. **D1 FAILS**: Δ`dlund_mbr` pooled **+0.0114 [+0.0075, +0.0152]** against a +0.010 band, 4/8 arms significantly worse. **D2 PASSES** 7/8 (pooled −0.0289 [−0.0349, −0.0230]); **D3 PASSES** 8/8 with both no-EMD controls exactly 0 | **AVAILABLE-NOT-DEFAULT.** And the number that justifies the whole design: §13.3's post-hoc estimate of the same cost was **+0.0042**, low by a factor of nearly three. A rule written afterwards would have been scored against it. `PLAN_z_aware.md` §14/§15 |
+| **The truth/draw representation mismatch, priced** | the *same* tree through both representations: `W_truth / W_truth_as_drawn` = **1.0030**, buying a spurious `\|ΔW\|` of **0.213** = **9.6% of `<d_mbr>`**, **72% of `<d_nearest_draw>`**. `d_mbr` itself does **not** move (+0.0024 [−0.0185, +0.0241]) | a real defect, now fixed under `"coords"` and **reported on every run** (`metrics["clusters"]["weight_audit"]`). G2/G6/G7 flip to pass under `"coords"` and §18.3 declines to bank them — the cause is de-quantization, and G6's ECE only improves because the forecaster goes nearly constant (resolution 0.0623 → 0.0109). **The committed G2/G6/G7 numbers are conditional on the cell-centre representation**, which was never stated. `PLAN_PosteriorClusters.md` §18 |
+| **G6's cross-K row cannot be un-confounded by `min_cluster_size`** | four cells off ONE nested sampling pass. `mcs` is a COUNT and `min_mass` a FRACTION, so `K = 1000` gives 1.2 / 4.1 / 30.1 clusters per jet at the three conventions against the `K = 200` target of 4.9. The decomposition resolves exactly `d_mbr`, `d_nearest_draw`, `pool_bound` — the three quantities that are *not* about the partition, moved by exactly **0.0000** by the granularity. Every partition statistic is moved in **opposite directions at comparable size** by budget and granularity | §2.2's "G6's cross-K row is unscored" **stands, with a reason**; the committed pair's small deltas are a near-cancellation, not a null. It becomes an independent argument for §4.3(1). `PLAN_PosteriorClusters.md` §19 |
+| **What `K` actually buys, separated from the partition for the first time** | 200 → 1000 draws: `d_mbr` **−0.0426 [−0.0695, −0.0194]**, `d_nearest_draw` −0.0681, `pool_bound` −0.2672 | ~7% of the N lever (§2.3's 0.63 EMD), bought with compute rather than information. Real, and not a substitute for it |
+| **`coverage_68`'s null is family-independent** | pooled over three explicit-`q(N\|x)` seeds it is **0.5504** on 26 334 pseudo-truths against §1c's 0.553: **−0.0026 [−0.0145, +0.0094]**. Positive control: this runner re-measures §1c's arm at 0.5476 vs 0.553 | the stop-sign now rests on **two families and four arms** instead of one and one. One residual reported rather than smoothed: `v1_base_s1` is −0.067 [−0.112, −0.022] below its *own* null. `PLAN_StratifiedMBR.md` §1e |
+| **…and the shipped test that read it was wrong** | `coverage_68_null_explains_deficit` asks whether the observation lies inside the *null's* interval, discarding the observation's own error — the larger by ~4×. **Simulated** on a model drawn from the null at the fielded sample sizes, it rejects **64.8%** of the time | fixed additively: `wilson_diff_interval` (Newcombe 1998 m10) plus `coverage_68_vs_null_ci` and `coverage_68_null_explains_deficit_paired`. The old key keeps its value; committed artifacts are unchanged |
+| **The spline's TARP gain does not transfer — and does not clear the bar anywhere** | see §2.5's rewritten row. Continue/stop, three paired seeds: +0.0055, −0.0030, −0.0190, mean −0.0055 against a pre-registered −0.0085. The same rule on the reference family: mean −0.0073, also failing | §4.2(4) is **done** and its answer is negative. Everything *except* TARP moved on 3/3 — val NLL −0.041/−0.063/−0.095, `pit_ks_max` better on all three, `ln z` PIT 1.89→1.05, 1.23→0.72, 1.68→1.34 — so `lnz_head="spline"` is unaffected as a fielded choice. `PLAN_lnz_spline_head.md` §11 |
+| **`v1_contstop_s2` fails G7** *(unanticipated)* | 0.0405 against p95 0.0275, exceeding the MC null. That control had to be trained for B1 and did not exist before | v1's attribution rested on *"all six explicit arms fail, both continue/stop arms pass"*; with a third seed it is **6/6 against 1/3**. The attribution stands; **its absolute form does not** — two arms were never enough to support "both pass" as a property of a family |
+| **Per-jet rows in the cluster artifact** | `METRICS["per_jet"]`, keyed by the jet-file index so two budget tiers pair exactly; curated (the eight estimators' coordinate arrays are omitted — no gate reads them). Verified by executing the notebook | §4.1(6) done. Gate G5's paired criterion is computable. The artifact name now also carries `min_cluster_size`, and `run.cluster_min_cluster_size_effective` records what `0` resolved to — which *is* B4's confound |
+
 ---
 
 ## 3. The overall conclusion
@@ -211,7 +237,8 @@ around.
 formally PARTIAL at 5/6 seeds — rather than two. That also removes the last thing standing
 between the roadmap and §4.5(1).
 
-**The recommended per-jet product today:**
+**The recommended per-jet product today** (unchanged by §2.8 — the `+lnz` decode was
+measured and is *available*, not default):
 - point estimate: **the MBR medoid**, with the frozen-τ empty gate (`decode.empty_threshold`);
 - uncertainty: **the cluster set** — `top_mass` as a calibrated probability (after one
   temperature), `entropy` as the per-jet ambiguity, `radii[0]` as the one honest ±,
@@ -223,7 +250,7 @@ between the roadmap and §4.5(1).
 | lever | size | status |
 |---|---|---|
 | **N channel** | ~0.63 EMD (oracle-N 1.72 vs medoid 2.35) | **CLOSED as a lever** (§2.4). The discriminative probe ties `q(N\|x)` on identical jets (p = 0.91) while beating both trivial predictors and sitting on a flat learning curve — no evidence that `x` carries more N information than the model already extracts. The lever is *real* (the oracle keeps its +0.63) and *unreachable*: at 45% accuracy an N decision is worse than none. It is now a **product**, not a target — the calibrated ambiguity of the set layer is the honest way to report N. |
-| **ln z shape** | was 2.16× critical PIT in the quadrant holding 94% of emissions | **SPENT, and it paid — partially** (§2.5). The RQ-spline head is built, trained and measured: `ln z` falls to 0.47–1.04×, NLL improves on every seed, support unchanged. G3 is **PARTIAL** (5/6 seeds, §2.6), and the residual moved to `dv`. The one reservation that was not a gate — `d(MBR)` worse on 4/4 — **is withdrawn** (§2.7): paired per-jet it is −0.0014 [−0.0089, +0.0062] over 3273 jets. |
+| **ln z shape** | was 2.16× critical PIT in the quadrant holding 94% of emissions | **SPENT, and it paid — partially** (§2.5). The RQ-spline head is built, trained and measured: `ln z` falls to 0.47–1.04×, NLL improves on every seed, support unchanged. G3 is **PARTIAL** (5/6 seeds, §2.6), and the residual moved to `dv`. The one reservation that was not a gate — `d(MBR)` worse on 4/4 — **is withdrawn** (§2.7): paired per-jet it is −0.0014 [−0.0089, +0.0062] over 3273 jets. **And one claim in its favour is withdrawn too** (§2.8): the TARP improvement clears a pre-registered bar on **neither** family, so the head is fielded on NLL, PIT and support and on nothing else. |
 | **`dv` shape** *(exposed by §2.5)* | `dv` fails on **13 of 13** arms measured — across two density families and with/without cell-centre conditioning (1.02–1.22×) | **Both cheap fixes are spent** (§2.6). Neither more density freedom nor better conditioning moved the per-cell bias by more than a few percent. What is left is that the *factorization* cannot represent the right marginal — which is what the joint coordinate density addresses, and why §4.5(1) is now **indicated rather than deferred**. `PLAN_lnz_spline_head.md` §9.4. |
 
 **Explicit stop-signs** (measured dead ends — do not respend effort here):
@@ -234,7 +261,21 @@ between the roadmap and §4.5(1).
 - **a better length head, or any decode fed by one** — the ceiling probe found no sharper n̂
   to feed it, and a 45%-accurate n̂ loses to no N decision at all (§2.4);
 - the bounded/kernel MBR loss as a product (G8′ fails at 24.5% vs a 1% ceiling);
-- reading `coverage_68` against 0.68 (its null is 0.553 at K=200 — always quote it with K).
+- reading `coverage_68` against 0.68 (its null is 0.553 at K=200 — always quote it with K,
+  and score it with `coverage_68_null_explains_deficit_paired`, **not** the point-in-interval
+  key, which rejects a perfect model 64.8% of the time at the fielded sample sizes, §2.8);
+- **`mbr_cloud_source="coords"` as the default decode** — *new, 2026-08-06.* It won both of
+  its build gates and lost the one that asks whether it should displace the default: the
+  fielded `dlund_mbr` pays +0.0114 [+0.0075, +0.0152] (`PLAN_z_aware.md` §14/§15). Ship it
+  available, not default. Reopening it means moving the headline off the cell grid first,
+  which is a decision about what the product is quoted on;
+- **un-confounding G6 across K by changing `cluster_min_cluster_size`** — *new,
+  2026-08-06.* Measured unreachable: no setting of that knob reproduces the `K = 200`
+  partition at `K = 1000` (`PLAN_PosteriorClusters.md` §19). A scale-invariant partition
+  rule is what would be needed, which is §4.3(1);
+- **quoting the spline's TARP improvement as a finding** — *new, 2026-08-06.* It clears a
+  pre-registered bar on neither family (`PLAN_lnz_spline_head.md` §11). The head is fielded
+  on NLL, PIT and support, and TARP is not among its reasons.
 
 ---
 
@@ -270,9 +311,13 @@ The probe's verdict re-orders everything below it. Two consequences drive the li
    encoder sees the whole sequence the summaries compress. Pre-register the same paired
    McNemar, the same trivial-predictor controls, and the same learning curve before running
    it.
-3. **Transfer the `coverage_68` null to one explicit-`q(N|x)` arm** (where TARP *does*
-   fail) — one `eval` run with `experiment.coverage_null_reps=20`. Confirms the null
-   lands near 0.553 there too, so the correction is family-independent.
+3. ~~**Transfer the `coverage_68` null to one explicit-`q(N|x)` arm**~~ — **done**
+   (§2.8, `PLAN_StratifiedMBR.md` §1e). It does: pooled over three `v1_base` seeds the
+   null is **0.5504** on 26 334 pseudo-truths against §1c's 0.553, difference −0.0026
+   [−0.0145, +0.0094]. Three seeds rather than the one asked for, plus `v1_contstop_s0`
+   as a positive control. It also turned up a **wrong test** in the shipped metric —
+   `coverage_68_null_explains_deficit` rejects a perfect model 64.8% of the time — now
+   fixed additively.
 4. ~~**Is §2.5's `d(MBR)` regression even resolved, and is it a z-blind metric?**~~ —
    **done** (§2.7, `PLAN_z_aware.md` §11). Answer: **there is no regression to explain**,
    and the ruler that would have explained it finds nothing behind it either. The
@@ -282,10 +327,19 @@ The probe's verdict re-orders everything below it. Two consequences drive the li
    `kt`-weight mismatch under G2′/G6/G7 was to be fixed as a side effect of WP-3, so it was
    left open — see §2.7's last row. **§12/§13 then reopened WP-3 on its own merits** and
    found for it, so that defect has an owner again.
-5. **Pin `cluster_min_cluster_size=10` at K=1000** — one notebook run. Separates "more
-   draws" from "coarser clustering" and un-confounds G6's cross-K comparison.
-6. **Per-jet rows in the cluster artifact**, so gate G5's paired criterion becomes
-   computable instead of falling back to "quote the K=1000 tier".
+5. ~~**Pin `cluster_min_cluster_size=10` at K=1000**~~ — **done, and the goal is
+   unreachable by this route** (§2.8, `PLAN_PosteriorClusters.md` §19). `min_cluster_size`
+   is a count and `min_mass` a fraction, so no setting of the former reproduces the
+   `K = 200` partition at `K = 1000` (1.2 / 4.1 / 30.1 clusters per jet against a target
+   of 4.9). Budget and granularity move every partition statistic in **opposite directions
+   at comparable size**, so the committed cross-K pair's small deltas are a
+   near-cancellation. **G6's cross-K row stays unscored, now with a reason** — and this is
+   an independent argument for §4.3(1), whose top-level partition is `q(N|x)` and is
+   budget-invariant by construction.
+6. ~~**Per-jet rows in the cluster artifact**~~ — **done** (§2.8). `METRICS["per_jet"]`,
+   keyed by the jet-file index so two budget tiers pair exactly; G5's paired criterion is
+   computable. The artifact name now also carries `min_cluster_size`, and
+   `run.cluster_min_cluster_size_effective` records what `0` resolved to.
 
 ### 4.2 Model extensions (pre-authorized, in order)
 
@@ -314,11 +368,14 @@ The probe's verdict re-orders everything below it. Two consequences drive the li
    a re-draw (changing `K` changes the init) *and* broke `psi`, so it reads as variance.
    `K` stays at 8 and was never selected against G3.
 
-4. **A 3-seed continue/stop spline arm**, to settle §2.5's TARP finding. Two of three
-   explicit-`q(N|x)` seeds crossed below the null band once the coordinate density
-   improved, which says the factorization was not the only contributor to the joint
-   narrowness — but one seed moved the other way, and the fielded family has a single arm.
-   This is the cheapest way to turn a suggestive result into a statement.
+4. ~~**A 3-seed continue/stop spline arm**~~ — **done, and the statement is negative**
+   (§2.8, `PLAN_lnz_spline_head.md` §10/§11). Δ(TARP) on the fielded family is +0.0055,
+   −0.0030, −0.0190 (mean **−0.0055**) against a bar of −0.0085 fixed before the arms;
+   the same rule on the family the effect was *measured* on also fails (mean −0.0073).
+   §2.5's TARP row is **rewritten, not qualified**. Everything except TARP moved on 3/3.
+   One unanticipated finding: the control that had to be trained for this,
+   `v1_contstop_s2`, **fails G7** at 0.0405 — so v1's "both continue/stop arms pass" is
+   1 of 3 failing on three seeds. The attribution stands; its absolute form does not.
 2. ~~**Length-channel improvement**~~ — **withdrawn.** It was gated on 4.1(1) showing
    headroom; it did not. All three options are dead for a specific reason and each is worth
    recording so none is re-proposed: the *decode-time auxiliary N-head* **is** the probe of
@@ -507,6 +564,38 @@ Recorded because each one caught a wrong conclusion this cycle:
   says the biggest remaining defect is another per-coordinate one — so the letter would
   send the next month at the expensive structural change while a cheap one is sitting in
   front of it. Pre-registration binds the *verdict*, not the *next question*.
+- **A post-hoc estimate of a cost is not the cost.** §13.3 priced `+lnz`'s degradation of
+  the fielded headline at +0.0042, computed from stored cell ids on the jets that campaign
+  had already scored. Measured on a **disjoint** slice through the code a user actually
+  runs, it is **+0.0114** — nearly 3× larger, and on the other side of the band a rule
+  would have been written to (§2.8). Two design choices bought that: a jet slice nothing
+  had touched, and the shipped pipeline rather than a bespoke script. Both cost nothing but
+  the decision to make them *before* writing the rule.
+- **A "hold everything else fixed" instruction is not always executable, and finding out is
+  a result.** B4 asked for `cluster_min_cluster_size=10` at `K = 1000`. That knob is a
+  *count* and its sibling `cluster_min_mass` is a *fraction*, so pinning one leaves the
+  other scaling and the partition collapses. No setting reproduces the reference partition.
+  The useful output was not the arm the plan wanted but the demonstration that the arm
+  cannot exist (§2.8) — and it re-pointed the roadmap at a scale-invariant partition rule
+  it already contained for other reasons.
+- **A test can be wrong in the direction that looks careful.**
+  `coverage_68_null_explains_deficit` compares an observation against the *other*
+  estimate's interval, which reads as conservative and is anti-conservative: it discards
+  the larger of the two errors and rejects a perfect model **64.8%** of the time at the
+  fielded sample sizes. It was found by transferring the metric to a second family and
+  noticing that 3 of 4 arms "failed" a test they should pass. Simulate the reference —
+  including the reference for a *test*, not only for a statistic.
+- **A bar taken from a per-unit quantity does not transfer to a mean.** §10's T1 required
+  the *mean* Δ(TARP) over three seeds to clear −0.0085, a number taken from the weakest
+  improving *seed* of the reference family. With one contrary seed the mean is above the
+  weakest improving instance almost by construction — so the rule was stricter than it
+  read, and the reference family fails it too. The verdict stood as written (re-cutting a
+  rule after the numbers is the move pre-registration prevents), and the criticism is
+  recorded beside it (`PLAN_lnz_spline_head.md` §11.2).
+- **Two arms are not a property of a family.** v1's attribution rested partly on "both
+  continue/stop arms pass G7". The third seed, trained only because §10 needed a control,
+  fails at 0.0405. The attribution survives on 6/6 against 1/3; the absolute phrasing does
+  not (§2.8).
 - **A statistic computed from K draws carries K-draw noise — quote the band, not the
   decimals.** The 0.4483 that this whole work package was built around re-measured as 0.4583
   on the same 600 jets with fresh draws, because for a continue/stop family `length_pmf`
