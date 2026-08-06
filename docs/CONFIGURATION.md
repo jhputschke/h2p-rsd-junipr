@@ -974,8 +974,8 @@ The serving layer reads the checkpoint's decode config. Source:
 | `mbr_backend` | `"pot"` | MBR | OT backend: `pot` (default, self-contained) / `energyflow` (reference) / `surrogate` (fast χ²) |
 | `mbr_n_candidates` | `0` | MBR | `0` = every draw is a candidate; `k>0` = only the first `k` (asymmetric MBR, faster) |
 | `mbr_lnkt_cut` | `null` | MBR | drop emissions below this `ln k_t`; `null` inherits `geometry.ln_kt_range[0]` (the region cut) |
-| `mbr_weight` | `"kt"` | MBR | Lund-cloud point weights: `kt` (IRC-safe) / `z` / `unit` |
-| `mbr_coords` | `"lnDR_lnkt"` | MBR | ground-metric columns: `lnDR_lnkt` / `+lnz` / `+psi` (gdim 2/3/4; `+psi` engages periodicity) |
+| `mbr_weight` | `"kt"` | MBR | Lund-cloud point weights: `kt` (IRC-safe) / `z` / `unit`. **`z` raises on a cell chain** (it reads `ln z`) |
+| `mbr_coords` | `"lnDR_lnkt"` | MBR | ground-metric columns: `lnDR_lnkt` / `+lnz` / `+psi` (gdim 2/3/4; `+psi` engages periodicity). **`+lnz`/`+psi` raise on the cell chains every family samples** — see the note below |
 | `mbr_R` | `8.485` | MBR | mass-imbalance penalty radius ≈ Lund-plane diameter (scale it with `geometry`) |
 | `mbr_beta` | `1.0` | MBR | ground-distance exponent; `1.0` = KMT 1-Wasserstein EMD |
 | `mbr_norm` | `False` | MBR | energyflow weight normalisation; **off** keeps the imbalance term (empty-tree-never-wins) |
@@ -1385,6 +1385,28 @@ the cell medoid is not restricted to the drawn support). Four keys are added:
 `dlund_identity_cont`, `dlund_posterior_mode_cont`, `dlund_posterior_geomedian_cont` and
 `n_continuous_jets`.
 
+**And, since 2026-08-06, a `ln z`-aware ruler and an MBR row** (`docs/PLAN_z_aware.md` WP-1).
+The same leading emission is scored three ways, so the series differ only in what the ruler
+looks at — `dlund_*_cont` is `||Δ(u, v)||`, `dlund3_*_cont` restores `ln z`, and `dlnz_*` is
+that coordinate alone — over four estimators: `identity`, `posterior_mode`,
+`posterior_geomedian` and `mbr`. The MBR row is the point of it: the decode headline
+`dlund_mbr` compares leading-emission **cell centres**, so it sees neither `ln z` nor the
+within-cell offsets, and the continuous block carried no MBR series at all.
+
+Two conventions, both deliberate. **Unavailable is NaN, never 0** — `dlund3_posterior_mode_cont`
+and `dlnz_posterior_mode` are NaN by construction (a modal *cell* has a real centre and no
+`ln z`, and `ln z = 0` means `z = 1`), and the MBR row is scored only where the point estimate
+carries genuinely drawn coordinates (`coords_source == "sample"`). And it is **additive only**:
+`decode_headline` and every pre-existing key keep their exact values. `n_continuous_scored`
+reports how many jets each ruler actually scored, so an unscorable series cannot be mistaken
+for an unremarkable one.
+
+`run_closure(per_jet=True)` — not wired to a config field, since it is for analysis scripts
+rather than the eval suite — adds `metrics["per_jet"]`, one row per scored jet. That is what
+makes a **paired** comparison of two arms possible; every published `dlund_*` comparison in
+this repo before it was a difference of unpaired means, and `docs/PLAN_z_aware.md` §11 is what
+happened when one of them was finally paired.
+
 ```bash
 h2p-rsd-junipr eval runs/<id>/best.ckpt experiment.closure_continuous=true
 ```
@@ -1588,6 +1610,19 @@ posterior, unlike a floor that manufactures emissions.)
   emissions. Default ≈ the Lund-plane diameter — **scale it with `geometry`** if you change the
   ranges. Check closure-metric stability across `R` (unequal-mass EMD is known to depend on it).
 - `mbr_beta=1.0` is the true 1-Wasserstein EMD; `2.0` an energy-distance-like variant.
+
+> **`+lnz` / `+psi` / `mbr_weight="z"` currently RAISE, and that is the honest state.** Every
+> family's `sample_batch` returns **cell chains**, and a Lund cell centre carries `(ln 1/ΔR,
+> ln kt)` and nothing else — the grid discretizes those two coordinates only. `lund_cloud`
+> used to fill the missing columns with `0`, so `+lnz` appended a **constant-zero** column
+> that changed no distance and `mbr_weight="z"` was bit-identical to `unit`; `ln z = 0` also
+> means `z = 1`, which is not a neutral default but an unphysical point in the metric. Since
+> 2026-08-06 it raises instead, naming the knob (`docs/PLAN_z_aware.md` WP-2;
+> `inference.mbr.needs_continuous_coords` is the predicate). Making the knobs *work* needs a
+> continuous-coordinate table threaded through `posterior_distances` — designed as WP-3 of
+> the same plan and **not built**, because the measurement that would have motivated it
+> (WP-0) found nothing to explain. No committed artifact is affected: no config on disk has
+> ever set `mbr_coords` to anything but `lnDR_lnkt`.
 
 **The two backends** (`mbr_backend`) implement the *same* mathematical object; the choice is
 provenance and batching, not semantics:

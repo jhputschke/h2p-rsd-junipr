@@ -25,6 +25,11 @@ Guards ride along on every arm, because a PIT improvement can be bought with som
 else: the support audit must stay at 0.0000%, held-out NLL must not worsen beyond the
 control's seed spread, and TARP / `pit_ks_max` / `d(MBR)` are reported beside the verdicts.
 
+**`d(MBR)` is never printed without its band.** The guards table's column is four *unpaired*
+means, and §6.2 read a conclusion off it that `PLAN_z_aware.md` WP-0 later withdrew: paired
+per jet, every CI contains 0. `print_dmbr_band` therefore attaches the paired analysis from
+`runs/zaware_wp0/*/wp0.json` — or says out loud that it is missing.
+
 Controls are the arms that differ by exactly one thing — `v1_base_s*` for the `ln z`
 spline, and the `ln z`-spline arm itself for the `dv` spline, so each row prices its own
 intervention rather than the accumulated stack.
@@ -74,6 +79,10 @@ ARMS: dict[str, tuple[str | None, str, str]] = {
     "cellctr_dvspline_s0": ("cellctr_s0", "run", "cellctr_dv"),
 }
 COORDS = ("du", "dv", "ln_z", "psi")
+# The tier the guards table's `d(MBR)` column is measured at (`eval_prod_test_v1.sh` pass
+# B). `print_dmbr_band` quotes the paired analysis run at the SAME tier, so the band and
+# the mean beside it are statements about one population.
+DECODE_TIER_JETS = 300
 
 
 def _get(d, path, default=None):
@@ -153,10 +162,77 @@ def verdict(rows: dict, arms: list[str], clauses: list[tuple[str, str]]) -> dict
     }
 
 
+def print_dmbr_band(zaware_root: Path) -> dict | None:
+    """The `d(MBR)` column above, but PAIRED and with its band.
+
+    The guards table prints four unpaired means, and that column is the one number in this
+    document that a reader has already been misled by: §6.2 read "+0.005, worse on 4/4" off
+    it and attached a mechanism to it. `PLAN_z_aware.md` WP-0 then paired it per jet — which
+    the exact `dlund_identity` pairing always permitted — and every CI contains 0, with the
+    4/4 signing itself gone at 1000 jets.
+
+    So this block is not decoration: it is the rule that the column may never again be
+    quoted without its resolution. It reads `runs/zaware_wp0/*/wp0.json` and picks the run at
+    the tier the column above is measured at (`DECODE_TIER_JETS`), newest first — NOT simply
+    the newest, because the 1000-jet escalation scores a different population and a band from
+    one population beside a mean from another is worse than no band. With no artifact at all
+    it says so plainly rather than printing the bare means alone."""
+    hits = sorted(zaware_root.glob("*/wp0.json"), key=lambda q: q.stat().st_mtime)
+    if not hits:
+        print("d(MBR) band: NOT MEASURED here — the column above is four UNPAIRED means, "
+              "which is\n  how docs/PLAN_lnz_spline_head.md §6.2 reached a conclusion that "
+              "was later withdrawn.\n  Run `python scripts/mbr_zaware_ab.py` for the paired "
+              "per-jet CI (docs/PLAN_z_aware.md §11).")
+        return None
+    # The tier that MATCHES the column above, not whichever ran last: the guards table is
+    # the 300-jet decode tier, and the 1000-jet escalation scores a different population.
+    def _tier(path):
+        return _get(json.loads(path.read_text()), "tier.closure_jets")
+
+    chosen = next((h for h in reversed(hits) if _tier(h) == DECODE_TIER_JETS), hits[-1])
+    others = [h.parent.name for h in hits if h != chosen]
+    rec = json.loads(chosen.read_text())
+    t = rec.get("tables", {}).get("dlund_mbr", {})
+    if not t.get("rows"):
+        return None
+    n_jets = "?"
+    print(f"\nd(MBR), PAIRED per jet (docs/PLAN_z_aware.md §11; {chosen.parent.name},"
+          f" {_get(rec, 'tier.closure_jets')}-jet tier):")
+    print(f"    {'pair':>40} {'n':>5} {'mean':>9} {'paired BCa 95%':>22}")
+    for row in t["rows"]:
+        ci = f"[{row['ci95'][0]:+.4f}, {row['ci95'][1]:+.4f}]"
+        print(f"    {row['pair']:>40} {row['n']:>5} {row['mean']:>+9.4f} {ci:>22}")
+    p = t["pooled"]
+    print(f"    {'pooled':>40} {p['n']:>5} {p['mean']:>+9.4f}"
+          f" [{p['ci95'][0]:+.4f}, {p['ci95'][1]:+.4f}]")
+    print(f"    -> CI excludes 0 upward on {t['n_sig_positive']}/{t['n_pairs']} pairs."
+          f"  {'d(MBR) is UNCHANGED within its own per-jet noise.' if t['n_sig_positive'] < 3 else 'A regression is ESTABLISHED.'}")
+    # the ruler that would have explained a regression, had there been one
+    for key, label in (("dlund_mbr_cont", "the winner's own (u, v), off the grid"),
+                       ("dlund3_mbr_cont", "...with ln z restored"),
+                       ("dlnz_mbr", "...|d ln z| alone")):
+        tt = rec.get("tables", {}).get(key)
+        if tt and tt.get("pooled", {}).get("n"):
+            q = tt["pooled"]
+            n_jets = q["n"]
+            print(f"    {label:>40} {q['n']:>5} {q['mean']:>+9.4f}"
+                  f" [{q['ci95'][0]:+.4f}, {q['ci95'][1]:+.4f}]")
+    print(f"    (a ln z-aware ruler over the same {n_jets} paired jets — eval/closure.py's"
+          " dlund3_* / dlnz_* series)")
+    if others:
+        print(f"    other wp0 runs present, NOT quoted here: {', '.join(others)}")
+    return {"source": str(chosen), "tier": rec.get("tier"), "other_runs": others,
+            "dlund_mbr": t,
+            **{k: rec["tables"][k] for k in ("dlund_mbr_cont", "dlund3_mbr_cont", "dlnz_mbr")
+               if k in rec.get("tables", {})}}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run-root", default="runs/lnz_spline")
     p.add_argument("--control-root", default="runs/prod_test_v1")
+    p.add_argument("--zaware-root", default="runs/zaware_wp0",
+                   help="where scripts/mbr_zaware_ab.py wrote its paired d(MBR) analysis")
     p.add_argument("--out", default=None)
     args = p.parse_args(argv)
 
@@ -237,6 +313,7 @@ def main(argv=None) -> int:
                   f"{('yes' if blk['tarp_passes_g7'] else 'no'):>6}"
                   f"{fmt(blk.get('nll'), '.3f'):>10}{fmt(blk['dlund_mbr'], '.4f'):>9}")
     print("=" * 100)
+    zaware = print_dmbr_band(REPO / args.zaware_root)
     leaked = [a for a, r in rows.items()
               if (r["spline"]["soft_drop_viol"] or 0) > 0
               or (r["spline"]["z_above_half_viol"] or 0) > 0]
@@ -245,7 +322,7 @@ def main(argv=None) -> int:
 
     out = Path(args.out) if args.out else root / "lnz_spline_gates.json"
     save_metrics({"plan": "docs/PLAN_lnz_spline_head.md",
-                  "G3": g3, "G3_dv": g3dv,
+                  "G3": g3, "G3_dv": g3dv, "d_mbr_paired": zaware,
                   "support_guard_held": not leaked, "arms": rows}, out)
     print(f"\n[gates] wrote {out}")
     return 0 if (g3["closes"] and g3dv["closes"]) else 1

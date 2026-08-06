@@ -1,6 +1,6 @@
 # SUMMARY — model status, findings, and where improvement lives
 
-Last updated: 2026-08-05, branch `nCeilingProbe`. This document consolidates the state of
+Last updated: 2026-08-06, branch `zAwareMetric`. This document consolidates the state of
 the hadron→parton posterior — what has been tested, what fell, what stands, and what to do
 next — so the conclusions do not have to be reassembled from eight plan documents. Every
 number links back to a primary record; nothing here is a new measurement.
@@ -8,14 +8,18 @@ number links back to a primary record; nothing here is a new measurement.
 Primary records: `PROD_TEST_v0_RESULTS.md`, `PROD_TEST_v1_RESULTS.md`,
 `PROD_TEST_edit_RESULTS.md`, `PLAN_PosteriorClusters.md` (implementation notes),
 `PLAN_StratifiedMBR.md` §1a–§1d, `PLAN_NCeilingProbe.md` §A,
-`PLAN_lnz_spline_head.md` §6, §8 and §9, `PLAN_z_aware.md` (proposed, not yet run),
+`PLAN_lnz_spline_head.md` §6, §8 and §9, `PLAN_z_aware.md` §11 and §13 (WP-0 null; WP-3 indicated),
+`PLAN_next_steps.md` (the ordered execution list),
 and the run artifacts under
 `runs/prod_test_v1/v1_contstop_s0/…/` (`per_jet_clusters.json`,
 `per_jet_clusters_K1000.json`, `eval_metrics_wp34.json`),
 `runs/n_ceiling_probe/20260805-122832/n_ceiling_probe.json` and
 `runs/lnz_spline/lnz_spline_gates.json` and
 `runs/lnz_spline/offset_head_diagnostic.json` and
-`runs/lnz_spline/offset_head_diagnostic_cellctr.json`.
+`runs/lnz_spline/offset_head_diagnostic_cellctr.json` and
+`runs/zaware_wp0/full-20260806-131513/wp0.json` (300 jets) and
+`runs/zaware_wp0/esc1000-20260806-132207/wp0.json` (the 1000-jet escalation) and
+`runs/zaware_sel/full-20260806-143047/ceiling.json` (the §12/§13 selection ceiling).
 
 ---
 
@@ -149,7 +153,7 @@ the v1 arms themselves, same preset and same seeds.
 | **The support closure was not spent** | 0.00000% below soft drop and above `z = ½` on every arm — by construction, since the spline maps the interval onto itself | v1's WP-A property is preserved, not traded |
 | **The residual MOVED to `dv`** | `dv` now fails on all three seeds (1.10× / 1.04× / 1.12×) and `dv × wide_soft` sits at ~1.0×, while `ln z` is 0.47–1.04× | it became the binding coordinate — and §2.6 then measured that the same fix does **not** work on it |
 | **TARP moved, mostly the right way** | `v1_base` s0/s1 cross below the null band (0.0415 → 0.0215, 0.0350 → 0.0265 vs p95 0.0275) and now pass G7; s2 worsens (0.0335 → 0.0400) | the coordinate density was contributing to the joint narrowness too — the factorization was not the only cause. 2/3 with a contrary seed is **suggestive, not a verdict** |
-| **d(MBR) is marginally worse on 4/4** | +0.0047, +0.0113, +0.0091, +0.0031 vs a control seed spread of 0.018 | small and inside the spread in magnitude, but consistently signed. The MBR metric runs on `lnDR_lnkt` and cannot see `ln z`, so a better `ln z` can only perturb which trees are drawn. **Both halves of that sentence are now under test** (`PLAN_z_aware.md`, §4.1(4)): these are *unpaired* means on a pairing that is exact, no other estimator from the same draws is 4/4, and `mbr_coords="+lnz"` cannot currently be switched on to check |
+| ~~**d(MBR) is marginally worse on 4/4**~~ — **WITHDRAWN 2026-08-06: `d(MBR)` is unchanged within its own per-jet noise** | the 4/4 signing (+0.0047, +0.0113, +0.0091, +0.0031) was four *unpaired* means. Paired per-jet at the same tier: **95% CI contains 0 on 4/4**, each ~±0.03 wide against a +0.005 effect. At the pre-declared 1000-jet escalation the **signing itself does not survive** — 3/4, with `spline_s0` significantly *better* (−0.0211 [−0.0357, −0.0065]) — and the pool over **3273 paired jets is −0.0014 [−0.0089, +0.0062]** | the sentence is **rewritten, not explained** — that consequence was fixed in advance (`PLAN_z_aware.md` §4/WP-0), and an explanation is not owed for a number that is not resolved. The *other* half fails too: under the new ruler that does see `ln z`, the MBR winner's own `\|Δ ln z\|` is flat (+0.0003 [−0.0109, +0.0117]), so there was no hidden gain for a blind ruler to miss. **Both open reservations about `lnz_head="spline"` are now one** (G3 formally PARTIAL at 5/6). `PLAN_z_aware.md` §11 |
 | **A design the measurement rejected** | composing the spline on a *learnable* truncated normal is non-identifiable: `lnz_mean` → −533 on an interval of [−2.303, −0.693], `F_TN` saturated on 100% of emissions, val NLL 4.19 → 19.2 at epoch 4 | the base must be parameter-free. Recorded in `distributions.py` and pinned by a regression test so the appealing-but-broken construction is not re-proposed |
 
 ### 2.6 The follow-up grid — `dv`, more seeds, more bins (`PLAN_lnz_spline_head.md` §8)
@@ -166,6 +170,26 @@ the positive one would have been**.
 | **The six-seed NLL band** | 3.834–3.862 vs the control's 3.904–3.924 | tighter than *and* entirely below the control — `lnz_head="spline"` is worth fielding on its own numbers |
 | **The conditioning fix changes nothing either** (§8.5(1), `PLAN_lnz_spline_head.md` §9.3) | pre-registered verdict **DEAD**: giving the head the cell's continuous centre leaves `dv` at 1.08 / 1.12 / 1.13× (**0/3** below critical) and the per-cell bias RMS at 0.0295 / 0.0303 / 0.0314 against 0.0300 / 0.0302 / 0.0303 — **within ±4%** of a ±20% band; NLL unmoved | **two mechanisms proposed for `dv`, two falsified.** The defect's existence is solid (13/13 arms); its cause is not established. Every fix *inside* the per-coordinate factorization has now failed |
 
+### 2.7 The `ln z`-aware ruler, and whether `d(MBR)` regressed at all (`PLAN_z_aware.md` §11)
+
+§4.1(4)'s diagnostic, run. Two questions in one pass: *is there a regression to explain*, and
+*can a ruler that sees `ln z` see what the spline did*. The instrument is a per-jet **paired**
+analysis — legitimate because `dlund_identity` is a model-independent function of the jets and
+is bit-identical within all four pairs — and never run before, because every published
+`dlund_*` comparison in this repo was a difference of unpaired means.
+`scripts/mbr_zaware_ab.py`, 16 decode passes: 8 arms at the published tier, 8 at the
+escalation this plan declared in advance.
+
+| finding | evidence | consequence |
+|---|---|---|
+| **There is no regression to explain** | paired BCa 95% CI contains 0 on **4/4** pairs at 300 jets (+0.0039, +0.0061, +0.0139, +0.0032, each CI ~±0.03); at the pre-declared **1000-jet** escalation the 4/4 signing does not survive — 3/4, with `spline_s0` significantly **better** (−0.0211 [−0.0357, −0.0065]) — and the pool over 3273 paired jets is **−0.0014 [−0.0089, +0.0062]** | **INCONCLUSIVE-BY-CONSTRUCTION** twice, which by the plan's own pre-registered rule **rewrites** §2.5's sentence instead of explaining it. `lnz_head="spline"`'s `d(MBR)` reservation is discharged |
+| **…and the harness is not what moved** | G-repro **8/8 at 0.00%** — every arm re-measured its committed `dlund_mbr` to all four printed digits, 247/247 jets; G-pair 4/4 at `max\|Δ\| = 0` | a re-measurement this exact makes the null a statement about the models. (The runner mirrors `cli.py`'s call order, so the RNG stream is consumed identically rather than merely re-seeded) |
+| **The ruler was blind, and there was nothing behind it** | with `ln z` restored to the score, the MBR winner's own `\|Δ ln z\|` is flat: +0.0003 [−0.0109, +0.0117] pooled at 1000 jets (2/4 arms positive) | §2.5's mechanism ("a better `ln z` cannot help a `lnDR_lnkt` metric") is literally true and was explaining nothing. The head's `ln z` gain is real in its marginal PIT and does **not reach the selected tree's leading emission** — structurally, since `sample_batch` returns **cell chains**, so the head reaches the fielded decode only through training |
+| **`mbr_coords="+lnz"` was inert and now cannot be** | `lund_cloud` hard-coded `ln z = psi = 0` for cell chains, so `+lnz` appended a constant-zero column and changed **no distance**, and `mbr_weight="z"` was bit-identical to `unit`. It now **raises** | the knob is loud-and-unavailable rather than silently wrong. Making it *functional* (WP-3) was gated on a phenomenon that does not exist, so it was not built — and no committed artifact is affected, since no config on disk ever set it |
+| **The ruler itself ships** | `dlund3_*_cont` (3-D over `u, v, ln z`), `dlnz_*`, and the MBR row the continuous block never had; `run_closure(per_jet=)` for paired analysis. Additive only — the metric dict was diffed before and after and contains nothing but additions | future `d(MBR)` comparisons can be paired and read at three resolutions. The 2-D↔3-D pair also prices what the cell grid throws away |
+| **…but the ln z-blind SELECTION *is* worth fixing** (§12/§13, a separate pre-registered test) | the MBR winner's `ln z` is a single **draw**: it ties identity(x) (0/8 significant) while a centrality estimate off the *same* draws beats it by 0.047–0.071 on 8/8. Putting `ln z` in the EMD ground metric recovers **47–70% (mean ≈59%)** of that — `\|Δ ln z\|` 0.395–0.420 → **0.361–0.375**, −0.026…−0.047 with **8/8 CIs excluding 0**. De-quantization alone delivers **nothing** (0/8), so the gain is attributable to `ln z` specifically. B1/B2/B3 all PASS | **BUILD WP-3, default off.** The knob currently raises (WP-2) and something now wants it. **Not** the default decode: the fielded cell-centre `dlund_mbr` degrades +0.0042 [+0.0004, +0.0081] pooled, which B2 (written against the *continuous* `(u,v)` ruler) did not cover — a gap in the pre-registration, reported not resolved. Family-independent: the same size on control arms |
+| **What is still open, and unrelated** | `_truth_cloud` weights the truth by `exp(v_continuous)` and every draw cloud by `exp(v_cell_centre)` — a per-point mismatch of `exp(±0.1)` plus a Jensen inflation of the truth's total mass, which the EMD charges at `R·\|ΔW\|`. `d_top`, `d_best`, `d_mbr`, `d_nearest_draw` and gates G2′/G6/G7 sit on it | a **real latent defect**, found while writing this plan and fixed only as a side effect of the WP-3 threading that did not run. It does not touch `dlund_mbr` (a plain Euclidean distance, no EMD), so it is not this section's subject — but it is not closed either |
+
 ---
 
 ## 3. The overall conclusion
@@ -181,6 +205,12 @@ the likelihood *and* the calibration together, the first intervention here to do
 also relocated the defect rather than removing it, which is what §4.2 is now organised
 around.
 
+**And the one number that argued against fielding it has since been withdrawn** (§2.7): the
+`d(MBR)` regression was four unpaired means, and paired per-jet it is −0.0014 [−0.0089,
++0.0062] over 3273 jets. `lnz_head="spline"` now carries exactly one open reservation — G3
+formally PARTIAL at 5/6 seeds — rather than two. That also removes the last thing standing
+between the roadmap and §4.5(1).
+
 **The recommended per-jet product today:**
 - point estimate: **the MBR medoid**, with the frozen-τ empty gate (`decode.empty_threshold`);
 - uncertainty: **the cluster set** — `top_mass` as a calibrated probability (after one
@@ -193,7 +223,7 @@ around.
 | lever | size | status |
 |---|---|---|
 | **N channel** | ~0.63 EMD (oracle-N 1.72 vs medoid 2.35) | **CLOSED as a lever** (§2.4). The discriminative probe ties `q(N\|x)` on identical jets (p = 0.91) while beating both trivial predictors and sitting on a flat learning curve — no evidence that `x` carries more N information than the model already extracts. The lever is *real* (the oracle keeps its +0.63) and *unreachable*: at 45% accuracy an N decision is worse than none. It is now a **product**, not a target — the calibrated ambiguity of the set layer is the honest way to report N. |
-| **ln z shape** | was 2.16× critical PIT in the quadrant holding 94% of emissions | **SPENT, and it paid — partially** (§2.5). The RQ-spline head is built, trained and measured: `ln z` falls to 0.47–1.04×, NLL improves on every seed, support unchanged. G3 is **PARTIAL** (2/3 seeds), and the residual moved to `dv`. |
+| **ln z shape** | was 2.16× critical PIT in the quadrant holding 94% of emissions | **SPENT, and it paid — partially** (§2.5). The RQ-spline head is built, trained and measured: `ln z` falls to 0.47–1.04×, NLL improves on every seed, support unchanged. G3 is **PARTIAL** (5/6 seeds, §2.6), and the residual moved to `dv`. The one reservation that was not a gate — `d(MBR)` worse on 4/4 — **is withdrawn** (§2.7): paired per-jet it is −0.0014 [−0.0089, +0.0062] over 3273 jets. |
 | **`dv` shape** *(exposed by §2.5)* | `dv` fails on **13 of 13** arms measured — across two density families and with/without cell-centre conditioning (1.02–1.22×) | **Both cheap fixes are spent** (§2.6). Neither more density freedom nor better conditioning moved the per-cell bias by more than a few percent. What is left is that the *factorization* cannot represent the right marginal — which is what the joint coordinate density addresses, and why §4.5(1) is now **indicated rather than deferred**. `PLAN_lnz_spline_head.md` §9.4. |
 
 **Explicit stop-signs** (measured dead ends — do not respend effort here):
@@ -209,6 +239,11 @@ around.
 ---
 
 ## 4. Next steps — what the ceiling probe changed
+
+> **The ordered execution list, with the file-level specs, is `PLAN_next_steps.md`.**
+> This section keeps the *rationale* — why each item is on the list and what evidence
+> put it there; that document keeps the *order* and the concrete diffs. When the two
+> disagree, this one wins on rationale and the owning plan wins on both.
 
 The probe's verdict re-orders everything below it. Two consequences drive the list:
 
@@ -238,19 +273,15 @@ The probe's verdict re-orders everything below it. Two consequences drive the li
 3. **Transfer the `coverage_68` null to one explicit-`q(N|x)` arm** (where TARP *does*
    fail) — one `eval` run with `experiment.coverage_null_reps=20`. Confirms the null
    lands near 0.553 there too, so the correction is family-independent.
-4. **Is §2.5's `d(MBR)` regression even resolved, and is it a z-blind metric?**
-   (`PLAN_z_aware.md`.) Two facts make this cheap and make it first: the pairing is exact
-   (`dlund_identity` is bit-identical within all four pairs, so a **per-jet paired**
-   analysis is legitimate and has never been run — every number in §2.5 is an unpaired
-   mean), and only `dlund_mbr` is 4/4 while the medoid, the mode and the continuous
-   geometric median **from the same draws** are 2/4 or 1/4, i.e. the cell posterior did not
-   degrade. Note also that 4/4 on four pairs floors at p = 0.125 and no fifth pair exists.
-   WP-0 is one decode pass per arm and answers *is there a regression to explain* before
-   anything is built; the ruler that would explain it (`dlund3_*_cont`, `dlnz_*`) is free,
-   since the MBR point estimate already carries drawn coordinates. The same plan makes
-   `mbr_coords="+lnz"` actually work — today it is **inert**, because `lund_cloud`
-   hard-codes `lz = 0.0` for the cell-chain draws the pipeline feeds it — and removes a
-   live truth/draw `kt`-weight mismatch under G2′/G6/G7.
+4. ~~**Is §2.5's `d(MBR)` regression even resolved, and is it a z-blind metric?**~~ —
+   **done** (§2.7, `PLAN_z_aware.md` §11). Answer: **there is no regression to explain**,
+   and the ruler that would have explained it finds nothing behind it either. The
+   `ln z`-aware ruler and the inert-knob guard shipped; the coordinate threading (WP-3) and
+   the 3×3 selection grid (WP-4) were gated on a phenomenon that turned out not to be
+   resolved and **were not built**. One consequence to carry forward: the truth/draw
+   `kt`-weight mismatch under G2′/G6/G7 was to be fixed as a side effect of WP-3, so it was
+   left open — see §2.7's last row. **§12/§13 then reopened WP-3 on its own merits** and
+   found for it, so that defect has an owner again.
 5. **Pin `cluster_min_cluster_size=10` at K=1000** — one notebook run. Separates "more
    draws" from "coarser clustering" and un-confounds G6's cross-K comparison.
 6. **Per-jet rows in the cluster artifact**, so gate G5's paired criterion becomes
@@ -370,16 +401,22 @@ both cost a regeneration + retrain and should be costed before being started.
    marginal PIT fall below 1.0× on every seed? That is the question two per-coordinate fixes
    failed and the one a joint density claims to answer; a joint density that fixes TARP while
    leaving `dv` at 1.1× has not explained the defect. 3 seeds, `lnz_head="spline"` both
-   sides, the usual guards, and `d(MBR)` read with `PLAN_z_aware.md`'s caveat in view.
+   sides, the usual guards, and `d(MBR)` read **with its measured band** — §2.7 resolved
+   that ruler to about ±0.01 over 3273 paired jets, so the caveat this line used to carry is
+   replaced by a number. Note that §2.7 also *strengthens the case against firing* §4.5(1)
+   at all: the `d(MBR)` reservation that made the fielded product look imperfect on a second
+   axis is gone, leaving one coordinate's 10% marginal miss as the whole of the case.
 
    **Its relationship to `PLAN_z_aware.md`, and which runs first**, is recorded in both
-   plans — `PLAN_lnz_spline_head.md` §9.5 and `PLAN_z_aware.md` §10 — so it is not
+   plans — `PLAN_lnz_spline_head.md` §9.5/§9.5a and `PLAN_z_aware.md` §10 — so it is not
    re-derived. In one line: that document fixes the **ruler** (the metric's and the closure
-   score's `ln z`-blindness), this fixes the **model** (the factorization), neither
-   substitutes for the other, and the order is z_aware **WP-0 → WP-2 → §7.3 → WP-3/4**
-   because WP-0 is nearly free and may dissolve the `d(MBR)` question outright. Not a hard
-   dependency: §7.3's primary read is ruler-independent, and the two meet at exactly one
-   row — §7.3's `d(MBR)`, which should not be read until the ruler question is settled.
+   score's `ln z`-blindness), this fixes the **model** (the factorization), and neither
+   substitutes for the other. The order was z_aware **WP-0 → WP-2 → §7.3 → WP-3/4**, and
+   **steps 1 and 2 are now done** (§2.7): WP-0 dissolved the `d(MBR)` question outright and
+   WP-2 shipped, so **§7.3 is next and its one shared row is unblocked.** §7.3's `d(MBR)`
+   may now be read straight, with the measured resolution of that ruler — ±0.01 pooled over
+   3273 paired jets — as a band rather than a caveat. Nothing in `PLAN_z_aware.md` §11 bears
+   on the factorization, so the pre-registration below is unchanged.
 
    **The caveat against firing, so the call is made with it visible.** `dv`'s miss is small
    (KS 0.026–0.029 vs a 0.0255 critical, 2–13% over) and it is now the *only* failing
@@ -405,7 +442,23 @@ Recorded because each one caught a wrong conclusion this cycle:
   the notebook markdown above the code; the estimator failed it and the failure is a
   clean result instead of a negotiation.
 - **Pair the comparison or don't call it one.** `set0` looked ~40% better than the medoid
-  on each series' own subset and is 11–14% *worse* on identical rows.
+  on each series' own subset and is 11–14% *worse* on identical rows. **And again, one
+  campaign later, on a repo that had already learned it**: §2.5's "d(MBR) worse on 4/4" was
+  four unpaired means over a pairing that was exact and free — every per-jet CI turned out
+  to contain 0, and the whole 4/4 pattern dissolved when the jets tripled (§2.7). The lesson
+  is not "pair when it is hard"; it is that an *available* pairing left untaken is a claim
+  quoted at three decimals from a test that resolves to one.
+- **A consistent SIGN across a handful of arms is not a small effect; it is an untested
+  one.** 4/4 floors at p = 0.125 on a two-sided sign test, so the strongest statement four
+  arms can make is weak — and §2.7 measured that this particular 4/4 was 3/4 at 1000 jets,
+  with one arm significantly the *other* way. Before treating a signed pattern as real,
+  check whether the per-unit data that would resolve it is already in hand. Here it was, at
+  the cost of one `per_jet=True`.
+- **Check that a proposed explanation has something to explain.** §2.5 offered a mechanism
+  for the `d(MBR)` regression that was *literally correct* about the code (the metric really
+  is `ln z`-blind) and was accounting for a number that does not survive its own noise.
+  Building the ruler was still worth it — it is what showed that the other half of the
+  sentence fails too — but the order should have been "is it resolved" before "why".
 - **A verdict label must cover both tails**: a CI entirely below zero "excludes 0" too —
   the gate printer briefly reported a significant loss as a null result.
 - **Method-stable statements need method-stable rules**: the exemplar support rule swung

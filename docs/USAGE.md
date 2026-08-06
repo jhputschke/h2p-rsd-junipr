@@ -706,6 +706,13 @@ cell medoid not restricted to the drawn support. Adds `dlund_identity_cont`,
 `closure_jets × n_closure_samples` forward passes, which is why it is opt-in. A family with no
 coordinate density (`ar_junipr_v1`) yields **NaN** for those keys rather than omitting them.
 
+It also adds a **`ln z`-aware** ruler and an **MBR** row: `dlund3_*_cont` is the same leading
+emission with `ln z` restored, `dlnz_*` is `|Δ ln z|` alone, and `dlund_mbr_cont` is the MBR
+winner's own coordinates off the grid. This matters because the decode headline `dlund_mbr`
+compares leading-emission *cell centres* and is blind to both `ln z` and the within-cell
+offsets. See `docs/CONFIGURATION.md` for the NaN-not-zero conventions and
+`docs/PLAN_z_aware.md` for what the ruler was built to test — and found.
+
 For the full study behind these two changes — the oracle, per-jet win rates, stratification by
 leading `ln kt`, and a paired bootstrap on the ratio — run the script:
 

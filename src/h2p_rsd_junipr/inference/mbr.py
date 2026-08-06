@@ -49,6 +49,30 @@ import numpy as np
 _COORD_GDIM = {"lnDR_lnkt": 2, "+lnz": 3, "+psi": 4}
 
 
+def cloud_columns_needed(coords: str = "lnDR_lnkt", weight: str = "kt") -> int:
+    """How many coordinate columns per emission this `(coords, weight)` pair reads.
+
+    `coords` fixes the ground dimension; `weight="z"` additionally reads column 2 even at
+    `gdim = 2`, because the point weight is `exp(ln z)`. Both are counted here so no caller
+    has to re-derive the rule (docs/PLAN_z_aware.md WP-2)."""
+    return max(_COORD_GDIM[coords], 3 if weight == "z" else 2)
+
+
+def needs_continuous_coords(coords: str = "lnDR_lnkt", weight: str = "kt") -> bool:
+    """Does this decode configuration need something a Lund CELL cannot supply?
+
+    The grid discretizes `(ln 1/DeltaR, ln kt)` only (`geometry.py`), so a cell centre has
+    two coordinates and no `ln z` or `psi` at all. Anything above two columns therefore
+    requires a continuous-coordinate table — which `sample_batch` does not return, since
+    every family samples cell chains.
+
+    One function rather than the rule re-derived at each site — `lund_cloud`'s own guard,
+    the tests, and any caller that wants to check *before* getting an exception. The
+    version of this rule that was implicit is what let `mbr_coords="+lnz"` stay inert for
+    the whole of the v1 campaign, measuring 2-D numbers under a 3-D label."""
+    return cloud_columns_needed(coords, weight) > 2
+
+
 # ---------------------------------------------------------------------------
 # decode -> mbr_select kwargs
 # ---------------------------------------------------------------------------
@@ -100,17 +124,50 @@ def lund_cloud(draw, geom, *, lnkt_cut=None, weight="kt", coords="lnDR_lnkt"):
     or an ``(m, >=2)`` continuous-coordinate array. Emissions with ``ln kt <
     lnkt_cut`` are dropped (perturbative support); weights are RAW — *not*
     pre-normalised (``mbr_norm`` decides). ``coords`` selects ``g in {2,3,4}``.
-    ``lnkt_cut=None`` inherits the geometry's ``ln_kt`` floor (the region cut)."""
+    ``lnkt_cut=None`` inherits the geometry's ``ln_kt`` floor (the region cut).
+
+    **A cell chain under a configuration that reads more than two columns RAISES**
+    (docs/PLAN_z_aware.md WP-2). It used to fill ``ln z = psi = 0`` from a cell centre,
+    which made ``mbr_coords="+lnz"`` append a constant-zero third column — so it changed
+    no distance, and ``mbr_weight="z"`` was silently identical to ``unit``. The knob was
+    not merely off by default; it could not be switched on, and nothing said so. Since
+    ``sample_batch`` returns cell chains, that is the path the whole pipeline took.
+    ``ln z = 0`` also means ``z = 1`` — the softer prong taking the whole jet — so the
+    filler is not a neutral default but an unphysical point in the metric.
+
+    Raise rather than warn, matching ``assert_cluster_metric_ok`` and the
+    ``lnz_head='spline'`` + ``lnz_support='legacy'`` guard: a decode that silently
+    measures something other than what its config says is worse than one that stops. An
+    EMPTY draw is untouched — it yields an honestly empty cloud and fabricates nothing."""
     g = _COORD_GDIM[coords]
+    need = cloud_columns_needed(coords, weight)
     if lnkt_cut is None:
         lnkt_cut = float(geom.ln_kt_range[0])
     pts, ws = [], []
     for c in draw:
         if isinstance(c, (int, np.integer)):
+            if need > 2:
+                raise ValueError(
+                    f"lund_cloud(coords={coords!r}, weight={weight!r}) reads {need} "
+                    f"coordinate columns per emission, but this draw is a CELL CHAIN: a "
+                    f"Lund cell centre supplies (ln 1/DeltaR, ln kt) and nothing else, so "
+                    f"ln z / psi would be filled with 0 (ln z = 0 means z = 1). Supply an "
+                    f"(m, >= {need}) continuous-coordinate array per draw, or set "
+                    f"decode.mbr_coords='lnDR_lnkt' with decode.mbr_weight in "
+                    f"{{'kt', 'unit'}}. `needs_continuous_coords(coords, weight)` is the "
+                    f"same test for a caller that wants to check before getting here."
+                )
             u, v = geom.cell_center(int(c))
             lz = ps = 0.0
         else:
             arr = np.asarray(c, dtype=float).ravel()
+            if arr.size < need:
+                raise ValueError(
+                    f"lund_cloud(coords={coords!r}, weight={weight!r}) reads {need} "
+                    f"coordinate columns per emission, but an emission row has "
+                    f"{arr.size}. A short row was padded with zeros, which is the same "
+                    f"silent ln z = 0 (i.e. z = 1) the cell-chain path used to take."
+                )
             u, v = float(arr[0]), float(arr[1])
             lz = float(arr[2]) if arr.size > 2 else 0.0
             ps = float(arr[3]) if arr.size > 3 else 0.0

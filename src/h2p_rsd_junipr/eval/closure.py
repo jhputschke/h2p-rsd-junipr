@@ -89,12 +89,64 @@ def _rate(num, cond):
     return float(n[c].mean()) if c.any() else float("nan")
 
 
-def _leading_coords(arr):
-    """Hardest-kt row of an `(n, 4)` node_raw table, as `(ln 1/DeltaR, ln kt)`."""
+def _leading_row(arr):
+    """Hardest-kt row of an `(n, 4)` node_raw table, WHOLE — `(u, v, ln z, psi)`.
+
+    One `argmax(a[:, 1])` for every coordinate a caller wants, rather than one selection
+    per slice: the 2-D and 3-D rulers below must be reading the *same emission* or the
+    difference between them is not a difference of rulers (docs/PLAN_z_aware.md WP-1)."""
     a = np.asarray(arr, dtype=float)
     if a.ndim != 2 or a.shape[0] == 0:
         return None
-    return a[int(np.argmax(a[:, 1])), :2]
+    return a[int(np.argmax(a[:, 1]))]
+
+
+def _leading_coords(arr, ncols: int = 2):
+    """The first `ncols` coordinates of `_leading_row` — `(ln 1/DeltaR, ln kt)` by default.
+
+    `ncols` defaults to 2 so every pre-existing caller is unchanged *by construction*;
+    `ncols=3` adds `ln z`, which is what the `dlund3_*` / `dlnz_*` series are built from."""
+    row = _leading_row(arr)
+    return None if row is None else row[:ncols]
+
+
+def _mbr_leading_row(hat):
+    """`(u, v, ln z)` of the point estimate's hardest-kt node — or None.
+
+    None (⇒ NaN downstream) unless the estimate carries genuinely DRAWN coordinates.
+    `map_or_mbr(point_estimator="mbr")` reaches `describe_cells`, which draws from
+    `q(coords | cells, x)` and stamps `coords_source="sample"`, so the MBR row IS a
+    posterior sample of `ln z` today with no plumbing at all (docs/PLAN_z_aware.md WP-1).
+    Under `ar_junipr_v1` — or any `cell_center` fallback — `ln z` is the placeholder 0,
+    i.e. `z = 1`, and scoring it would manufacture a number out of a filler constant."""
+    if hat is None or not getattr(hat, "nodes", None):
+        return None
+    if str(getattr(hat, "coords_source", "")) != "sample":
+        return None
+    rows = np.array([[n.ln_invDelta, n.ln_kt, n.ln_z] for n in hat.nodes], dtype=float)
+    return rows[int(np.argmax(rows[:, 1]))]
+
+
+def _dist3(a, b):
+    """`(||Δ(u,v,ln z)||, ||Δ(u,v)||, |Δ ln z|)` between two 3-vectors.
+
+    A NaN anywhere in either row propagates to the components that read it, which is the
+    "asked, unavailable" convention (`ln z = 0` means `z = 1` and must never be scored —
+    see `models.base.describe_cells`). The 2-D component is deliberately still finite when only
+    `ln z` is missing: a cell-centre estimator has a real `(u, v)` and no `ln z` at all."""
+    if a is None or b is None:
+        return float("nan"), float("nan"), float("nan")
+    a = np.asarray(a, dtype=float).reshape(-1)
+    b = np.asarray(b, dtype=float).reshape(-1)
+    d = a[:3] - b[:3]
+    return (float(np.linalg.norm(d)), float(np.linalg.norm(d[:2])), float(abs(d[2])))
+
+
+def _nanmean(vals):
+    """`nanmean` of a list, NaN (not a warning, not 0) when it is empty or all-NaN."""
+    a = np.asarray(vals, dtype=float)
+    finite = a[np.isfinite(a)]
+    return float(finite.mean()) if finite.size else float("nan")
 
 
 def _tree_coords(obj):
@@ -130,7 +182,8 @@ def lund_tree_str(obj, title: str, geometry: Geometry, ref=None) -> str:
 
 
 def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
-                verbose=True, decode=None, continuous=False, draws_by_jet=None):
+                verbose=True, decode=None, continuous=False, draws_by_jet=None,
+                per_jet=False):
     """Closure + calibration on held-out jets (cell-level, as the v2 script). Returns
     a metrics dict and (optionally) prints the same summary lines. `decode` is a
     decode_params(cfg) dict threaded into sampling (n_posterior_samples ignored here;
@@ -155,6 +208,38 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     docs/PLAN_prod_test_speedup.md's 109 min). Families with no coordinate density
     (`ar_junipr_v1`) return None from the hook and the `*_cont` keys come back NaN.
 
+    The continuous block also carries a **`ln z`-aware** ruler and, for the first time, an
+    **MBR row** (docs/PLAN_z_aware.md WP-1). Three series come off the same leading
+    emission, so they differ only in what the ruler looks at:
+
+      * `dlund_*_cont`  — `||d(u, v)||`, the plane distance (pre-existing, unchanged);
+      * `dlund3_*_cont` — `||d(u, v, ln z)||`, the same emission with `ln z` restored;
+      * `dlnz_*`        — `|d ln z|` alone.
+
+    This exists because `dlund_mbr` — the decode headline — compares leading-emission
+    *cell centres*, so it is blind to `ln z` AND to the within-cell offsets, while the
+    continuous block carried no MBR row at all. The ruler that scored the RQ-spline
+    `ln z` head could therefore not register what the head improved, on either axis
+    (docs/SUMMARY_Model_Status.md §2.5). **Additive only**: `decode_headline` stays
+    `dlund_mbr` and every pre-existing key keeps its exact value — the same discipline
+    `coverage_null_reps`' `fork_rng` follows (`eval/calibration.py`), because a switch
+    that perturbs the statistic it exists to explain is worse than no switch.
+
+    Unavailable is **NaN, never 0**. `dlund3_posterior_mode_cont` and
+    `dlnz_posterior_mode` are NaN by construction: the modal *cell* has a real `(u, v)`
+    centre and no `ln z` at all, and a placeholder `ln z = 0` means `z = 1`, the softer
+    prong taking the whole jet (`models/base.py`). The MBR row is scored only where the
+    point estimate carries genuinely DRAWN coordinates (`coords_source == "sample"`);
+    under `ar_junipr_v1`, or any `cell_center` fallback, its keys are NaN too.
+
+    `per_jet=True` adds `metrics["per_jet"]` — one row per scored jet, in jet order, with
+    every distance above and NaN where a series is undefined for that jet (shape
+    precedent: `eval/clusters.py`'s `metrics["per_jet"]`). Off by default, so
+    `eval_metrics.json` is byte-identical without it. The rows are what makes a PAIRED
+    analysis possible at all: every published `dlund_*` comparison in this repo WAS a
+    difference of unpaired means until one of them was finally paired, and the conclusion
+    read off it did not survive (docs/PLAN_z_aware.md §11).
+
     `draws_by_jet` reuses posterior draws the caller already has — `draws_by_jet[i]`
     for jet `i`, in place of the internal `sample_batch` — the same pattern as
     `mbr_select(draws=)` and `learned_min_emissions(mults=)`. Default None keeps
@@ -172,6 +257,14 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     n_id_bias, n_mean_bias, n_median_bias = [], [], []
     d_mbr, n_mbr_bias = [], []
     dc_id, dc_mode, dc_geomed = [], [], []   # continuous (no grid), opt-in
+    dc_mbr = []                              # ...and the MBR row the block never had
+    # The same four estimators under a `ln z`-aware ruler: 3-D over (u, v, ln z), and
+    # |d ln z| alone (docs/PLAN_z_aware.md WP-1). Keyed by estimator so the four series
+    # cannot drift apart in the accumulation.
+    _EST = ("identity", "posterior_mode", "posterior_geomedian", "mbr")
+    d3 = {k: [] for k in _EST}
+    dlnz = {k: [] for k in _EST}
+    per_jet_rows: list[dict] = []
     empty_true, empty_pred = [], []          # the FULL population, incl. truth-empty jets
     cont_ok = bool(continuous)
     true_ns = []  # true N per kept jet, aligned with the bias lists (for the per-N table)
@@ -203,6 +296,14 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         x_cells = geometry.seq_cells(val_jets[i]["x"][0], val_jets[i]["x"][1]).tolist()
         ny_true = len(y_true)
 
+        # Appended BY REFERENCE and filled in below, so the `continue` that drops the
+        # truth-empty jets still leaves a row for them — a paired analysis pairs on the
+        # jet index, and a row that is silently absent is indistinguishable from a jet
+        # the other arm also dropped.
+        row = {"jet": int(i), "ny_true": int(ny_true), "kept": False}
+        if per_jet:
+            per_jet_rows.append(row)
+
         draws = model.sample_batch(xf, nx, K) if draws_by_jet is None else draws_by_jet[i]
         mults = np.array([len(d) for d in draws])
         lead = [c for c in (leading_emission_cell(d, geometry) for d in draws) if c is not None]
@@ -219,6 +320,8 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         empty_pred.append(hat.multiplicity == 0)
         post_mean_all.append(float(mults.mean()) if mults.size else 0.0)
         true_n_all.append(ny_true)
+        row["n_hat"] = int(hat.multiplicity)
+        row["post_mean"] = post_mean_all[-1]
 
         if getattr(model, "has_continuous_coords", False):
             tpsi = item["yraw"][:, 3].numpy() if ny_true else np.zeros(0)
@@ -251,9 +354,11 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         d_mode.append(lund_distance(mode_cell, ly, geometry))
         d_medoid.append(lund_distance(medoid_cell(lead, geometry), ly, geometry))
         d_id.append(lund_distance(leading_emission_cell(x_cells, geometry), ly, geometry))
+        row.update(kept=True, dlund_identity=d_id[-1], dlund_posterior_mode=d_mode[-1],
+                   dlund_posterior_medoid=d_medoid[-1])
 
-        if cont_ok:  # the same three estimators, off the grid
-            pts = []
+        if cont_ok:  # the same estimators, off the grid — and now under three rulers
+            rows3 = []
             # ONE batched call for the jet's K draws, not K calls: the per-draw hook
             # re-runs encode()/xattn_kv() every time on identical conditioning
             # (docs/PLAN_prod_test_speedup.md §2).
@@ -265,18 +370,44 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
                 # the posterior's own psi resultant, from the same draws (G6's reference)
                 psi_sum["posterior"] += complex(np.exp(1j * arr[:, 3]).sum())
                 psi_n["posterior"] += int(arr.shape[0])
-                p = _leading_coords(arr)
+                p = _leading_coords(arr, 3)
                 if p is not None:
-                    pts.append(p)
-            y_lead = _leading_coords(item["yraw"].numpy())
-            x_lead = _leading_coords(node_raw(*val_jets[i]["x"]))
-            if cont_ok and len(pts) >= 2 and y_lead is not None:
-                pts = np.asarray(pts)
-                dc_id.append(float(np.linalg.norm(x_lead - y_lead))
+                    rows3.append(p)
+            y_lead = _leading_coords(item["yraw"].numpy(), 3)
+            x_lead = _leading_coords(node_raw(*val_jets[i]["x"]), 3)
+            if cont_ok and len(rows3) >= 2 and y_lead is not None:
+                rows3 = np.asarray(rows3)
+                pts = rows3[:, :2]   # the pre-existing 2-D block, off the same argmax
+                dc_id.append(float(np.linalg.norm(x_lead[:2] - y_lead[:2]))
                              if x_lead is not None else float("nan"))
                 dc_mode.append(float(np.linalg.norm(
-                    np.asarray(geometry.cell_center(mode_cell)) - y_lead)))
-                dc_geomed.append(float(np.linalg.norm(geometric_median(pts) - y_lead)))
+                    np.asarray(geometry.cell_center(mode_cell)) - y_lead[:2])))
+                dc_geomed.append(float(np.linalg.norm(geometric_median(pts) - y_lead[:2])))
+                # --- the `ln z`-aware ruler (docs/PLAN_z_aware.md WP-1) ---------------
+                # The modal CELL has a centre and no `ln z`, so its third component is
+                # NaN and propagates: "asked, unavailable", never a scored placeholder.
+                # `geometric_median` is dimension-agnostic, so the 3-D row is the 3-D
+                # Bayes point rather than the 2-D one with a coordinate stapled on.
+                est_rows = {
+                    "identity": x_lead,
+                    "posterior_mode": np.array(
+                        [*geometry.cell_center(mode_cell), float("nan")]),
+                    "posterior_geomedian": geometric_median(rows3),
+                    "mbr": _mbr_leading_row(hat) if want_mbr else None,
+                }
+                for name, r in est_rows.items():
+                    d3v, d2v, dzv = _dist3(r, y_lead)
+                    d3[name].append(d3v)
+                    dlnz[name].append(dzv)
+                    if name == "mbr":
+                        dc_mbr.append(d2v)
+                    row[f"dlund3_{name}_cont"] = d3v
+                    row[f"dlnz_{name}"] = dzv
+                row["dlund_identity_cont"] = dc_id[-1]
+                row["dlund_posterior_mode_cont"] = dc_mode[-1]
+                row["dlund_posterior_geomedian_cont"] = dc_geomed[-1]
+                row["dlund_mbr_cont"] = dc_mbr[-1]
+                row["point_coords_source"] = str(getattr(hat, "coords_source", "unknown"))
 
         n_id_bias.append(len(x_cells) - ny_true)
         n_mean_bias.append(mults.mean() - ny_true)
@@ -287,6 +418,7 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
             lead_mbr = leading_emission_cell([n.cell for n in hat.nodes], geometry)
             if lead_mbr is not None:
                 d_mbr.append(lund_distance(lead_mbr, ly, geometry))
+                row["dlund_mbr"] = d_mbr[-1]
             n_mbr_bias.append(hat.multiplicity - ny_true)
 
         order = np.argsort(-counts)
@@ -365,6 +497,25 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
             float(np.nanmean(dc_geomed)) if dc_geomed else nan
         )
         metrics["n_continuous_jets"] = int(len(dc_geomed))
+        # --- the `ln z`-aware ruler, and the MBR row this block never had --------------
+        # Same jets, same leading emission, three rulers (docs/PLAN_z_aware.md WP-1):
+        # `dlund_*_cont` is the plane distance, `dlund3_*_cont` restores `ln z`, `dlnz_*`
+        # is that coordinate alone. Every one of these is NEW — nothing above moved.
+        metrics["dlund_mbr_cont"] = _nanmean(dc_mbr)
+        for name in _EST:
+            metrics[f"dlund3_{name}_cont"] = _nanmean(d3[name])
+            metrics[f"dlnz_{name}"] = _nanmean(dlnz[name])
+        # How many jets each ruler actually scored. `dlund3_posterior_mode_cont` is NaN on
+        # all of them by construction (a cell centre has no `ln z`), and the MBR row is NaN
+        # wherever the estimate was empty or its coordinates were not drawn — so a reader
+        # can tell an unscorable series from an unremarkable one.
+        metrics["n_continuous_scored"] = {
+            "mbr_cont": int(np.isfinite(dc_mbr).sum()),
+            **{f"dlund3_{k}": int(np.isfinite(d3[k]).sum()) for k in _EST},
+            **{f"dlnz_{k}": int(np.isfinite(dlnz[k]).sum()) for k in _EST},
+        }
+    if per_jet:
+        metrics["per_jet"] = per_jet_rows
 
     # Signed multiplicity bias stratified by true N: does the marginal-multiplicity bias
     # (posterior-mean/median) survive in MBR, and does it vary with the true length?
@@ -482,6 +633,22 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
                 f"      (cells are ~{(geometry.ln_kt_range[1] - geometry.ln_kt_range[0]) / geometry.n_bins:.2f}"
                 " wide, so the cell-level row above is quantisation-limited)"
             )
+            # The `ln z`-aware ruler beside the plane one, on the same emission. The MBR
+            # column is the point of the table: the fielded headline `dlund_mbr` compares
+            # CELL CENTRES, so it sees neither `ln z` nor the within-cell offset.
+            print("      the same leading emission under three rulers"
+                  "  (2-D = ||d(u,v)||, 3-D adds ln z, dlnz is ln z alone):")
+            print(f"      {'estimator':>22} {'2-D cont':>10} {'3-D cont':>10} {'|dlnz|':>10}")
+            for name in _EST:
+                two = {"identity": metrics["dlund_identity_cont"],
+                       "posterior_mode": metrics["dlund_posterior_mode_cont"],
+                       "posterior_geomedian": metrics["dlund_posterior_geomedian_cont"],
+                       "mbr": metrics["dlund_mbr_cont"]}[name]
+                print(f"      {name:>22} {two:>10.4f}"
+                      f" {metrics['dlund3_' + name + '_cont']:>10.4f}"
+                      f" {metrics['dlnz_' + name]:>10.4f}")
+            print("        (posterior_mode is NaN under the ln z rulers by construction:"
+                  " a modal CELL has no ln z)")
         print(
             f"  multiplicity signed bias  <n - n_true>   :  identity(x) = {metrics['mult_bias_identity']:+.3f}"
             f"   posterior-mean = {metrics['mult_bias_posterior']:+.3f}"
