@@ -440,3 +440,63 @@ from the K-dependent auto value, and `run.cluster_min_cluster_size_effective` re
 `0` resolved to — that resolution *is* B4's confound. And the three budget knobs are
 overridable from the environment (`PJC_N_JETS`, `PJC_K_DRAWS`, `PJC_MIN_CLUSTER_SIZE`,
 `PJC_SEED`), so a budget arm is a command rather than an edit to a generated notebook.
+
+## 8.7 B1 — the TARP transfer fails, and so does the same rule on the reference family
+
+**`PLAN_lnz_spline_head.md` §10 (pre-registration, `7932089`) → §11 (result).** Trained
+`contstop_spline_s1`, `contstop_spline_s2` and the control `v1_contstop_s2` that had to
+exist for them; evaluated with `scripts/eval_prod_test_v1.sh` unchanged.
+
+Δ(`tarp_max_dev`) = spline − control on the fielded continue/stop family: **+0.0055,
+−0.0030, −0.0190**, mean **−0.0055**. T1 wanted 3/3 negative and a mean ≤ −0.0085 and gets
+**2/3** and **−0.0055**. **T2 — DOES NOT TRANSFER.**
+
+**The reading is stronger than §10.3 anticipated, and in a different direction.** Applying
+the same rule to the family the effect was *measured* on (§6.4's explicit `q(N|x)` arms:
+−0.0200, −0.0085, +0.0065, mean −0.0073) **also fails**. So the TARP claim is not
+family-specific — it is **unresolved everywhere**, both means sitting inside the
+statistic's own MC spread of ~0.01. `SUMMARY` §2.5's TARP row is rewritten rather than
+qualified.
+
+Everything *except* TARP moved, on 3/3: val NLL −0.041 / −0.063 / −0.095, `pit_ks_max`
+better on all three, the `ln z` PIT ratio 1.89→1.05, 1.23→0.72, 1.68→1.34, and the support
+leak 0.0000% throughout. `lnz_head="spline"` is unaffected as a fielded choice.
+
+Two things nobody predicted, both recorded in §11:
+
+- **`v1_contstop_s2` fails G7** (0.0405 against p95 0.0275). v1's attribution rested on
+  *"all six explicit arms fail, both continue/stop arms pass"*; with a third seed that is
+  **6/6 against 1/3**. The attribution stands; its absolute form does not, and two arms
+  were never enough to support "both pass" as a property of a family.
+- **G3's `ln z` clause closes on 1/3 continue/stop seeds against 5/6 explicit ones.**
+  Declared reported-and-not-scored in advance, and larger than "transfer check" suggests.
+
+§11.2 also records a criticism of the pre-registration itself: T1's bar was taken from a
+*per-seed* quantity and applied to a *mean*, which with one contrary seed is stricter than
+it reads. The verdict stands as written — re-cutting a rule after the numbers is the move
+pre-registration exists to prevent — and the note says what a future version should do.
+
+---
+
+## 9. What the execution changed about the roadmap
+
+Four things, in the order a reader should take them:
+
+1. **The `+lnz` decode is built, measured twice, and ships off.** It won §12.2's B1/B2/B3
+   and §14.3's D2/D3, and lost D1. Nothing further is owed on it unless the fielded
+   headline moves off the cell grid (§15.5).
+2. **Two roadmap items are closed as unreachable rather than done.** B4's route cannot
+   un-confound G6 across `K` (§8.4), and B1's TARP claim does not survive at the bar its
+   own reference family also fails (§8.7). Both **remove** claims the roadmap was carrying,
+   which is worth more than either would have been worth confirming.
+3. **B4 is an independent argument for `SUMMARY` §4.3(1)** — stratify by `N` first. A
+   partition whose top level is `q(N|x)` is budget-invariant by construction, which is
+   exactly the property §19 shows HDBSCAN does not have under either knob convention. That
+   item was on the list for a different reason and now has two.
+4. **Two measurement defects were found by running the plan, not by reading it**: the
+   truth/draw representation mismatch is priced at 9.6% of `<d_mbr>` (§8.2), and
+   `coverage_68_null_explains_deficit` rejects a perfect model 64.8% of the time (§8.5).
+   Both are fixed; both were invisible until something asked for the number.
+
+**Still open and unchanged:** B2 (the sequence-level N probe), B6 (the joint coordinate
+density — still the one item that needs a written decision rather than a run), B7 and B8.
