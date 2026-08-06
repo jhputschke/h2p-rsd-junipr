@@ -129,6 +129,29 @@ on how long your hadron sequences are: a large win on the synthetic generator (m
 multiplicity ~6), a wash on the tightly-groomed PYTHIA sample (mean 1.74). Measure it on your
 own data — [`CONFIGURATION.md` §4](CONFIGURATION.md#4-model--the-posterior-family) has the table.
 
+The **coordinate heads** are switches on top of any `ar_junipr_v*`, and the recommended pair
+on real (soft-dropped) data is:
+
+```bash
+h2p-rsd-junipr train model=ar_junipr_v2 \
+    model.lnz_support=physical model.lnz_zcut=0.1 model.lnz_beta=0.0 \
+    model.lnz_head=spline           # ln z on its physical interval, with a free shape on it
+```
+
+`lnz_support=physical` puts `ln z` on the interval Soft Drop actually leaves (it is a
+property of the **file**, checked against the jets' grooming record before training), and
+`lnz_head=spline` replaces the truncated normal's two numbers with a monotone
+rational-quadratic spline on that interval — measured over six seeds to improve held-out NLL
+*and* the calibration together while keeping the support violation rate at exactly zero.
+Two more switches exist and should be left alone unless you are re-running the experiment:
+`model.dv_head=spline` was measured and **fails** its gate, and `model.coord_cell_center` is
+an open, pre-registered experiment. All four are off by default and bit-identical off; see
+[`CONFIGURATION.md` §4](CONFIGURATION.md#4-model--the-posterior-family).
+
+> ⚠️ **NLL is not comparable across a coordinate-head change.** A different normalization
+> shifts NLL/jet by a constant unrelated to fit quality, so never put a `physical` number
+> and a `legacy` number in one column — bridge with an arm trained on the same data.
+
 > **`log_prob` is not a density for every family.** `diffusion` sets
 > `exact_likelihood=False`: its coordinate term is a denoising-score-matching surrogate with
 > an unknown offset, so its NLL is comparable only *within* that family. `train`, `eval` and
@@ -556,6 +579,24 @@ How to read them:
   statement about the sample size. At 2000 jets it is 0.028. Needs the `[mbr]` extra and
   costs `closure_jets × (K+1)` EMD solves. `experiment.tarp_stratify=true` adds the same
   statistic per Lund quadrant.
+- **`coverage_68` — read it against its own null, not against 0.68.** The HPD-68 printed
+  above is built from the `K` draws themselves, so it cannot contain a cell of probability
+  `< 1/K` that a genuine draw still visits: **a perfect model under-covers**, by an amount
+  set by `K`. Set `experiment.coverage_null_reps=20` to get the reference — 20 extra
+  held-out draws per jet, scored as pseudo-truths through the identical construction —
+  which adds `coverage_68_null`, `coverage_68_vs_null` and
+  `coverage_68_null_explains_deficit` to the JSON and one line to the printout:
+
+  ```
+    leading-cell 68% coverage = 0.55  95% Wilson [0.51, 0.59] on 600 jets   (target 0.68 — OUTSIDE the interval)
+        ...against its OWN null (the model as truth, same K-draw HPD): 0.553 [0.54, 0.56] on 8841 pseudo-truths
+        -> the deficit is THE STATISTIC (an HPD from K draws misses cells with p < 1/K); compare to the null, not to 0.68
+  ```
+
+  That is a measured checkpoint at `K=200`, and it retired a standing "the posterior is
+  too narrow" conclusion. TARP is unaffected — it carries its own MC null. Costs one extra
+  `sample_batch` of `M` draws per jet, taken inside `fork_rng` so no other number in the
+  run moves.
 - **`sbc_chi2_uniform`** is quoted against the 95% point of `χ²(n_rank_bins − 1)` (16.90 at
   the default 10 bins) — and for **SBC on the multiplicity that is the wrong null**. `N` is
   discrete and typically takes a handful of values, so its mid-rank statistic lands on a
@@ -602,6 +643,38 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt experiment.mode_audit=true \
   gate; the search knobs are the `audit` block of `docs/CONFIGURATION.md` §8a. The per-jet
   view, the mode-skeleton point estimate and the residual tables are
   [`notebooks/per_jets_estimation_mode_mass.ipynb`](../notebooks/per_jets_estimation_mode_mass.ipynb).
+
+And a fourth, from [`docs/PLAN_PosteriorClusters.md`](PLAN_PosteriorClusters.md) — the
+measurement pass for the **set-valued** layer (§5.2 below is the API):
+
+```bash
+h2p-rsd-junipr eval runs/<id>/best.ckpt \
+    experiment.cluster_diagnostics=true decode.point_estimator=mbr \
+    experiment.closure_jets=600 experiment.n_closure_samples=200
+```
+
+- **`cluster_diagnostics`** — one pass over held-out jets that builds **one** `K×K` EMD
+  matrix per jet and reads the point estimate, the clusters and the loss-stability columns
+  off it (so it costs what the closure MBR already costs), landing at `metrics["clusters"]`
+  with `per_jet` rows beside the summary. The gates: **G2** medoid-in-dominant-cluster
+  (truth-free — the necessity test for the whole layer), **G2′** set value against a
+  **mass-matched random-partition null** (mandatory: a minimum over *n* exemplars beats the
+  medoid by an order statistic alone), **G3** the `N=0` stratum's mass against
+  `length_pmf`'s `q(0|x)` (a disagreement is a metric-convention bug, not a finding),
+  **G5** budget stability with binomial errors, **G6** the `top_mass` reliability diagram
+  with ECE, the Brier decomposition and the one-temperature recalibration, **G7**
+  split-conformal coverage at `decode.set_alpha` (marginal over jets, **not** conditional
+  on *x*), and **G8/G8′** the bounded/kernel loss-stability columns from `eval/stability.py`.
+  Figures `clusters_reliability.png` and `clusters_conformal_coverage.png` land beside the
+  checkpoint. It **needs an MBR decode** (`point_estimator=mbr` or `mbr_n`) — with `map`
+  there is no distance matrix, and it says so and skips rather than emitting a table of
+  NaN — plus scikit-learn for the `hdbscan`/`dbscan` methods (`pam` is pure NumPy). The
+  cluster knobs themselves are `decode.cluster_*` / `decode.set_alpha`
+  ([`CONFIGURATION.md` §7 and §10](CONFIGURATION.md#7-decode--inference--map--posterior-knobs));
+  the per-jet population study is
+  [`notebooks/per_jets_estimation_cluster.ipynb`](../notebooks/per_jets_estimation_cluster.ipynb)
+  and the one-jet picture
+  [`notebooks/inference_demo_cluster.ipynb`](../notebooks/inference_demo_cluster.ipynb).
 
 `eval` writes `eval_metrics.json` and the figures
 (`calibration_pit_coords.png`, `calibration_tarp.png`, `calibration_by_region.png`, and
@@ -689,6 +762,58 @@ The list is derived from the model's own flags, not hand-maintained per preset: 
 > data you actually loaded and **hard-errors above 1e-3** (warns above 1e-4) before
 > spending any time training; `eval` reports without refusing. If it fires, either raise
 > `model.max_emissions` to the bound the message quotes or tighten the grooming.
+
+### Campaign scripts: training grids, pre-registered gates, and probes
+
+Each measurement campaign ships as *grid → eval → gate printer*, so the numbers a
+conclusion rests on are produced by one command rather than reassembled by hand, and the
+gate is scored by a script that was written **before** the arms finished training. The
+coordinate-density campaign ([`PLAN_lnz_spline_head.md`](PLAN_lnz_spline_head.md)):
+
+```bash
+bash scripts/run_lnz_spline.sh                       # the arms: spline_s{0..5}, dvspline_s*,
+                                                     #   cellctr_s*, spline_k16_s2, contstop_spline_s0
+bash scripts/run_lnz_spline.sh --smoke --only spline_s0    # one tiny arm, to check the plumbing
+bash scripts/eval_prod_test_v1.sh --run-root runs/lnz_spline --device cpu
+python scripts/lnz_spline_gates.py                   # -> gate G3 / G3-dv verdicts + guards
+python scripts/offset_head_diagnostic.py             # why dv fails its PIT and du does not
+```
+
+Every arm is `presets/prod_test_v1.yaml` plus the one override that names it, so the
+controls are free: `runs/prod_test_v1/v1_base_s{0,1,2}` are the same configuration at the
+same seeds with the truncated-normal head, already trained. `lnz_spline_gates.py` carries
+the guards with the verdict — the support audit must stay at 0.0000%, NLL must not worsen
+beyond the control's seed spread, and TARP / `pit_ks_max` / `d(MBR)` are printed beside it
+— because a PIT improvement can always be bought with something else.
+
+The N-information ceiling probe ([`PLAN_NCeilingProbe.md`](PLAN_NCeilingProbe.md)) answers a
+different kind of question — *is this a modelling failure or an information limit?* — with a
+**discriminative** predictor of `n_true` from `(x, aux)`. Predicting a label is far easier
+than carrying a correct generative posterior, so its accuracy is a **lower bound** on the
+multiplicity information `x` carries, which is what makes a tie readable:
+
+```bash
+python scripts/n_ceiling_probe.py --fast      # ~1 min smoke on a subsample
+python scripts/n_ceiling_probe.py             # the full measurement (+ the EMD payoff row)
+python scripts/n_ceiling_probe.py --no-emd    # classifier arms only; no checkpoint needed
+```
+
+It prints, and writes to `runs/n_ceiling_probe/<stamp>/n_ceiling_probe.json`, the probe
+against `q(N|x)`'s posterior median on identical jets (paired McNemar), the **two trivial
+controls** it must beat for the null to mean anything (majority class, `n_x`), the
+**learning curve** over a 20× range of training data (a flat curve is what rules out "the
+probe was starved"), and the EMD row that prices the measured `n̂` where it would be spent.
+Measured verdict: 0.4550 vs 0.4583, p = 0.91 — no evidence of headroom in the length
+channel. See [`SUMMARY_Model_Status.md`](SUMMARY_Model_Status.md) §2.4 for the full table,
+and §3 there for the standing list of measured dead ends.
+
+The heavier notebooks are **generated**, not hand-edited — their source is past what a
+notebook editor opens comfortably, so edit the generator and re-run it:
+`scripts/make_per_jets_nb.py`, `make_per_jets_cluster_nb.py`,
+`make_per_jets_mode_mass_nb.py`, `make_per_jets_window_nb.py`,
+`make_inference_demo_cluster_nb.py` (and `make_prod_closure_nb.py`, which also has a
+`--check` mode for CI staleness). [`notebooks/README.md`](../notebooks/README.md) says what
+each one measures.
 
 ### Reproduce the v2 reference (acceptance tests)
 
@@ -844,8 +969,10 @@ It needs the optional `[mbr]` extra (the `pot` backend); `energyflow` is a separ
 independently importable extra:
 
 ```bash
-pip install -e ".[mbr]"          # default `pot` backend (self-contained, lazy-imported)
+pip install -e ".[mbr]"          # default `pot` backend + scikit-learn for the cluster layer
+                                 #   (both lazy-imported; point_estimator=map imports neither)
 pip install -e ".[energyflow]"   # optional reference EMD backend (needs a working wasserstein)
+pip install -e ".[mbr-all]"      # both backends plus the cluster layer
 ```
 
 ```python
@@ -872,6 +999,45 @@ trade-off, ≈ Lund-plane diameter), `decode.mbr_lnkt_cut` (perturbative support
 inherits the geometry cut), and `decode.mbr_weight`/`mbr_coords`/`mbr_beta`. See
 [`CONFIGURATION.md` §10](CONFIGURATION.md#10-inference-knobs-in-depth--the-map-floor-mincut--quantile-floor)
 for every knob and [`README_PHYSICS.md` §3](README_PHYSICS.md) for the physics.
+
+> **`point_estimator="mbr_n"` exists and is *not* recommended.** The N-first variant takes
+> `N` from the calibrated `q(N|x)` median and the shape from the medoid *within* that
+> stratum. It was pre-registered, measured, and lost: `d(medoid) − d(mbr_n) = −0.083`
+> [−0.128, −0.039] at `K=200` and −0.084 at `K=1000`, i.e. significantly **farther** from
+> truth, with both of its premises failing independently. It ships so the result is
+> reproducible, not because it should be used — see
+> [`CONFIGURATION.md` §10](CONFIGURATION.md#10-inference-knobs-in-depth--the-map-floor-mincut--quantile-floor)
+> and [`SUMMARY_Model_Status.md`](SUMMARY_Model_Status.md) §2.3.
+
+**Set-valued prediction — the posterior's alternative explanations.** The medoid is a
+*centrality* criterion, and the wrong one when the posterior is multimodal: the medoid of a
+two-lobed posterior can land in the sparse valley between the lobes and represent neither
+explanation. `model.predict_set(...)` clusters the **same** `K×K` matrix and returns one
+genuine draw per cluster with its mass. It is a **sibling** of `map_or_mbr`, not a
+replacement — the point estimate is bit-identical whether or not you also call this:
+
+```python
+# same draws, same distance matrix; nothing about the MBR answer moves
+st = model.predict_set(xf, nx, draws=draws, mbr_backend="pot", cluster_method="hdbscan")
+print(len(st), "explanations;  top_mass =", st.top_mass, " entropy =", st.entropy)
+for tree, m, r in zip(st.members, st.masses, st.radii):     # mass-descending
+    print(f"  mass {m:.2f}  radius {r:.2f}  N={tree.multiplicity}")
+print(st.point.pretty())        # the single tree the set recommends
+print(st.conformal_members())   # the α-level prefix once a threshold is fitted (else every member)
+```
+
+Three scalars replace the single ±, and they are not interchangeable: `top_mass` is a
+**probability** (calibrated after one temperature, gate G6), `entropy` an **ambiguity**
+over discrete alternatives, and `radii[0]` is the only one of the three that is a *width*.
+It **raises**, never warns, when the metric settings make `D` non-metric — `mbr_beta != 1`,
+`mbr_R` below half the ground diameter, or a candidate cap that leaves `D` rectangular.
+`predict_set` does not read `decode.cluster_posterior` — a caller that asks for a set has
+asked — so that flag is the *run-level* declaration that a set is part of this run's
+product (it selects the `cluster_*` knobs the eval report treats as live), while
+`experiment.cluster_diagnostics=true` (§4 above) is what actually runs the measurement pass.
+Physics reading in
+[`README_PHYSICS.md` §3](README_PHYSICS.md), knobs in
+[`CONFIGURATION.md` §10](CONFIGURATION.md#10-inference-knobs-in-depth--the-map-floor-mincut--quantile-floor).
 
 ### 5.3 Batch inference over a `jets.root` file
 
@@ -982,8 +1148,8 @@ curl -s localhost:8000/predict -H 'content-type: application/json' -d '{
 # -> {"map_multiplicity":..,"map_logprob":..,"map_nodes":[...],
 #     "posterior_mult_mean":..,"posterior_mult_median":..,"posterior_mult_68CR":[..,..]}
 # (map_multiplicity >= decode.min_emissions; the service reads the checkpoint's decode config)
-# When the checkpoint's decode has point_estimator=mbr, the response additionally carries
-# "mbr_risk" and "mbr_backend" (the point estimate is then the MBR tree, floor-free).
+# When the checkpoint's decode has point_estimator=mbr (or mbr_n), the response additionally
+# carries "mbr_risk" and "mbr_backend" (the point estimate is then the MBR tree, floor-free).
 # The response always echoes "aux_features"; when it is non-empty the request MUST carry
 #   "aux": {"jet_pt": .., "x_mg": .., "x_nsec": ..}
 # and a missing key is a 4xx, not a silent default -- the served conditioning distribution

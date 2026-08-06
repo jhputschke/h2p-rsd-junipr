@@ -255,6 +255,67 @@ Two consequences are built into the code:
   $q_\phi(N\mid x)$ marginal — a **decoding-layer** correction that leaves the likelihood (and
   thus any likelihood-ratio analysis) intact, unlike minimum-risk / sequence fine-tuning.
   It is most effective with a calibrated head (`ar_junipr_v3`, cINN, diffusion).
+- **Deciding $N$ first does not help — and that is a measurement about hadronization, not
+  a preference.** Most of the resolvable ambiguity in this posterior is *between*
+  multiplicities: decoding at the **true** $N$ (medoid within the correct stratum) reaches
+  **1.67** perturbative-Lund EMD against the plain medoid's **2.33**, the largest single
+  lever measured anywhere in this work. `decode.point_estimator="mbr_n"` tries to spend it
+  — $N$ from the calibrated $q_\phi(N\mid x)$ median, shape from the medoid *within* that
+  stratum — and **loses its own pre-registered gate**: $\Delta = d(\text{medoid}) -
+  d(\text{mbr\_n}) = -0.083\ [-0.128, -0.039]$ at $K=200$ and $-0.084$ at $K=1000$,
+  significantly *farther* from truth. Both premises fail independently: cross-stratum
+  distances are inflated but **not noise**, and the calibrated median picks $N$ no better
+  than the medoid does implicitly (0.448 vs 0.443 exact).
+
+  The question that then decides where effort goes — *is 0.448 an information ceiling of
+  $x$, or an extraction failure of the length model?* — is answered by a **discriminative**
+  probe of $n_{\rm true}$ from $(x,\text{aux})$ (`scripts/n_ceiling_probe.py`). Predicting a
+  label is far easier than carrying a correct generative posterior over trees, so its
+  accuracy is a **lower bound** on the multiplicity information $x$ carries. On 461 k
+  training jets and the same 600 test jets it reads **0.4550** against the posterior
+  median's **0.4583** — paired McNemar **p = 0.91** — while beating the majority class
+  (p = 0.0064) and $n_x$ (p = 0.00083) on a learning curve that is flat over a 20× range of
+  training data. So the length channel does **not** under-extract: the residual $N$
+  ambiguity behaves like the hadronization physics of §2.2, which genuinely destroys the
+  information, rather than like a modelling failure. The lever stays *real* and becomes
+  *unreachable* — at ~45% accuracy, **deciding** $N$ is worse than not deciding it
+  ($-0.062\ [-0.123,-0.001]$ when the probe's own $\hat n$ is fed to the stratified decode).
+  `mbr_n` therefore ships **measured and not recommended**, and the honest way to report
+  $N$ is the ambiguity itself — which is the next bullet.
+- **When one tree is not enough — the posterior as a *set* of explanations.** MBR returns
+  the Fréchet median: a **centrality** criterion, and the wrong one when the posterior is
+  multimodal, because the medoid of a two-lobed posterior can land in the sparse valley
+  between the lobes and represent neither explanation. Physically the lobes are the
+  question — "one hard splitting, or two softer ones?" is a different *parton* history, not
+  a wider error bar on one. `decode.cluster_posterior=true` / `model.predict_set(...)`
+  therefore partitions the **same** $K\times K$ EMD matrix MBR already builds and returns
+  one **genuine posterior draw** per cluster with its mass, so the hypothesis space stays
+  $\mathcal H=\{\text{pool}\}$ and nothing constructs a tree the model did not generate.
+  The point estimate is bit-identical whether or not the set is also computed — the
+  partition never sees the risk vector.
+
+  Three scalars replace the single $\pm$, and they are different objects: `top_mass` is a
+  **probability**, `entropy` an **ambiguity over discrete alternatives**, and `radii[0]` is
+  the only one that is a *width*. Measured on 600 held-out jets, the partition carries real
+  information — the set beats a **mass-matched random-partition null** by
+  $+0.603 \pm 0.048$ at $K=200$ and $+0.676\pm0.049$ at $K=1000$ (~12σ; the null is
+  mandatory, since a minimum over $n$ exemplars beats the medoid by an order statistic
+  alone) — and `top_mass` is both **calibrated and informative**: ECE $0.197\to0.040$ after
+  one frozen temperature, reliability slope 0.97, Brier resolution 0.079, and the scalars
+  predict the *set's* error rather than the medoid's. The $N=0$ stratum's cluster mass is
+  $q_\phi(0\mid x)$ **exactly** (a clique of identical empty clouds), which ties the set
+  layer to the empty-tree analysis by construction rather than by agreement. Two boundaries
+  are stated rather than smoothed over: the conformal set of `decode.set_alpha` is
+  **marginal over jets, not conditional on $x$**; and the mass argmax is **not a tree to
+  ship** — it is 11–14% worse in RMS than the medoid on identical rows and over-selects the
+  empty tree (0.455 against a true 0.167), a granularity artifact of an atomic $N=0$ stratum
+  competing against a fragmented continuum, which the frozen-$\tau$ empty gate repairs
+  ($0.455\to0.130$) without moving anything else. The recommended per-jet product is
+  therefore **the medoid with the calibrated gate, reported beside the set** — and since
+  ~55% of jets genuinely do not have a determined parton multiplicity given $x$, the set is
+  what lets that be said out loud. [`PLAN_PosteriorClusters.md`](PLAN_PosteriorClusters.md),
+  [`PLAN_StratifiedMBR.md`](PLAN_StratifiedMBR.md), and
+  [`SUMMARY_Model_Status.md`](SUMMARY_Model_Status.md) for the consolidated table.
 - **Is there a dominant configuration at all? — the mode-mass audit.** Everything above
   argues about which *summary* of the posterior to report. The prior question is whether
   the posterior has a summary worth reporting: does $q_\phi(y\mid x)$ concentrate on one
@@ -443,6 +504,38 @@ none. `model.lnz_support = "physical"` replaces it with the truncated normal alr
 for the within-cell offsets, which makes the grooming boundary a property of the *density*
 rather than something a downstream cut has to repair.
 
+**A correct support is not a correct shape, and the two failures turned out to be
+separate.** Putting $\ln z$ on its interval removed **every** support violation
+(0.83% $\to$ 0.0000%) and still left the PIT at 1.05–2.07× its critical value, concentrated
+at 2.16× in the quadrant holding 94% of emissions — a mismatch *inside* the interval, which
+a truncation cannot fix, because a truncated normal has two free numbers per node and the
+residual is the shape beyond them. Physically that is unsurprising: at leading order the
+retained spectrum is $\propto dz/z$ — *flat* in $\ln z$ — modulated by the Sudakov and
+piling up against the grooming boundary, which is not a Gaussian cut to size.
+`model.lnz_head="spline"` composes a monotone rational-quadratic spline (Durkan et
+al., arXiv:1906.04032) on that interval, through the affine bijection onto $[0,1]$, so the
+support closure is kept **exactly** — $S$ maps $[0,1]$ onto itself, so no draw can leave by
+construction — while the shape is free. Measured over six seeds it is the first change in
+this project to improve the likelihood *and* the calibration together: $\ln z$ falls to
+0.47–1.04× critical (5/6 seeds under the line), held-out NLL improves by 0.041–0.078 nat
+against a control seed spread of 0.020, and the support stays at zero.
+
+It also **relocated** the defect rather than removing it, which is a physics-relevant
+finding in its own right. With $\ln z$ fixed, the binding coordinate becomes `dv`, the
+within-cell $\ln k_t$ offset (1.02–1.22× on every arm measured). Giving *it* a spline does
+not help — and the reason is that the per-cell mean-PIT pattern is **identical** under both
+density families, so the residual is a per-cell **location** bias: a limit on what the head
+can *predict from its conditioning*, not on what its density can *express*. The head is
+told *which* cell it is in (a learned embedding of a categorical id) and never *where* that
+cell is, so neighbouring cells share nothing and each cell's within-cell tilt must be
+learned from its own emissions. `model.coord_cell_center` tests exactly that by appending
+the cell's continuous centre; its reading is pre-registered in
+[`PLAN_lnz_spline_head.md`](PLAN_lnz_spline_head.md) §9.2, and either outcome is decisive —
+if the bias shrinks the diagnosis is confirmed and the fix is nearly free, and if it does
+not, the case for a per-node **joint** coordinate density (which the exact kinematic
+identity $\ln z = u + v - \ln p_{T,\rm sum}$ motivates, and which no per-coordinate head can
+express) becomes the live one.
+
 **$\psi$ is periodic *and*, for these jets, nearly uniform — so its mode is not a
 prediction.** The von Mises concentration $\kappa$ measured on real jets has a median of
 **0.022**, i.e. a peak-to-trough ratio of $e^{2\kappa} = 1.04$. The azimuth of the softer
@@ -627,6 +720,22 @@ The output is only trustworthy after these checks (`eval/`,
   conditional generators are **not automatically calibrated**; the original cINN
   unfolding came out "too narrow" (arXiv:2006.06685). Coverage / PIT / simulation-
   based calibration (Talts et al., arXiv:1804.06788) gate "trustworthy."
+- **Every statistic against its own null, not against its nominal target.** This one is
+  methodological rather than physical, and it has overturned a conclusion four times here,
+  so it is part of the validation and not an aside. SBC-on-$N$ read $\chi^2 = 216$ against
+  "16.90" and looked broken — but $N$ takes a handful of values and cannot give a
+  continuous rank, and against its **own simulated null** the same number sits at the 88th
+  percentile, i.e. calibrated (`experiment.exposure_diagnostic`). TARP's $1.36/\sqrt n$
+  floor is asymptotic: at $n=300$ the Monte-Carlo 95% point is 0.073, wide enough that a 5%
+  miscalibration is undetectable, so "inside the band" was a statement about the sample size
+  (`experiment.tarp_null_reps`). `coverage_68`'s HPD is built from the $K$ draws themselves
+  and cannot contain a cell of probability $<1/K$, so a **perfect** model scores 0.553 at
+  $K=200$, not 0.68 — which retired a standing "the posterior is too narrow" reading
+  (`experiment.coverage_null_reps`; always quote it with its $K$). And a set-valued
+  prediction beats a point estimate by an order statistic alone, so the cluster layer's
+  value is scored against a **mass-matched random-partition null**. A reference that is
+  assumed rather than simulated is the most expensive kind of error in this suite: it is
+  invisible in the code and it looks like a physics result.
 - **Generator dependence — the dominant systematic** (`eval.systematics`). Trained on
   PYTHIA, the model returns the most likely *PYTHIA* configuration and transports
   PYTHIA's prior $p(y)$ and forward model $p(x\mid y)$. Quantify by retraining on a
@@ -663,7 +772,10 @@ Every physics choice is a versioned config field (`configs/`), never hard-coded:
 | generator / tune (systematic) | `experiment.generator_b` | — |
 | encoder over $x$ (gru / lundnet / deepsets) | `encoder.*` | gru |
 | posterior family (§5.1–§5.5) | `model=…` | ar_junipr_v2 |
-| point estimator (MAP vs MBR) + EMD metric | `decode.point_estimator`, `decode.mbr_*` | map, pot |
+| point estimator (MAP vs MBR vs N-first) + EMD metric | `decode.point_estimator`, `decode.mbr_*` | map, pot |
+| set-valued prediction + conformal level (§3) | `decode.cluster_posterior`, `decode.set_alpha` | false, 0.32 |
+| $\ln z$ support, and the shape on it (§5.1) | `model.lnz_support`, `model.lnz_head` | legacy, truncnorm |
+| what the coordinate head is told about its cell (§5.1) | `model.coord_cell_center`, `model.dv_head` | false, truncnorm |
 | smearing kernel: shape-function form vs free MLP (§5.5) | `model.physics_width` | true |
 
 ```bash
@@ -759,6 +871,23 @@ arXiv:1905.07488 · cINN unfolding, Bellagente et al., *SciPost Phys.* **9** (20
 (2024) 007, arXiv:2212.08674 · OmniFold, Andreassen et al., *PRL* **124** (2020)
 182001, arXiv:1911.09107 · unfolding landscape, arXiv:2404.18807; generative unfolding
 of jets, arXiv:2510.19906 · SBC, Talts et al., arXiv:1804.06788.
+
+**Decision rules, density shape, and calibration of the reported object (§3, §5.1, §9).**
+Minimum Bayes risk, Kumar & Byrne, *HLT-NAACL* (2004); Eikema & Aziz, arXiv:2005.10283 ·
+energy mover's distance, Komiske, Metodiev & Thaler, *PRL* **123** (2019) 041801,
+arXiv:1902.02346 · exact enumeration of sequence modes, Stahlberg & Byrne,
+arXiv:1908.10090; best-first decoding as Dijkstra, Meister, Vieira & Cotterell, *TACL*
+**8** (2020) 795, arXiv:2007.03909 · rational-quadratic spline flows, Durkan, Bekasov,
+Murray & Papamakarios, *NeurIPS* (2019), arXiv:1906.04032 · HDBSCAN, Campello, Moulavi &
+Sander, *PAKDD* (2013); DBSCAN, Ester, Kriegel, Sander & Xu, *KDD* (1996); $k$-medoids and
+the silhouette, Kaufman & Rousseeuw, *Finding Groups in Data*, Wiley (1990) ·
+split conformal prediction, Vovk, Gammerman & Shafer, *Algorithmic Learning in a Random
+World*, Springer (2005); Angelopoulos & Bates, arXiv:2107.07511 · temperature scaling, Guo,
+Pleiss, Sun & Weinberger, *ICML* (2017), arXiv:1706.04599 · Brier decomposition, Murphy,
+*J. Appl. Meteor.* **12** (1973) 595; proper scoring rules, Gneiting & Raftery, *JASA*
+**102** (2007) 359 · post-selection inference, Berk, Brown, Buja, Zhang & Zhao, *Ann.
+Statist.* **41** (2013) 802 · TARP, Lemos, Coogan, Hezaveh & Perreault-Levasseur, *ICML*
+(2023), arXiv:2302.03026 · directional statistics, Mardia & Jupp, Wiley (2000).
 
 **Hadronization fitting / ML hadronization (context).** HOMER, Bierlich et al.,
 arXiv:2410.06342; Assi et al., arXiv:2503.05667 · MLHAD, Ilten et al., *SciPost Phys.*

@@ -468,6 +468,9 @@ continuous coordinates) over the parton tree.
 | `lnz_beta` | `0.0` | the file's soft-drop `β`; read only when `lnz_support="physical"` |
 | `lnz_head` | `"truncnorm"` | the SHAPE `ln z` may take on that interval: `truncnorm` = the two-parameter truncated normal; `spline` = a monotone rational-quadratic spline composed on its CDF. Requires `lnz_support="physical"`. See below |
 | `lnz_spline_bins` | `8` | spline pieces `K`; read only when `lnz_head="spline"`. Costs `3K−1` extra coordinate-head outputs per node (23 at `K=8`) |
+| `dv_head` | `"truncnorm"` | the same switch on `dv`, the within-cell `ln k_t` offset — the coordinate that became binding once `ln z` was fixed. **Measured and NOT recommended**: it fails its own pre-registered gate on 3/3 seeds. Bit-identical off. See below |
+| `dv_spline_bins` | `8` | spline pieces for the `dv` spline; read only when `dv_head="spline"` |
+| `coord_cell_center` | `False` | append the cell's continuous centre `(c_x, c_y)`, affinely mapped onto `[−1, 1]` by the geometry's own ranges, to the coordinate head's input — so the head is told *where* the cell is and not only *which* cell it is. `False` is bit-identical: no extra input, no extra buffer. See below |
 
 **`ar_junipr_v2` vs `ar_junipr_v1`** is exactly `continuous_coords` True vs False — v1 drops
 the coordinate density and is the categorical-cell-only backbone.
@@ -573,6 +576,82 @@ a silently different model.
 > The same NLL-comparability warning above applies with full force here: a spline arm's
 > NLL is comparable to a `truncnorm` arm's only because both are densities on the same
 > space with the same `lnz_support`. Compare seed to seed, and never across `lnz_support`.
+
+#### `dv_head` — the same fix on the coordinate the residual moved to (measured, **not** recommended)
+
+Splining `ln z` relocated the defect rather than removing it: with `lnz_head="spline"` the
+`ln z` PIT falls to 0.47–1.04× critical while **`dv`** — the within-cell `ln k_t` offset —
+fails on every seed (1.10× / 1.04× / 1.12×). `dv_head` is the same switch on that
+coordinate, with `dv_spline_bins` its `K`. The layout keeps the all-truncnorm case
+byte-identical: the offset block is `[du_mean, dv_mean, du_sig, dv_sig]` when off and
+`[du_mean, du_sig] + <3K−1 spline>` when on, so slots 0–3 never change meaning and an older
+checkpoint still reads correctly. `du` deliberately has **no** such flag: it has no measured
+defect (0 of 6 seeds).
+
+**It does not work, and the falsification is why the field is documented at all.** The
+motivation was a tilt budget: a truncated normal on `[−h, h]` has log-density slope
+`μ/σ²`, so it can tilt across the cell by at most `2hμ/σ²`, and `μ` is *clamped* to `±h` by
+the `h·tanh` parameterization — a wide `σ` spends tilt authority that cannot be bought
+back. Measured on the trained arms, `dv` runs at `σ = 2.6h` and achieves a tilt of 0.158
+against a data requirement of ~0.173, while `du` runs at `1.7h` and achieves 0.258. That
+predicted a spline — flat and tilted at once — would fix it. It did not:
+
+| gate G3-dv (`dvspline_s*` vs its own same-seed `spline_s*` control) | s0 | s1 | s2 |
+|---|---:|---:|---:|
+| `dv` PIT KS, × critical | 1.10 → **1.22** | 1.04 → **1.12** | 1.12 → **1.02** |
+| `dv × wide_soft` (the bulk cell) | 1.01 → **1.23** | 0.94 → **1.14** | 1.03 → **1.05** |
+| val NLL, Δ | **+0.016** | +0.000 | **+0.028** |
+| TARP max dev (G7) | 0.0215 → **0.0430** | 0.0265 → **0.0560** | 0.0400 → 0.0315 |
+
+0/3 on both clauses, with seeds 0 and 1 going from *passing* G7 to failing it: worse on two
+seeds, unchanged on the third, and never better where it was supposed to be. Re-running the
+per-cell diagnostic on the spline arm then said *why*: the mean-PIT pattern is **identical** under both
+density families — `.523/.489/.512/.484/…` (truncnorm) against `.525/.492/.513/.488/…`
+(spline) — so strictly more within-cell freedom moved the bias not at all. The defect is a
+per-cell **location** bias: a limit on what the head can *predict from its conditioning*,
+not on what its density can *express*. That is what `coord_cell_center` below tests, and it
+is why the escalation to a joint coordinate density (§7.3 of the plan) was **not** taken.
+
+The field ships **measured and not recommended** — the same status `decode.point_estimator="mbr_n"`
+carries — rather than removed: it is bit-identical off, and a later change to the head's
+conditioning may make the extra flexibility pay where today it only adds variance. Full
+record in [`PLAN_lnz_spline_head.md`](PLAN_lnz_spline_head.md) §7.1/§8.1 and
+[`SUMMARY_Model_Status.md`](SUMMARY_Model_Status.md) §2.6; the diagnostic is
+[`scripts/offset_head_diagnostic.py`](../scripts/offset_head_diagnostic.py) and the gate
+printer [`scripts/lnz_spline_gates.py`](../scripts/lnz_spline_gates.py).
+
+#### `coord_cell_center` — the head is told *which* cell, never *where* it is
+
+The coordinate head's input is `[decoder state | e(x) | cell embedding]`, and the embedding
+is a free vector per **categorical** id. Nothing in it says that cell 437 and cell 438 are
+neighbours, so every cell's within-cell tilt has to be learned from its own emissions
+alone — which is exactly the shape of a per-cell location bias that more *output*
+flexibility cannot touch, i.e. what `dv_head` measured. `coord_cell_center=true` appends
+the cell's continuous centre `(c_x, c_y)`, affinely mapped onto `[−1, 1]` by the geometry's
+own `ln_invdelta_range` / `ln_kt_range`, to that input. Two columns in one `torch.cat`,
+~130 parameters.
+
+The map is **fixed**, not data-dependent — it is built from the geometry, never from
+sample statistics — so a checkpoint means the same thing on a new sample, the same rule
+[`features.py`](../src/h2p_rsd_junipr/features.py) standardization follows. It is kept
+as plain floats rather than a buffer, so with the switch off the `state_dict` is
+byte-identical and old checkpoints load strictly.
+
+> **Status: open experiment, and its reading is pre-registered.** The arms
+> (`cellctr_s{0,1,2}` against `spline_s{0,1,2}`, same seed, `ln z` spline on both sides so
+> the row prices the conditioning alone) are defined in
+> [`scripts/run_lnz_spline.sh`](../scripts/run_lnz_spline.sh); the verdict rule is written
+> down in [`PLAN_lnz_spline_head.md`](PLAN_lnz_spline_head.md) §9.2 **before** the numbers
+> existed, because the previous hypothesis in that document was elegant, wrong, and
+> tempting to reinterpret afterwards. The statistic is the RMS of `mean PIT − 0.5` over
+> populated `ln k_t` cells — the quantity §8.1 showed to be identical under two density
+> families. CONFIRMED = `dv` below 1.0× on all three seeds ⇒ field it beside
+> `lnz_head="spline"`; PARTIAL = the RMS drops by more than a third without clearing 1.0×
+> ⇒ *more* conditioning (cell width, neighbour occupancies), not a different density;
+> DEAD = RMS within ±20% of the control ⇒ the conditioning hypothesis is falsified and the
+> joint coordinate density becomes the live next step. Guards unchanged: support at
+> 0.0000%, NLL not worse beyond the control's seed spread, TARP and `pit_ks_max` reported
+> beside the verdict — a conditioning fix that buys `dv` by spending `ln z` is not a fix.
 
 **`ar_junipr_v3`** is the v2 backbone with `use_multiplicity_head=True`: it factorizes
 `q(y|x) = q(N|x)·q(y|N,x)` with a dedicated categorical multiplicity head (the same head cINN
@@ -1087,8 +1166,9 @@ Controls the §8 closure / calibration / systematic run (`h2p-rsd-junipr eval`).
 | `support_audit` | `False` | window / soft-drop / `z>½` / `k_t`-floor violation rates of the sampled posterior, **scored** against a hard zero (gate G2) |
 | `tarp_null_reps` | `0` | Monte-Carlo reps for the TARP null band at this run's own `(n_jets, α grid)`; `0` keeps only the asymptotic `1.36/√n` floor |
 | `tarp_stratify` | `False` | TARP additionally per Lund quadrant |
+| `coverage_null_reps` | `0` | pseudo-truths **per jet** for `coverage_68`'s own null: extra held-out draws from the same posterior, scored through the identical `K`-draw HPD construction. `0` = off; ~20 is plenty. Without it `coverage_68` has no reference it can actually be read against (see below) |
 | `mode_audit` | `False` | exact top-k **skeleton** enumeration with dominance certificates → `mode_audit.json` (§8a) |
-| `cluster_diagnostics` | `False` | the posterior-cluster measurement pass → `metrics["clusters"]`: per-jet `n_clusters` / `top_mass` / `entropy`, gates **G2** (medoid-in-dominant-cluster), **G2′** (the oracle-set diagnostic with its mass-matched random-partition null and silhouette precondition), **G3**, **G6** (reliability + Brier decomposition), **G7** (conformal coverage) and the WP4a loss-stability columns. Needs `decode.point_estimator=mbr` — there is no distance matrix otherwise, and it says so and skips rather than emitting a table of NaN |
+| `cluster_diagnostics` | `False` | the posterior-cluster measurement pass → `metrics["clusters"]`: per-jet `n_clusters` / `top_mass` / `entropy`, gates **G2** (medoid-in-dominant-cluster), **G2′** (the oracle-set diagnostic with its mass-matched random-partition null and silhouette precondition), **G3**, **G6** (reliability + Brier decomposition), **G7** (conformal coverage) and the WP4a loss-stability columns. Needs `decode.point_estimator=mbr` (or `mbr_n`) — there is no distance matrix otherwise, and it says so and skips rather than emitting a table of NaN |
 
 Trade cost vs. precision with `closure_jets` and `n_closure_samples`.
 
@@ -1177,11 +1257,12 @@ map to `ar` (per-step continue/stop) or `nhead` (explicit `q(N|x)`, fixed-length
 A family with no adapter raises **by name** rather than reporting a beam-search
 approximation as if it were exact.
 
-### The three references that are not what they look like
+### The four references that are not what they look like
 
 Each of these was a *reference* that failed, not a model that did — and each cost a
-conclusion in production test v0 before it was found. They are grouped because the
-mistake is the same one three times: quoting a statistic against a null it does not have.
+conclusion (three in production test v0, the fourth in the stratified-MBR campaign) before
+it was found. They are grouped because the mistake is the same one four times: quoting a
+statistic against a null it does not have.
 
 **SBC-on-N has no χ²(9) null.** `N` is discrete and, at the fielded grooming, takes a
 handful of values, so its mid-rank statistic lands on a handful of atoms and cannot be
@@ -1198,6 +1279,23 @@ about the sample size. `tarp_null_reps>0` recomputes the band by Monte Carlo at 
 own `(n, α grid)` and reports `floor_ok` — whether the band is tight enough for the
 statistic to be quotable at all. At n = 300 the recomputed 95% point is 0.073 (**not**
 quotable); at n = 2000 it is 0.028.
+
+**`coverage_68`'s target is not 0.68, and it never was.** The leading-cell HPD-68 is built
+from the `K` posterior draws themselves, so it cannot contain a cell of probability
+`< 1/K` that a genuine draw still visits: the statistic **under-covers for a perfect
+model**, and by an amount set by `K`, not by the posterior's width.
+`coverage_null_reps=M` measures exactly that — `M` extra held-out draws per jet, scored as
+pseudo-truths through the identical construction — and reports `coverage_68_null`,
+`coverage_68_vs_null` and `coverage_68_null_explains_deficit` beside the raw number. On the
+fielded checkpoint at `K = 200` the null is **0.553** [0.543, 0.563] on 8 841 pseudo-truths
+against an observed **0.546**: inside its own interval, so the "0.55 vs 0.68 ⇒ the
+posterior is too narrow" reading that stood through v1 was the *estimator*, not the model.
+Never quote `coverage_68` without its `K`. The draws are taken inside `torch.random.fork_rng`,
+so switching the diagnostic on cannot move any other number in the run — a switch that
+perturbs the statistic it exists to explain would be worse than no switch. TARP is
+unaffected (it carries its own MC null), so the joint-narrowness case now rests on TARP and
+the PIT cross alone. Record: [`PLAN_StratifiedMBR.md`](PLAN_StratifiedMBR.md) WP4 and
+[`SUMMARY_Model_Status.md`](SUMMARY_Model_Status.md) §2.3.
 
 **`mean_mult_posterior` used to be a mean over a different set of jets than
 `mean_mult_true`, and the truth-nonempty version of it is biased by construction.**
