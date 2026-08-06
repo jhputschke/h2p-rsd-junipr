@@ -731,3 +731,121 @@ arm so the deltas are readable against their own scale.
 
 **Anti-circularity:** `R`, `K`, `mbr_n_candidates` and `lnkt_cut` are the fielded values and
 are not tuned against any number this produces.
+
+---
+
+# §13. RESULT §12 — **BUILD.** The `+lnz` selection recovers ~60% of the ceiling
+
+Run 2026-08-06, branch `zAwareMetric`. Runner: `scripts/zaware_selection_ceiling.py`,
+8 arms × 1000 jets × 3 selections off byte-identical draws and coordinates, ~22 min/arm.
+Artifact: `runs/zaware_sel/full-20260806-143047/ceiling.json`. §12.2's B1/B2/B3 were
+committed (`e5e3d38`) before this file existed.
+
+## 13.1 The ceiling, and how much of it is reachable
+
+Absolute `|Δ ln z|` of the selected tree's leading emission, 839 kept jets per arm:
+
+| arm | cells-2D *(fielded)* | cont-2D | **cont-3D** | pool-medoid | free-median |
+|---|---:|---:|---:|---:|---:|
+| `spline_s0` | 0.4203 | 0.4186 | **0.3735** | 0.3475 | 0.3474 |
+| `spline_s1` | 0.4017 | 0.4115 | **0.3754** | 0.3481 | 0.3481 |
+| `spline_s2` | 0.4186 | 0.4168 | **0.3722** | 0.3451 | 0.3449 |
+| `contstop_spline_s0` | 0.4169 | 0.4056 | **0.3723** | 0.3456 | 0.3457 |
+| `v1_base_s0` | 0.4076 | 0.4119 | **0.3716** | 0.3464 | 0.3464 |
+| `v1_base_s1` | 0.4038 | 0.4024 | **0.3710** | 0.3421 | 0.3423 |
+| `v1_base_s2` | 0.4150 | 0.4125 | **0.3737** | 0.3482 | 0.3482 |
+| `v1_contstop_s0` | 0.3946 | 0.3958 | **0.3608** | 0.3468 | 0.3464 |
+
+**The pool restriction costs nothing.** `pool-medoid` equals `free-median` to four decimals
+on 8/8 arms — at `K = 200` the drawn pool already realises its own `ln z` median, so
+`H = {pool}` is free on this axis. The ceiling is therefore the full **−0.065**, not some
+fraction of it.
+
+**`+lnz` recovers 47–70% of it (mean ≈ 59%).** Paired BCa, per jet:
+
+| Δ = selection − `cells-2D` | `cont-3D` (B1) | `cont-2D` *(attribution)* | `pool-medoid` *(ceiling)* |
+|---|---|---|---|
+| `spline_s0` | **−0.0472** [−0.0637, −0.0312] | −0.0017 [−0.0170, +0.0139] | −0.0735 [−0.0907, −0.0567] |
+| `spline_s1` | **−0.0256** [−0.0440, −0.0078] | +0.0102 [−0.0087, +0.0281] | −0.0549 [−0.0734, −0.0367] |
+| `spline_s2` | **−0.0464** [−0.0638, −0.0299] | −0.0018 [−0.0191, +0.0156] | −0.0747 [−0.0925, −0.0573] |
+| `contstop_spline_s0` | **−0.0444** [−0.0617, −0.0266] | −0.0111 [−0.0275, +0.0052] | −0.0719 [−0.0906, −0.0535] |
+| `v1_base_s0` | **−0.0352** [−0.0529, −0.0175] | +0.0042 [−0.0124, +0.0211] | −0.0627 [−0.0806, −0.0450] |
+| `v1_base_s1` | **−0.0313** [−0.0480, −0.0147] | −0.0014 [−0.0178, +0.0145] | −0.0627 [−0.0800, −0.0453] |
+| `v1_base_s2` | **−0.0413** [−0.0589, −0.0237] | −0.0025 [−0.0218, +0.0165] | −0.0688 [−0.0867, −0.0509] |
+| `v1_contstop_s0` | **−0.0347** [−0.0528, −0.0176] | +0.0007 [−0.0157, +0.0173] | −0.0499 [−0.0686, −0.0324] |
+| | **8/8 CIs exclude 0** | **0/8 exclude 0** | 8/8 exclude 0 |
+
+**The attribution clause resolves cleanly: it is `ln z`, not de-quantization.** `cont-2D`
+uses exactly the same continuous coordinate rows and delivers **nothing** on this axis —
+0/8 significant, signs mixed. The entire gain arrives with the third column. That is why
+§12.1 insisted on the third arm; a 2×2 would have credited it to the wrong change.
+
+## 13.2 B1 / B2 / B3
+
+| | rule | measured | |
+|---|---|---|---|
+| **B1** | `Δ(dlnz) ≤ −0.020` on ≥3/4 spline arms, CI excluding 0 on ≥3/4 | gain **4/4**, significant **4/4** (8/8 over all arms) | **PASS** |
+| **B2** | `Δ(dlund` 2-D cont`)` not > +0.020 with CI excluding 0 on ≥2/4 | violations **0/4**; range −0.0176…+0.0082, only one arm significant and it is *better* | **PASS** |
+| **B3** | `winner_moved_rate ≥ 0.05` on ≥3/4 | **58.8–62.5%** on 8/8 | **PASS** |
+
+Guards, asserted not assumed: `ground_diameter` 8.4853 (2-D) and 9.8489 (`+lnz`), KMT bounds
+4.2426 and 4.9244, `R = 8.485` clears both. `leading_cell_moved_rate` 44–49%.
+
+**§5's NOT-SCORED clause predicted the opposite of B3** — "given the effect size above this
+is the *expected* outcome", i.e. `winner_moved_rate < 0.05`. Measured: **~60%, twelve times
+the threshold.** The effect-size reasoning was right about the *distance* (adding `ln z`
+moves a ground distance by at most 19% of the diameter) and wrong about the *argmin*: the
+risk landscape over candidates is nearly flat, so a small perturbation of the objective
+relocates the minimiser often. Worth recording as a general lesson — **a small change in an
+objective is not a small change in its argmin.**
+
+## 13.3 The complication, and it is one I did not pre-register
+
+B2 was written against the **continuous** `(u, v)` ruler, and by that rule there is no cost.
+But the *fielded* headline is `dlund_mbr`, which compares leading-emission **cell centres**,
+and it was not in B2. Computed post-hoc from the stored cell ids (a pure function of the
+data, no re-run):
+
+| Δ `dlund_mbr` = selection − `cells-2D` | `cont-3D` | `cont-2D` |
+|---|---|---|
+| pooled, n = 6560 | **+0.0042 [+0.0004, +0.0081]** | +0.0012 [−0.0021, +0.0046] |
+| per arm | 6/8 positive, **1/8 significant** (`spline_s0` +0.0146 [+0.0038, +0.0251]) | 0/8 significant |
+
+So the fielded cell-centre headline degrades by **+0.0042** — small, but the pooled CI
+excludes 0. **This is a gap in my own pre-registration, not a reason to overturn the
+verdict**, and it is stated here rather than resolved by picking whichever ruler flatters
+the answer. Read it against three things:
+
+- the **gain is ~10× the cost** in absolute terms (−0.040 on `ln z` against +0.0042 on the
+  plane), and 8/8-significant against 1/8;
+- `dlund_mbr` already loses to the free one-node `dlund_posterior_medoid` by ≈0.020 on all
+  eight arms (§3, reading 4), so +0.0042 is a fifth of a gap the decode already carries;
+- the cell ruler is quantisation-limited by construction (cells are 0.2 wide against
+  distances of 0.6) — but *that* argument is only admissible if it is made in advance, and
+  it was not, so it is offered as context and not as a defence.
+
+## 13.4 Verdict and what to build
+
+**BUILD** — B1, B2 and B3 all pass on the rule fixed before the run, the gain is
+attributable to `ln z` specifically, and the pool restriction costs nothing.
+
+Concretely, and bounded by §13.3:
+
+1. **Build WP-3** (`decode.mbr_cloud_source`, `coords_for_draws`, the threading through
+   `posterior_distances` / `run_closure` / `run_cluster_diagnostics`) exactly as §4/WP-3
+   specifies, **default off and bit-identical off** — the standing discipline, and risk #1
+   (the unfiltered coordinate call reordering RNG) is real and must stay behind the switch.
+2. **`mbr_coords="+lnz"` becomes functional rather than fatal.** It currently raises (WP-2),
+   which was the honest state while nothing wanted it; something does now.
+3. **Do NOT make it the default decode on this evidence.** §13.3's +0.0042 on the fielded
+   headline is the open question, and the arm that would settle it is a `dlund_mbr`-primary
+   re-run with its own pre-registered rule. Ship it the way `mbr_n` and `dv_head="spline"`
+   ship: measured, available, documented — with the difference that this one *won* its gate.
+4. **Second payoff, independent of all the above:** WP-3's threading is what fixes the
+   `_truth_cloud` `kt`-weight mismatch (§4/WP-3's inset), which `d_top`, `d_best`, `d_mbr`,
+   `d_nearest_draw` and gates G2′/G6/G7 sit on today and which §11.3 left orphaned.
+
+**What this does not say.** Nothing here reopens §2.5 or bears on the spline: the gain is
+the same size on control arms as on spline arms (−0.031…−0.041 vs −0.026…−0.047), because it
+is a **decode** fix. And it does not revive §5 — that rule was about whether a z-blind metric
+explained a regression that does not exist, and it stays unscored.
