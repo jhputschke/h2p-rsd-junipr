@@ -9,6 +9,7 @@ Primary records: `PROD_TEST_v0_RESULTS.md`, `PROD_TEST_v1_RESULTS.md`,
 `PROD_TEST_edit_RESULTS.md`, `PLAN_PosteriorClusters.md` (implementation notes),
 `PLAN_StratifiedMBR.md` §1a–§1d, `PLAN_NCeilingProbe.md` §A,
 `PLAN_lnz_spline_head.md` §6, §8 and §9, `PLAN_z_aware.md` §11 and §13 (WP-0 null; WP-3 indicated),
+`PLAN_next_steps.md` (the ordered execution list),
 and the run artifacts under
 `runs/prod_test_v1/v1_contstop_s0/…/` (`per_jet_clusters.json`,
 `per_jet_clusters_K1000.json`, `eval_metrics_wp34.json`),
@@ -238,6 +239,11 @@ between the roadmap and §4.5(1).
 ---
 
 ## 4. Next steps — what the ceiling probe changed
+
+> **The ordered execution list, with the file-level specs, is `PLAN_next_steps.md`.**
+> This section keeps the *rationale* — why each item is on the list and what evidence
+> put it there; that document keeps the *order* and the concrete diffs. When the two
+> disagree, this one wins on rationale and the owning plan wins on both.
 
 The probe's verdict re-orders everything below it. Two consequences drive the list:
 
