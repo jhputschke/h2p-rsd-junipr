@@ -37,6 +37,7 @@ from h2p_rsd_junipr.eval.calibration import (
     coordinate_pits,
     run_calibration,
     run_tarp,
+    wilson_diff_interval,
     wilson_interval,
 )
 from h2p_rsd_junipr.geometry import Geometry
@@ -359,6 +360,49 @@ def test_wilson_interval_brackets_and_survives_the_edges():
     w40 = np.subtract(*reversed(wilson_interval(27, 40)))
     w400 = np.subtract(*reversed(wilson_interval(272, 400)))
     assert w40 > 2.5 * w400
+
+
+def test_wilson_diff_interval_prices_BOTH_errors():
+    """`coverage_68` vs its own null is a difference of two proportions measured on very
+    different `n`, and the old test threw the larger error away.
+
+    Newcombe's hybrid-score interval (method 10) is built from the two Wilson intervals, so
+    it is wide enough to contain 0 when the two proportions agree and it degrades
+    gracefully at the edges (docs/PLAN_next_steps.md B3)."""
+    # same underlying p, wildly different n -> the difference must straddle 0
+    lo, hi = wilson_diff_interval(276, 502, 4877, 8821)      # 0.550 vs 0.553
+    assert lo < 0.0 < hi
+    # ...and the width is dominated by the SMALLER sample, which is the point
+    assert 0.07 < (hi - lo) < 0.11
+    # a genuinely different pair excludes 0
+    lo2, hi2 = wilson_diff_interval(250, 502, 4977, 8791)    # 0.498 vs 0.566
+    assert hi2 < 0.0
+    # symmetry and the degenerate case
+    a, b = wilson_diff_interval(5, 10, 50, 100)
+    c, d = wilson_diff_interval(50, 100, 5, 10)
+    assert a == pytest.approx(-d, abs=1e-12) and b == pytest.approx(-c, abs=1e-12)
+    assert all(np.isnan(x) for x in wilson_diff_interval(1, 0, 1, 10))
+
+
+def test_the_point_in_interval_test_over_rejects_a_perfect_model():
+    """Why the paired key exists, SIMULATED rather than asserted.
+
+    `coverage_68_null_explains_deficit` asks "is the observation inside the NULL's
+    interval". At the fielded sample sizes (~500 jets against ~8800 pseudo-truths) the
+    observation's own Wilson half-width is ~4x the null's, so the test rejects a model
+    drawn from the null itself most of the time. `..._paired` does not."""
+    rng = np.random.default_rng(20260806)
+    n_obs, n_nul, p, reps = 502, 8821, 0.553, 3000
+    k_obs = rng.binomial(n_obs, p, size=reps)
+    k_nul = rng.binomial(n_nul, p, size=reps)
+    strict = paired = 0
+    for a, b in zip(k_obs, k_nul):
+        lo, hi = wilson_interval(int(b), n_nul)
+        strict += not (lo <= a / n_obs <= hi)
+        dlo, dhi = wilson_diff_interval(int(a), n_obs, int(b), n_nul)
+        paired += not (dlo <= 0.0 <= dhi)
+    assert strict / reps > 0.5, "the strict test is supposed to be badly over-strict here"
+    assert paired / reps < 0.08, "the paired test must sit near its nominal 5%"
 
 
 def test_chi2_crit95_matches_the_table():

@@ -494,3 +494,70 @@ audit before being read as over-confidence.
 - The 600-jet K=200 run is WP-1's decision instrument; the K=1000 run is WP-2's.
 - Gate verdicts (ship/no-ship for `mbr_n`, G5, pool coverage, coverage null) appended to
   `docs/PLAN_PosteriorClusters.md`.
+
+---
+
+## 1e. RESULT — `coverage_68`'s null is family-independent, and the test that read it was wrong
+
+Run 2026-08-06 on branch `nextStepsTrackAB`. Runner: `scripts/coverage_null_transfer.py`.
+Artifact: `runs/coverage_null/full-20260806-164231/coverage_null.json`. This is
+`PLAN_next_steps.md` **B3** / `SUMMARY` §4.1(3): §1c's WP-4 measured the null on **one arm
+of one family** and it became a stop-sign, so it needed transferring.
+
+**The direction that matters** is the **explicit-`q(N|x)`** family: that is the one whose
+joint posterior genuinely *is* too narrow (all six v1 arms fail TARP/G7), so if the null
+were a property of the model rather than of the estimator, this is where it would move.
+
+Tier: §1c's own — 600 jets, `K = 200`, 20 pseudo-truths per jet, `pot`, cpu, `min_emissions
+= 0`, `mbr_n_candidates = 64`. Three `v1_base` seeds instead of the one the plan asked for,
+so the transfer carries a seed band, plus `v1_contstop_s0` as a **positive control**.
+Nothing writes beside a checkpoint; `h2p-rsd-junipr eval` would have overwritten each arm's
+committed `eval_metrics.json`, which is what §1c had to work around by hand.
+
+### The positive control
+
+`v1_contstop_s0`, re-measured by this runner: `coverage_68` **0.5478** against §1c's 0.546,
+and its null **0.5476** against §1c's 0.553 — `|Δ| = 0.0054`. The runner reproduces the
+number it is extending, so what follows is about the models.
+
+### The transfer
+
+| arm | family | `coverage_68` | its own null | difference, Newcombe 95% |
+|---|---|---|---|---|
+| `v1_base_s0` | explicit `q(N\|x)` | 0.566 [0.522, 0.608] | 0.543 [0.533, 0.554] | +0.022 [−0.022, +0.066] |
+| `v1_base_s1` | explicit `q(N\|x)` | 0.498 [0.454, 0.542] | 0.565 [0.555, 0.576] | **−0.067 [−0.112, −0.022]** |
+| `v1_base_s2` | explicit `q(N\|x)` | 0.546 [0.502, 0.589] | 0.543 [0.532, 0.553] | +0.003 [−0.042, +0.047] |
+| `v1_contstop_s0` | continue/stop *(the §1c arm)* | 0.548 [0.504, 0.591] | 0.548 [0.537, 0.558] | +0.000 [−0.045, +0.044] |
+
+`coverage_68` is on 502 jets; each null on 8 722–8 829 pseudo-truths.
+
+**The null transfers.** Pooled over the three explicit seeds it is **0.5504** on 26 334
+pseudo-truths, against §1c's 0.553: **−0.0026 [−0.0145, +0.0094]**. The correction is a
+property of the **estimator and `K`**, not of the family — which is what the mechanism
+predicts, since an HPD-68 built from `K` draws cannot contain a cell of probability below
+`1/K` whatever generated the draws. **The stop-sign holds, and it now rests on two families
+and four arms instead of one and one.**
+
+### The residual, reported rather than smoothed
+
+`v1_base_s1` sits **−0.067 [−0.112, −0.022]** below its *own* null — genuinely
+over-confident after the correction, on the family that also fails TARP. One of three
+seeds, on one statistic. It is consistent with v1's central attribution and is **not**
+evidence for it: three seeds, and the other two straddle 0. Recorded so it is not
+rediscovered as a surprise.
+
+### A defect in the shipped metric, found by running this
+
+`coverage_68_null_explains_deficit` asks *"is the observation inside the null's
+interval"* — which discards the observation's own error, and that is the **larger** of the
+two by about 4× (502 jets against ~8 800 pseudo-truths). **Simulated** at exactly these
+sample sizes on a model drawn from the null itself, it rejects **64.8%** of the time. On
+these four arms it says 1/4 where the correct test says 3/4.
+
+Fixed additively, so no committed artifact changes: `eval/calibration.py` gains
+`wilson_diff_interval` (Newcombe 1998, method 10 — the hybrid-score interval on the
+difference), and `run_calibration` now also reports **`coverage_68_vs_null_ci`** and
+**`coverage_68_null_explains_deficit_paired`**, which is the key to read. The old key keeps
+its value and its note says what it actually tests. `tests/test_calibration_v2.py` pins
+both, including the simulation — *simulate the reference, never assume it*, which is the
+rule this metric was written to enforce and then broke one layer up.
