@@ -100,12 +100,104 @@ def test_lund_cloud_weights_are_raw_not_normalised():
     assert np.allclose(wu, 1.0)
 
 
-def test_lund_cloud_empty_and_coords_gdim():
-    for coords, g in (("lnDR_lnkt", 2), ("+lnz", 3), ("+psi", 4)):
-        pts, w = _cloud([5, 6], coords=coords, lnkt_cut=0.0)
-        assert pts.shape == (2, g)
-        e_pts, e_w = _cloud([], coords=coords)
-        assert e_pts.shape == (0, g) and e_w.shape == (0,)
+def _coord_rows(cells, lnz=(-1.0, -2.0), psi=(0.4, -0.7)):
+    """A continuous-coordinate table over the same cells — the representation a cell
+    chain cannot supply. `(u, v)` are the cell centres so the 2-D distances are directly
+    comparable to the chain's; `ln z` / `psi` are what the chain does not have."""
+    return [[*GEOM.cell_center(int(c)), float(lz), float(ps)]
+            for c, lz, ps in zip(cells, lnz, psi)]
+
+
+def test_lund_cloud_cell_chain_is_two_dimensional():
+    """A cell chain under the 2-D ground metric: unchanged, and the ONLY thing a cell
+    chain can honestly produce (the Lund grid discretizes `(u, v)` alone)."""
+    pts, w = _cloud([5, 6], coords="lnDR_lnkt", lnkt_cut=0.0)
+    assert pts.shape == (2, 2) and w.shape == (2,)
+    e_pts, e_w = _cloud([], coords="lnDR_lnkt")
+    assert e_pts.shape == (0, 2) and e_w.shape == (0,)
+
+
+@pytest.mark.parametrize("coords,g", [("lnDR_lnkt", 2), ("+lnz", 3), ("+psi", 4)])
+def test_lund_cloud_coordinate_table_carries_the_real_columns(coords, g):
+    """A coordinate TABLE gives every `coords` mode its true columns — the third is the
+    supplied `ln z`, not a constant."""
+    rows = _coord_rows([5, 6])
+    pts, w = _cloud(rows, coords=coords, lnkt_cut=0.0)
+    assert pts.shape == (2, g) and w.shape == (2,)
+    if g >= 3:
+        assert np.allclose(pts[:, 2], [-1.0, -2.0])       # the ln z that was supplied
+        assert not np.allclose(pts[:, 2], 0.0)            # ...and NOT the old filler
+    if g >= 4:
+        assert np.allclose(pts[:, 3], [0.4, -0.7])
+    # an empty draw is untouched by the guard: honestly empty, nothing fabricated
+    e_pts, e_w = _cloud([], coords=coords)
+    assert e_pts.shape == (0, g) and e_w.shape == (0,)
+
+
+@pytest.mark.parametrize("coords", ["+lnz", "+psi"])
+def test_lund_cloud_cell_chain_raises_above_two_columns(coords):
+    """**This test replaces one that asserted the opposite** (`(2, 3)` for a cell chain
+    under `+lnz`), and the old form passed only because the knob was INERT: `lund_cloud`
+    hard-coded `lz = ps = 0.0` for cell chains, so `mbr_coords="+lnz"` appended a
+    constant-zero third column and changed no distance. `sample_batch` returns cell
+    chains, so that was the path the whole pipeline took — `+lnz` was not merely off by
+    default, it could not be switched on (docs/PLAN_z_aware.md §2a, WP-2).
+
+    It is the test that would have caught this had it been written against a coordinate
+    table rather than against the representation the code happened to accept."""
+    with pytest.raises(ValueError, match="CELL CHAIN"):
+        _cloud([5, 6], coords=coords, lnkt_cut=0.0)
+
+
+def test_lund_cloud_weight_z_is_no_longer_silently_unit():
+    """`mbr_weight="z"` read column 2, which a cell chain fills with 0 — so every weight
+    was `exp(0) = 1` and `"z"` was bit-identical to `"unit"`. It now raises on a chain and
+    means what it says on a table."""
+    with pytest.raises(ValueError, match="CELL CHAIN"):
+        _cloud([5, 6], weight="z", coords="lnDR_lnkt", lnkt_cut=0.0)
+    rows = _coord_rows([5, 6])
+    pts, w = _cloud(rows, weight="z", coords="lnDR_lnkt", lnkt_cut=0.0)
+    assert pts.shape == (2, 2)                              # gdim still follows `coords`
+    assert np.allclose(w, np.exp([-1.0, -2.0]))
+    _, w_unit = _cloud(rows, weight="unit", coords="lnDR_lnkt", lnkt_cut=0.0)
+    assert not np.allclose(w, w_unit)                       # the regression this pins
+
+
+def test_lund_cloud_short_row_raises_rather_than_padding():
+    """A row with too few columns is the same silent `ln z = 0` by another route."""
+    with pytest.raises(ValueError, match="an emission row has 2"):
+        _cloud([[1.0, 2.0], [1.5, 2.5]], coords="+lnz", lnkt_cut=0.0)
+    with pytest.raises(ValueError, match="an emission row has 3"):
+        _cloud([[1.0, 2.0, -1.0]], coords="+psi", lnkt_cut=0.0)
+
+
+def test_needs_continuous_coords_is_the_one_place_the_rule_lives():
+    """The guard's own predicate, exported so `report.py`, the tests and the scripts ask
+    one function instead of re-deriving `gdim > 2 or weight == "z"` each."""
+    assert not mbr.needs_continuous_coords("lnDR_lnkt", "kt")
+    assert not mbr.needs_continuous_coords("lnDR_lnkt", "unit")
+    assert mbr.needs_continuous_coords("lnDR_lnkt", "z")     # weight reads column 2
+    assert mbr.needs_continuous_coords("+lnz", "kt")
+    assert mbr.needs_continuous_coords("+psi", "kt")
+    assert mbr.cloud_columns_needed("lnDR_lnkt", "z") == 3
+    assert mbr.cloud_columns_needed("+psi", "kt") == 4
+
+
+def test_lnz_is_no_longer_inert_in_the_distance():
+    """Two draws with IDENTICAL cells and different `ln z` are at distance 0 under the
+    2-D ground metric and at a real distance under `+lnz`.
+
+    The whole content of §2a in one assertion: before WP-2 both were 0, because the third
+    column was the constant the adapter invented."""
+    a = _coord_rows([5, 6], lnz=(-1.0, -1.0))
+    b = _coord_rows([5, 6], lnz=(-2.5, -2.5))
+    kw = _kwargs("surrogate" if not POT_OK else "pot")
+    d2 = mbr.lund_emd(_cloud(a, lnkt_cut=0.0), _cloud(b, lnkt_cut=0.0), **kw)
+    assert d2 == pytest.approx(0.0, abs=1e-9)
+    kw3 = dict(kw)
+    d3 = mbr.lund_emd(_cloud(a, coords="+lnz", lnkt_cut=0.0),
+                      _cloud(b, coords="+lnz", lnkt_cut=0.0), **kw3)
+    assert d3 > 1e-6
 
 
 # --- single-pair distance -------------------------------------------------------
