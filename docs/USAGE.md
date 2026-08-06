@@ -665,6 +665,12 @@ h2p-rsd-junipr eval runs/<id>/best.ckpt \
   with ECE, the Brier decomposition and the one-temperature recalibration, **G7**
   split-conformal coverage at `decode.set_alpha` (marginal over jets, **not** conditional
   on *x*), and **G8/G8′** the bounded/kernel loss-stability columns from `eval/stability.py`.
+  It also reports `metrics["clusters"]["weight_audit"]` — `W_truth / W_truth_as_drawn` and
+  the spurious `|ΔW|` charge the EMD adds when the truth and the draws are built in
+  *different* representations, priced against `<d_mbr>` and `<d_nearest_draw>` rather than
+  assumed small. It is exactly 1 and 0 under `decode.mbr_cloud_source="coords"`; under the
+  default `"cells"` it is a real residual (measured 9.6% of `<d_mbr>`,
+  [`PLAN_PosteriorClusters.md` §18](PLAN_PosteriorClusters.md)).
   Figures `clusters_reliability.png` and `clusters_conformal_coverage.png` land beside the
   checkpoint. It **needs an MBR decode** (`point_estimator=mbr` or `mbr_n`) — with `map`
   there is no distance matrix, and it says so and skips rather than emitting a table of
@@ -1006,6 +1012,40 @@ trade-off, ≈ Lund-plane diameter), `decode.mbr_lnkt_cut` (perturbative support
 inherits the geometry cut), and `decode.mbr_weight`/`mbr_coords`/`mbr_beta`. See
 [`CONFIGURATION.md` §10](CONFIGURATION.md#10-inference-knobs-in-depth--the-map-floor-mincut--quantile-floor)
 for every knob and [`README_PHYSICS.md` §3](README_PHYSICS.md) for the physics.
+
+**A `ln z`-aware ground metric — `decode.mbr_cloud_source="coords"`.** By default a draw
+becomes a cloud of **cell centres**, which carry `(ln 1/ΔR, ln kt)` and nothing else — so
+`mbr_coords="+lnz"` and `mbr_weight="z"` **raise** rather than silently measuring 2-D
+numbers under a 3-D label. Setting `mbr_cloud_source="coords"` draws the jet's continuous
+coordinate table alongside the cells and builds every cloud from *that*:
+
+```python
+# the coordinate table is drawn ONCE per jet, inside the estimator, and feeds both the
+# clouds and the winner's reported nodes — so the tree you get back sits at exactly the
+# coordinates its own cloud was built from.
+lnz = model.map_or_mbr(xf, nx, draws=draws, point_estimator="mbr", mbr_backend="pot",
+                       mbr_cloud_source="coords", mbr_coords="+lnz")
+
+# ...or supply the table yourself, e.g. to score several ground metrics off ONE draw:
+from h2p_rsd_junipr.inference.mbr import coords_for_draws
+coords = coords_for_draws(model, xf, nx, draws)      # unfiltered, index-aligned, (m, 4)
+lnz = model.map_or_mbr(xf, nx, draws=draws, coords_by_draw=coords,
+                       point_estimator="mbr", mbr_cloud_source="coords",
+                       mbr_coords="+lnz", mbr_backend="pot")
+```
+
+`run_closure` and `run_cluster_diagnostics` take the same table as `coords_by_jet=`, the
+coordinate sibling of `draws_by_jet=`, so a caller can share one sampling pass across
+sections. Measured (`PLAN_z_aware.md` §13): `+lnz` recovers **47–70%** of the selected
+tree's `|Δ ln z|` gap to the posterior's own centrality estimate, 8/8 CIs excluding 0, and
+de-quantization alone delivers nothing — the gain is `ln z`, not the finer grid.
+
+> **It is off by default, deliberately.** The fielded headline `dlund_mbr` compares
+> leading-emission *cell centres* and pays **+0.0042 [+0.0004, +0.0081]** under `+lnz`
+> (§13.3) — a gap in that experiment's own pre-registration, reported rather than resolved
+> by picking a flattering ruler. It ships measured-available-documented, like `mbr_n` below,
+> with the difference that this one **won** its pre-registered gate. `ar_junipr_v1` has no
+> coordinate density and raises by family name. The switch is bit-identical off.
 
 > **`point_estimator="mbr_n"` exists and is *not* recommended.** The N-first variant takes
 > `N` from the calibrated `q(N|x)` median and the shape from the medoid *within* that

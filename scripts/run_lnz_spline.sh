@@ -54,6 +54,14 @@ ARMS=(
   "spline_s1|trainer.seed=1"
   "spline_s2|trainer.seed=2"
   "contstop_spline_s0|trainer.seed=0 model.use_multiplicity_head=false"
+  # --- §10 (docs/PLAN_next_steps.md B1): two MORE continue/stop spline seeds, so the
+  #     FIELDED family has three paired seeds instead of one. §6.4 measured the spline's
+  #     TARP gain on the explicit-q(N|x) family (2 of 3 crossing below the null band) and
+  #     the single continue/stop arm moved the OTHER way, 0.0200 -> 0.0255. Their control
+  #     for seed 2 does not exist either -- `scripts/run_prod_test_v1.sh` grows
+  #     `v1_contstop_s2` in the same commit. Verdict rule: §10.3, fixed first.
+  "contstop_spline_s1|trainer.seed=1 model.use_multiplicity_head=false"
+  "contstop_spline_s2|trainer.seed=2 model.use_multiplicity_head=false"
   # --- §7.1: the dv spline, on top of the ln z spline, same three seeds -------------
   "dvspline_s0|trainer.seed=0 model.dv_head=spline"
   "dvspline_s1|trainer.seed=1 model.dv_head=spline"

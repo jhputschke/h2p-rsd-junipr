@@ -975,7 +975,8 @@ The serving layer reads the checkpoint's decode config. Source:
 | `mbr_n_candidates` | `0` | MBR | `0` = every draw is a candidate; `k>0` = only the first `k` (asymmetric MBR, faster) |
 | `mbr_lnkt_cut` | `null` | MBR | drop emissions below this `ln k_t`; `null` inherits `geometry.ln_kt_range[0]` (the region cut) |
 | `mbr_weight` | `"kt"` | MBR | Lund-cloud point weights: `kt` (IRC-safe) / `z` / `unit`. **`z` raises on a cell chain** (it reads `ln z`) |
-| `mbr_coords` | `"lnDR_lnkt"` | MBR | ground-metric columns: `lnDR_lnkt` / `+lnz` / `+psi` (gdim 2/3/4; `+psi` engages periodicity). **`+lnz`/`+psi` raise on the cell chains every family samples** — see the note below |
+| `mbr_coords` | `"lnDR_lnkt"` | MBR | ground-metric columns: `lnDR_lnkt` / `+lnz` / `+psi` (gdim 2/3/4; `+psi` engages periodicity). **`+lnz`/`+psi` need `mbr_cloud_source="coords"` and raise under `"cells"`** — see the note below |
+| `mbr_cloud_source` | `"cells"` | MBR | what a draw becomes before the ground metric sees it: `cells` (the drawn cell CHAIN, i.e. cell centres — the fielded path every committed artifact was produced under) or `coords` (the continuous coordinate table drawn alongside, which de-quantizes `(u, v)` **and** supplies `ln z`/`psi`). Explicit rather than implicit: two notebook generators already pass `coords_by_draw` for winner decoration. Bit-identical off |
 | `mbr_R` | `8.485` | MBR | mass-imbalance penalty radius ≈ Lund-plane diameter (scale it with `geometry`) |
 | `mbr_beta` | `1.0` | MBR | ground-distance exponent; `1.0` = KMT 1-Wasserstein EMD |
 | `mbr_norm` | `False` | MBR | energyflow weight normalisation; **off** keeps the imbalance term (empty-tree-never-wins) |
@@ -1611,18 +1612,53 @@ posterior, unlike a floor that manufactures emissions.)
   ranges. Check closure-metric stability across `R` (unequal-mass EMD is known to depend on it).
 - `mbr_beta=1.0` is the true 1-Wasserstein EMD; `2.0` an energy-distance-like variant.
 
-> **`+lnz` / `+psi` / `mbr_weight="z"` currently RAISE, and that is the honest state.** Every
-> family's `sample_batch` returns **cell chains**, and a Lund cell centre carries `(ln 1/ΔR,
-> ln kt)` and nothing else — the grid discretizes those two coordinates only. `lund_cloud`
-> used to fill the missing columns with `0`, so `+lnz` appended a **constant-zero** column
-> that changed no distance and `mbr_weight="z"` was bit-identical to `unit`; `ln z = 0` also
-> means `z = 1`, which is not a neutral default but an unphysical point in the metric. Since
-> 2026-08-06 it raises instead, naming the knob (`docs/PLAN_z_aware.md` WP-2;
-> `inference.mbr.needs_continuous_coords` is the predicate). Making the knobs *work* needs a
-> continuous-coordinate table threaded through `posterior_distances` — designed as WP-3 of
-> the same plan and **not built**, because the measurement that would have motivated it
-> (WP-0) found nothing to explain. No committed artifact is affected: no config on disk has
-> ever set `mbr_coords` to anything but `lnDR_lnkt`.
+- `mbr_cloud_source` decides **what a draw becomes** before any of the above sees it, and it
+  is what makes `+lnz` / `+psi` / `mbr_weight="z"` usable at all — see immediately below.
+
+> **`mbr_coords="+lnz"` / `"+psi"` and `mbr_weight="z"` need `mbr_cloud_source="coords"`, and
+> RAISE under the default `"cells"`.** Every family's `sample_batch` returns **cell chains**,
+> and a Lund cell centre carries `(ln 1/ΔR, ln kt)` and nothing else — the grid discretizes
+> those two coordinates only. `lund_cloud` used to fill the missing columns with `0`, so
+> `+lnz` appended a **constant-zero** column that changed no distance and `mbr_weight="z"`
+> was bit-identical to `unit`; `ln z = 0` also means `z = 1`, which is not a neutral default
+> but an unphysical point in the metric. Since 2026-08-06 it raises instead, naming the knob
+> (`docs/PLAN_z_aware.md` WP-2; `inference.mbr.needs_continuous_coords` is the predicate).
+>
+> **`mbr_cloud_source="coords"` is the representation that can supply them** (WP-3, built
+> 2026-08-06). It draws the jet's continuous coordinate table alongside the cells —
+> `inference.mbr.coords_for_draws`, one batched `sample_coordinates_many`, unfiltered and
+> index-aligned — and builds every cloud from it. Two things change together and neither is
+> optional: the cloud is **de-quantized** (`(u, v)` are the drawn values, not cell centres)
+> *and* it carries `ln z` / `psi`.
+>
+> **Measured** (`PLAN_z_aware.md` §13, 8 arms × 1000 jets × 3 selections): `+lnz` under
+> `"coords"` cuts the selected tree's `|Δ ln z|` from 0.395–0.420 to **0.361–0.375**, which is
+> **47–70% (mean ≈59%)** of the measured ceiling, with **8/8** paired CIs excluding 0.
+> De-quantization *alone* (`"coords"` at `lnDR_lnkt`) delivers **nothing** — 0/8 significant —
+> so the gain is attributable to `ln z` specifically.
+>
+> **It is not the default**, and `configs/decode/default.yaml` keeps `cells` / `lnDR_lnkt`:
+> the fielded cell-centre headline `dlund_mbr` pays **+0.0042 [+0.0004, +0.0081]** pooled
+> (§13.3), which the §12 pre-registration did not cover. §14 is the arm that settles it.
+> Ships the way `mbr_n` and `dv_head="spline"` ship — measured, available, documented — with
+> the difference that this one won its pre-registered gate.
+>
+> **Cost and caveats.** One extra batched coordinate draw per jet (the call the continuous
+> closure block already makes), plus `_ground` over 3 columns instead of 2 — est. +5–10% per
+> pass. `R` must still clear KMT's bound at the **larger** diameter: `+lnz` raises it from
+> 8.485 to 9.849, so the bound goes 4.243 → 4.924 and the default `mbr_R = 8.485` clears both
+> (`assert_cluster_metric_ok` asserts it, never assumes it). `ar_junipr_v1` has no coordinate
+> density and `coords_for_draws` raises **by family name** rather than fabricating one. And
+> the switch is **bit-identical off**: verified by diffing the closure and cluster metric
+> dicts against a pristine checkout (`scripts/zaware_wp3_bitidentity.py`) — additions only.
+>
+> **A second thing it fixes, unrelated to `ln z`.** `eval/clusters.py::_truth_cloud` builds
+> the truth from continuous `yraw` rows, so under `"cells"` the truth and the draws are
+> weighted in *different* representations (`exp(v_continuous)` vs `exp(v_cell_centre)`).
+> Measured at the published cluster tier: a 0.3% mass mismatch buying a spurious imbalance
+> charge of 0.21, which is **9.6% of `<d_mbr>`** and **72% of `<d_nearest_draw>`**
+> (`PLAN_PosteriorClusters.md` §18). Under `"coords"` it is zero by construction, and
+> `run_cluster_diagnostics` reports `metrics["weight_audit"]` on every run either way.
 
 **The two backends** (`mbr_backend`) implement the *same* mathematical object; the choice is
 provenance and batching, not semantics:

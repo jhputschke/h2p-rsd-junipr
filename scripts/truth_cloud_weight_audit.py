@@ -218,11 +218,12 @@ def analyse(rec: dict) -> dict:
     moved = [k for k in ("G2_pass_wp4_closed", "G6_pass", "G7_pass")
              if out["gates"]["cells"][k] != out["gates"]["coords"][k]]
     # G2' is scored by sign-and-significance of the gain rather than by a stored boolean.
+    def _g2p_sig(side, label):
+        e = out["gates"][side][label]
+        return bool(np.isfinite(e["gain_sem"]) and e["gain"] > 2.0 * e["gain_sem"])
+
     for label in ("G2prime_all", "G2prime_precondition"):
-        def sig(side):
-            e = out["gates"][side][label]
-            return bool(np.isfinite(e["gain_sem"]) and e["gain"] > 2.0 * e["gain_sem"])
-        if sig("cells") != sig("coords"):
+        if _g2p_sig("cells", label) != _g2p_sig("coords", label):
             moved.append(label)
     out["verdicts_moved"] = moved
     out["any_verdict_moved"] = bool(moved)

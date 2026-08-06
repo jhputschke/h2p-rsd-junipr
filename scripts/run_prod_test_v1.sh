@@ -52,6 +52,10 @@ ARMS=(
   "v1_ctrl_s2|trainer.seed=2 encoder.aux_features=[ln_pt,abs_eta]"
   "v1_contstop_s0|trainer.seed=0 model.use_multiplicity_head=false"
   "v1_contstop_s1|trainer.seed=1 model.use_multiplicity_head=false"
+  # The seed-2 control the v1 grid never needed and docs/PLAN_lnz_spline_head.md §10 does:
+  # its `contstop_spline_s2` arm has to be paired with the SAME configuration and seed
+  # under the truncated-normal head, and this is that arm.
+  "v1_contstop_s2|trainer.seed=2 model.use_multiplicity_head=false"
   "v1_gru_s0|trainer.seed=0 encoder=gru"
   "v1_deepsets_s0|trainer.seed=0 encoder=deepsets"
 )
