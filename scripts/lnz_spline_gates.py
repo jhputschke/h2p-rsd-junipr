@@ -68,7 +68,12 @@ ARMS: dict[str, tuple[str | None, str, str]] = {
     "dvspline_s1": ("spline_s1", "run", "dv"),
     "dvspline_s2": ("spline_s2", "run", "dv"),
     "spline_k16_s2": ("spline_s2", "run", "k16"),
+    # §10 (docs/PLAN_next_steps.md B1): three paired seeds on the FIELDED continue/stop
+    # family, so §6.4's TARP finding stops resting on one arm. `v1_contstop_s2` is the
+    # control that had to be trained for it.
     "contstop_spline_s0": ("v1_contstop_s0", "control", "transfer"),
+    "contstop_spline_s1": ("v1_contstop_s1", "control", "transfer"),
+    "contstop_spline_s2": ("v1_contstop_s2", "control", "transfer"),
     # §8.5(1): the conditioning experiment. Control is the SAME seed's ln z-spline arm, so
     # the row prices the cell-centre input alone.
     "cellctr_s0": ("spline_s0", "run", "cellctr"),
@@ -227,6 +232,78 @@ def print_dmbr_band(zaware_root: Path) -> dict | None:
                if k in rec.get("tables", {})}}
 
 
+# §10 / PLAN_next_steps.md B1 — does the spline's TARP gain reach the FIELDED family?
+# T1/T2 were committed in 7932089, before contstop_spline_s1/s2 and v1_contstop_s2 were
+# trained. The bar is the weakest improving instance of the effect being transferred
+# (§6.4's s1, -0.0085), which is also about one control seed spread there.
+CONTSTOP_PAIRS = ("contstop_spline_s0", "contstop_spline_s1", "contstop_spline_s2")
+T1_MIN_MEAN_GAIN = -0.0085
+
+
+def contstop_tarp_transfer(rows: dict) -> dict | None:
+    """§10.3's T1, scored. Paired delta(tarp_max_dev) = spline - control, per seed."""
+    pairs = []
+    for arm in CONTSTOP_PAIRS:
+        r = rows.get(arm)
+        if not r or not r.get("control"):
+            continue
+        a, b = r["spline"].get("tarp_max_dev"), r["control"].get("tarp_max_dev")
+        if a is None or b is None:
+            continue
+        pairs.append({
+            "arm": arm, "control_arm": r["control_arm"],
+            "spline": float(a), "control": float(b), "delta": float(a) - float(b),
+            "null_p95": r["spline"].get("tarp_null_p95"),
+            "spline_passes_g7": r["spline"].get("tarp_passes_g7"),
+            "control_passes_g7": r["control"].get("tarp_passes_g7"),
+            "nll_spline": r["spline"].get("nll"), "nll_control": r["control"].get("nll"),
+        })
+    if not pairs:
+        return None
+    d = [p["delta"] for p in pairs]
+    n_neg = sum(1 for x in d if x < 0)
+    mean = sum(d) / len(d)
+    # The sanity clause: the val NLL must not REGRESS on any pair (a seed where it does is
+    # a training failure to investigate, not a TARP result to report).
+    nll_ok = all(p["nll_spline"] is not None and p["nll_control"] is not None
+                 and p["nll_spline"] <= p["nll_control"] for p in pairs)
+    complete = len(pairs) == len(CONTSTOP_PAIRS)
+    t1 = bool(complete and n_neg == len(pairs) and mean <= T1_MIN_MEAN_GAIN)
+    return {
+        "rule": (f"T1 TRANSFERS iff delta < 0 on {len(CONTSTOP_PAIRS)}/"
+                 f"{len(CONTSTOP_PAIRS)} AND mean delta <= {T1_MIN_MEAN_GAIN} "
+                 f"(docs/PLAN_lnz_spline_head.md §10.3, fixed before the arms)"),
+        "pairs": pairs, "n_pairs": len(pairs), "complete": complete,
+        "n_negative": n_neg, "mean_delta": mean,
+        "min_delta": min(d), "max_delta": max(d),
+        "nll_never_regresses": nll_ok,
+        "verdict": ("NOT SCORED" if not complete else
+                    "TRANSFERS" if t1 else "DOES NOT TRANSFER"),
+    }
+
+
+def print_contstop_transfer(blk: dict | None) -> None:
+    if not blk:
+        return
+    print("\n" + "=" * 100)
+    print("§10 (B1) — does the spline's TARP gain reach the FIELDED continue/stop family?")
+    print(f"{'seed pair':<44}{'control':>10}{'+spline':>10}{'delta':>10}"
+          f"{'G7 ctl->spl':>14}")
+    for p in blk["pairs"]:
+        g7 = (f"{'yes' if p['control_passes_g7'] else 'no'}->"
+              f"{'yes' if p['spline_passes_g7'] else 'no'}")
+        print(f"{p['arm'] + ' vs ' + p['control_arm']:<44}{p['control']:>10.4f}"
+              f"{p['spline']:>10.4f}{p['delta']:>+10.4f}{g7:>14}")
+    p95 = next((p["null_p95"] for p in blk["pairs"] if p["null_p95"]), None)
+    print(f"{'':44}{'':10}{'':10}{'mean':>10}{'':>0} {blk['mean_delta']:+.4f}"
+          + (f"     (MC null p95 = {p95:.4f})" if p95 else ""))
+    print(f"  improves on {blk['n_negative']}/{blk['n_pairs']};  "
+          f"val NLL never regresses: {blk['nll_never_regresses']}")
+    print(f"  {blk['rule']}")
+    print(f"  VERDICT: {blk['verdict']}")
+    print("=" * 100)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run-root", default="runs/lnz_spline")
@@ -313,6 +390,8 @@ def main(argv=None) -> int:
                   f"{('yes' if blk['tarp_passes_g7'] else 'no'):>6}"
                   f"{fmt(blk.get('nll'), '.3f'):>10}{fmt(blk['dlund_mbr'], '.4f'):>9}")
     print("=" * 100)
+    transfer = contstop_tarp_transfer(rows)
+    print_contstop_transfer(transfer)
     zaware = print_dmbr_band(REPO / args.zaware_root)
     leaked = [a for a, r in rows.items()
               if (r["spline"]["soft_drop_viol"] or 0) > 0
@@ -323,6 +402,7 @@ def main(argv=None) -> int:
     out = Path(args.out) if args.out else root / "lnz_spline_gates.json"
     save_metrics({"plan": "docs/PLAN_lnz_spline_head.md",
                   "G3": g3, "G3_dv": g3dv, "d_mbr_paired": zaware,
+                  "contstop_tarp_transfer": transfer,
                   "support_guard_held": not leaked, "arms": rows}, out)
     print(f"\n[gates] wrote {out}")
     return 0 if (g3["closes"] and g3dv["closes"]) else 1

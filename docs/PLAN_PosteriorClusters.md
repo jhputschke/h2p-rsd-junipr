@@ -1213,3 +1213,112 @@ information over a mass-matched random partition.
   B4's sibling and is **not** run here.
 - **The recommended per-jet product is untouched**: `d_mbr` does not move, and §2.3's
   `d(truth, nearest draw)` gets *better*, not worse.
+
+---
+
+# §19. RESULT — the budget scan (B4): the partition is **not** budget-invariant, either way
+
+Run 2026-08-06 on branch `nextStepsTrackAB`. Runner: `scripts/cluster_budget_scan.py`,
+600 jets on the fielded `v1_contstop_s0`, `energyflow`, `hdbscan`, seed 1234. Artifact:
+`runs/cluster_budget/full-20260806-171520/budget.json`. This is `PLAN_next_steps.md` **B4**
+/ `SUMMARY` §4.1(5), which asked for one run pinning `cluster_min_cluster_size=10` at
+`K = 1000` to un-confound §2.2's cross-K row.
+
+**One nested sampling pass.** `K = 1000` drawn once per jet; the `K = 200` cell is its
+first 200 draws. So every contrast below is paired jet-by-jet *and* the small pool is a
+subsample of the large one.
+
+## 19.1 "Hold the granularity fixed" turns out to be two different instructions
+
+The cluster layer has **two** granularity knobs and they scale differently with `K`:
+`cluster_min_cluster_size` is a **count**, `cluster_min_mass` is a **fraction**. The
+fielded `min_cluster_size = 0` resolves to `max(5, ceil(min_mass·K))`, i.e. 10 at `K = 200`
+and 50 at `K = 1000` — the *fraction* held fixed. B4 asks for the *count* held fixed. Both
+were run, and so was a third that holds **every** knob at its `K = 200` value in absolute
+draws:
+
+| cell | K | `mcs` | `min_mass` | `<n_clusters>` | `<top_mass>` | `<H>` | residual mass |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `K200_mcs10` *(committed)* | 200 | 10 | 0.05 (=10) | 4.92 | 0.388 | 1.431 | 0.271 |
+| `K1000_mcs50` *(committed)* | 1000 | 50 | 0.05 (=50) | 4.09 | 0.390 | 1.193 | 0.349 |
+| `K1000_mcs10` *(B4 literally)* | 1000 | 10 | 0.05 (=50) | **1.20** | 0.221 | 0.455 | **0.791** |
+| `K1000_mcs10_mm01` | 1000 | 10 | 0.01 (=10) | **30.13** | 0.194 | 2.698 | 0.258 |
+
+**Neither pinning produces a comparable partition.** Pinning only the count asks HDBSCAN
+for many small clusters and then lets `min_mass = 0.05` (50 draws at `K = 1000`) fold 79%
+of the mass into the residual bucket — 1.2 reportable clusters per jet. Pinning both in
+absolute draws goes the other way: 30 clusters per jet, and the silhouette precondition
+holds on **0.3%** of jets. The plan item taken literally does not isolate anything, and it
+is reported rather than quietly replaced.
+
+## 19.2 What the decomposition says — and it is not what B4 hoped
+
+Paired per-jet deltas, 600 jets:
+
+| quantity | **more draws** (granularity fixed in absolute draws) | **coarser clustering** (draws fixed) | reading |
+|---|---:|---:|---|
+| `d_mbr` | **−0.0426** [−0.0695, −0.0194] | **+0.0000** | **budget** |
+| `d_nearest_draw` | **−0.0681** [−0.0888, −0.0560] | **+0.0000** | **budget** |
+| `pool_bound` | **−0.2672** [−0.2795, −0.2557] | **+0.0000** | **budget** |
+| `top_mass` | −0.1943 | +0.1962 | confounded |
+| `entropy` | +1.2666 | −1.5045 | confounded |
+| `n_clusters` | +25.21 | −26.04 | confounded |
+| `radius_top` | −0.5105 | +0.4855 | confounded |
+| `residual_mass` | −0.0128 | +0.0910 | confounded |
+| `d_best` | −0.8186 | +1.0585 | confounded |
+| `d_top` | +0.3065 | −0.2986 | confounded |
+
+**The three exact zeros are the design's own check.** `d_mbr`, `d_nearest_draw` and
+`pool_bound` are read off `D` and the linear medoid, which the clustering never touches —
+so a granularity change *must* move them by exactly 0, and it does, to floating point. That
+the same three are the only quantities the decomposition resolves is not a coincidence:
+they are the only ones that are not statements about the partition.
+
+**Every partition statistic is confounded, and worse than "confounded" suggests.** Budget
+and granularity move each of them in **opposite directions by comparable magnitudes**. So
+the committed cross-K pair's small net numbers — `top_mass` +0.0019 [−0.0223, +0.0266],
+`radius_top` −0.0250 [−0.0903, +0.0364], both straddling 0 — are a **near-cancellation of
+two large opposite effects**, not a null. Reading them as "the scalars are budget-stable"
+would be reading a coincidence.
+
+## 19.3 The answer to B4, stated plainly
+
+**G6's cross-K row cannot be un-confounded by choosing a different `min_cluster_size`.**
+There is no setting of that knob at `K = 1000` that reproduces the `K = 200` partition:
+the count convention gives 1.2 clusters, the fraction convention 4.1, the
+absolute-everything convention 30.1, and the target is 4.9. HDBSCAN's partition is not
+scale-invariant in `K` under either knob, because `min_cluster_size` sets the
+mutual-reachability smoothing scale in *points* while the density it smooths sharpens with
+`K`.
+
+What that closes and what it opens:
+
+- **Closed:** `SUMMARY` §4.1(5) as written ("one notebook run … un-confounds G6's cross-K
+  comparison"). It does not, and one more run of it would not either. §2.2's "G6's cross-K
+  row is unscored" **stands**, and now with a reason rather than a caveat.
+- **Not closed:** whether the confidence scalars are budget-stable. Answering it needs a
+  partition rule that is scale-invariant by construction — which is exactly what §4.3(1)
+  of `SUMMARY` proposes independently (stratify by `N` first, cluster only *within* a
+  stratum): the top-level partition is then `q(N|x)`, which does not move with `K` at all.
+  This measurement is an argument **for** that item, arrived at from a different direction.
+- **G6 must never be read on ECE alone**, and this run is the second demonstration in two
+  sections. `K1000_mcs10` is the only cell that "passes" G6 (ECE 0.0355) and it is the one
+  whose Brier **resolution** is lowest (0.0175 against 0.0576 at the committed tier) — a
+  near-constant forecaster, calibrated and useless. Same trap as §18.3.
+
+## 19.4 What more draws actually buy, cleanly separated for the first time
+
+The three budget-attributable rows are worth recording on their own account, because they
+are the first statement in this repo of what `K` buys that is **not** entangled with the
+partition:
+
+- **`d_mbr` improves by −0.0426** [−0.0695, −0.0194] going 200 → 1000 draws. The fielded
+  point estimate genuinely gets closer to truth with a bigger pool — the medoid is
+  restricted to `H = {pool}`, and a larger pool contains better trees.
+- **`d_nearest_draw` improves by −0.0681** and **`pool_bound` tightens by −0.2672**: the
+  posterior's support covers the truth better *and* is resolved more finely.
+
+For scale, `SUMMARY` §2.3 prices the whole N channel at ~0.63 EMD (oracle-N 1.72 vs medoid
+2.35) and calls it unreachable. −0.043 for a 5× budget is about 7% of that, bought with
+compute rather than information — real, and an order of magnitude smaller than the lever it
+is not a substitute for.
