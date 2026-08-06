@@ -372,6 +372,15 @@ both cost a regeneration + retrain and should be costed before being started.
    leaving `dv` at 1.1× has not explained the defect. 3 seeds, `lnz_head="spline"` both
    sides, the usual guards, and `d(MBR)` read with `PLAN_z_aware.md`'s caveat in view.
 
+   **Its relationship to `PLAN_z_aware.md`, and which runs first**, is recorded in both
+   plans — `PLAN_lnz_spline_head.md` §9.5 and `PLAN_z_aware.md` §10 — so it is not
+   re-derived. In one line: that document fixes the **ruler** (the metric's and the closure
+   score's `ln z`-blindness), this fixes the **model** (the factorization), neither
+   substitutes for the other, and the order is z_aware **WP-0 → WP-2 → §7.3 → WP-3/4**
+   because WP-0 is nearly free and may dissolve the `d(MBR)` question outright. Not a hard
+   dependency: §7.3's primary read is ruler-independent, and the two meet at exactly one
+   row — §7.3's `d(MBR)`, which should not be read until the ruler question is settled.
+
    **The caveat against firing, so the call is made with it visible.** `dv`'s miss is small
    (KS 0.026–0.029 vs a 0.0255 critical, 2–13% over) and it is now the *only* failing
    coordinate — `du`, `ln z` and `psi` are all comfortably under. A joint density is the most

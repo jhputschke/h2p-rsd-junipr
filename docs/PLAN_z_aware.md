@@ -377,8 +377,11 @@ The 1000-jet escalation is ~3.3×. All inside a day.
 ## 9. Out of scope — stated so it is not assumed
 
 - **The structural layer** (§2c): a `ln z`-aware cell grid, or the per-node joint coordinate
-  density. `PLAN_lnz_spline_head.md` §7.3 carries the restated trigger and nothing here
-  fires it.
+  density. `PLAN_lnz_spline_head.md` §7.3 owns it and nothing here fires it. **Note its
+  status changed on 2026-08-05**: that document's §9.4 *withdrew* the restated trigger this
+  bullet used to point at and promoted §7.3 from deferred to **indicated**, after a second
+  per-coordinate fix failed. §10 below records how the two documents divide the work and
+  which runs first.
 - **Retraining.** Everything is decode-time on existing checkpoints.
 - **TARP under `+lnz`** — `_tarp_reference_pool` (`eval/calibration.py:206-228`) would have to
   carry reference coordinates, and the truth would move from `yc` to `yraw`, a deliberate
@@ -387,3 +390,42 @@ The 1000-jet escalation is ~3.3×. All inside a day.
   If the regression turns out real (F1/F3), that is a finding about the decode layer, not a
   reason to un-field `lnz_head="spline"` — which was fielded on NLL, PIT and support, on
   numbers this document does not touch.
+
+---
+
+## 10. Relationship to `PLAN_lnz_spline_head.md` §7.3 — the split, and the order
+
+Recorded so it does not have to be re-derived. The two documents look adjacent and change
+**different layers**; §2's three-layer split is exactly the boundary:
+
+| layer | blind because | owner |
+|---|---|---|
+| **(a) selection** | `mbr_coords="+lnz"` appends a constant-zero column; `mbr_weight="z"` is silently `unit` | **this document** |
+| **(b) scoring** | `dlund_mbr` compares cell centres; the `*_cont` block slices `[..., :2]` and has no MBR row | **this document** |
+| **(c) structural** | the grid discretizes `(u, v)`; `ln z` is conditionally independent of `du` by construction, so the identity is encoded nowhere | `PLAN_lnz_spline_head.md` §7.3 |
+
+**This document fixes the ruler; §7.3 fixes the model.** Neither substitutes for the other:
+nothing here can move a coordinate's PIT — that is computed from the model's own CDF and
+never consults `mbr_coords` — and no joint density can make a blind metric see.
+
+**Order: WP-0 → WP-2 → §7.3 → WP-3/WP-4.**
+
+- **WP-0 first** because it is nearly free and may dissolve the question entirely. If there
+  is no regression to explain, `PLAN_lnz_spline_head.md` §6.2's `d(MBR)` caveat evaporates
+  and one of the two open concerns about `lnz_head="spline"` closes at the cost of one
+  decode pass per arm.
+- **WP-2 next regardless of WP-0's verdict.** The silent-zero path is a live trap for
+  whoever next reaches for `mbr_coords="+lnz"` expecting it to do something. Fixing a knob
+  that cannot be switched on is worth doing on its own account.
+- **§7.3 next.** It is the expensive one — a new density *and* retraining, against this
+  document's decode-time-on-existing-checkpoints — and its case rests on the *third*
+  proposed mechanism for `dv` after two were falsified, whereas this document's case rests
+  on a documented code fact. Cheap and certain before expensive and hypothesised.
+- **WP-3/WP-4 last**, and only if WP-0 found a phenomenon.
+
+**Not a hard dependency, and the one place they touch.** §7.3's *primary* pre-registered
+read is `dv`'s marginal PIT, which is ruler-independent — so this document is not a
+prerequisite for §7.3's verdict, and running the two in parallel is defensible. They meet at
+exactly one row: §7.3's `d(MBR)`, which should not be read until the ruler question here is
+settled. `PLAN_lnz_spline_head.md` §6.2 read that row against a blind ruler and had to carry
+a caveat for it; §9.5 there records the same split from the other side.

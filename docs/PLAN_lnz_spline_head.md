@@ -522,7 +522,9 @@ and §8.5(1) is the experiment that separates the two.
 3. **Field `lnz_head="spline"` on its own numbers.** Six seeds, 5/6 below critical, NLL
    better than the control band on every one, support unchanged. It does not depend on any
    of the above.
-4. **Only then §7.3**, under the restated trigger.
+4. ~~**Only then §7.3**, under the restated trigger.~~ — **superseded by §9.4**: the
+   restated trigger is withdrawn and §7.3 is indicated. §9.5 carries its relationship
+   to `PLAN_z_aware.md` and the order the two should run in.
 
 ---
 
@@ -663,3 +665,47 @@ artifact, the fielded product is in good shape on every axis except a 10% miss o
 coordinate's marginal — and "run the expensive structural change for that" is a judgement
 call about how much the joint posterior's correctness is worth, not a conclusion the data
 forces.
+
+## 9.5 How §7.3 relates to `PLAN_z_aware.md`, and which runs first
+
+Recorded here so the ownership split and the ordering do not have to be re-derived. The two
+documents look adjacent — both have `ln z` in the title, both were prompted by findings in
+§6 — and they change **different layers**, by design rather than by accident.
+
+`PLAN_z_aware.md` §2 separates three layers of `ln z`-blindness and claims two:
+
+| layer | what is blind | owner |
+|---|---|---|
+| **(a) selection** | the EMD ground metric spans `(u, v)`; `mbr_coords="+lnz"` appends a **constant-zero** column and changes no distance, and `mbr_weight="z"` is silently identical to `unit` | `PLAN_z_aware.md` |
+| **(b) scoring** | `dlund_mbr` is Euclidean between *cell centres*; the continuous block slices `[..., :2]` and carries no MBR row at all | `PLAN_z_aware.md` |
+| **(c) structural** | the cell grid discretizes `(u, v)` only, and this family keeps `ln z` conditionally independent of `du` by construction, so `ln z = u + v − ln p_T,sum` is documented in prose and encoded nowhere | **§7.3 (this document)** |
+
+Its §9 states the boundary from the other side: the structural layer is out of scope there.
+So one fixes the **ruler** and the other fixes the **model**, and neither substitutes for
+the other — a decode metric cannot move a PIT (that is computed from the model's own CDF),
+and a joint density cannot make a blind metric see.
+
+**The ordering, and it is not symmetric.**
+
+1. **`PLAN_z_aware.md` WP-0 first.** It asks *is there a regression to explain* before any
+   plumbing, costs one decode pass per arm, and may dissolve the question outright — in
+   which case §6.2's `d(MBR)` caveat evaporates and `lnz_head="spline"` is unambiguously
+   fieldable.
+2. **Then its WP-2**, the silent-zero guard, **regardless of WP-0's verdict.** A knob that
+   looks switchable and is not is a trap for whoever next reaches for the obvious fix.
+3. **Then §7.3.**
+4. **Then WP-3/WP-4**, only if WP-0 found a phenomenon.
+
+Three reasons for that order: z_aware is decode-time on existing checkpoints while §7.3
+needs a new density *and* retraining; WP-0 is nearly free and can remove one of the two open
+concerns about the spline; and the two rest on different kinds of evidence — z_aware on a
+documented code fact (the knob is inert), §7.3 on the *third* proposed mechanism for `dv`
+after §8.1 and §9.3 falsified the first two. Spending the cheap and certain one first is the
+risk-adjusted choice.
+
+**The nuance that stops this from becoming a dependency.** §7.3's **primary** pre-registered
+read is `dv`'s marginal PIT, which is computed from the model's own CDF and does not consult
+`mbr_coords` at all. So `PLAN_z_aware.md` is **not** a prerequisite for §7.3's verdict — only
+for reading its decode-side consequences. Running the two in parallel is defensible; they
+converge at exactly one place, §7.3's `d(MBR)` row, which should not be read until the ruler
+question is settled. That is the same trap §6.2 fell into.
