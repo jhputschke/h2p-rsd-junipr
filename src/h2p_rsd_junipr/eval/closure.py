@@ -265,9 +265,10 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     want_mbr = str(dec.get("point_estimator", "map")) in ("mbr", "mbr_n")
     # `decode.mbr_cloud_source="coords"` makes the SELECTION read continuous coordinates
     # (docs/PLAN_z_aware.md §4/WP-3). It only reaches an estimator that builds clouds, so
-    # it is a no-op under `point_estimator="map"` — asserted here rather than left implicit,
-    # because a MAP decode that silently drew K coordinate tables per jet would pay the
-    # whole cost of the switch for none of its effect.
+    # under `point_estimator="map"` it is a no-op and no coordinates are drawn — a MAP
+    # decode that silently drew K tables per jet would pay the whole cost of the switch
+    # for none of its effect. It is not silent in the artifact: `inert_decode_keys` lists
+    # it under the `mbr_` prefix, exactly as it does every other MBR knob.
     cloud_source = str(dec.get("mbr_cloud_source", "cells"))
     needs_coords = bool(want_mbr and cloud_source == "coords")
     # The edit family's emergent-alignment readout (docs/PLAN_EditTransducer.md). Gated on
