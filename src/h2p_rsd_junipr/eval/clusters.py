@@ -219,14 +219,47 @@ def _truth_cloud(item, geom, **cloud_kw):
 
     Built from `yraw` (the continuous truth), not from `yc`: placing the truth at cell
     centres would compare a quantised truth against unquantised draws, and the whole G2'
-    effect is of order the inter-cluster separation, which is a few cells."""
+    effect is of order the inter-cluster separation, which is a few cells.
+
+    **"The same coordinates as the draws" is true only under
+    `decode.mbr_cloud_source="coords"`** — and this docstring says so because the
+    asymmetry was a live defect for the whole v1 campaign (docs/PLAN_z_aware.md §4/WP-3's
+    inset). Under `"cells"` the truth's points are continuous while every draw's are cell
+    centres, so at the default `mbr_weight="kt"` the truth is weighted by
+    `exp(v_continuous)` and the draws by `exp(v_cell_centre)`: a per-point mismatch of
+    `exp(±half_v)` — `exp(±0.1)` at the fielded `n_bins = 30` — plus a systematic Jensen
+    inflation of the truth cloud's total mass, which the EMD charges at `R·|ΔW|`. `d_top`,
+    `d_best`, `d_mbr`, `d_nearest_draw` and gates G2′/G6/G7 all sit on that. Under
+    `"coords"` both sides are finally continuous and the mismatch is zero by construction;
+    `run_cluster_diagnostics` measures `W_truth/W_draw` and `R·|ΔW|` on every jet either
+    way, so the size of the residual is reported rather than assumed."""
     y = np.asarray(item["yraw"].numpy(), dtype=float)
     return lund_cloud([row for row in y], geom, **cloud_kw)
 
 
+def _weight_audit(tc, clouds, R: float) -> dict:
+    """How much total mass the truth cloud carries against the draws' — the A3 audit.
+
+    `W_truth / <W_draw>` is 1.0 when the two sides are built in the same representation.
+    `R·|ΔW|` is what the EMD's imbalance term charges for the difference, and is the
+    number to compare against a typical `d`: a ratio near 1 is not evidence of a small
+    effect until it is priced in the units the metric actually uses."""
+    w_truth = float(np.sum(tc[1]))
+    w_draws = np.array([float(np.sum(w)) for _, w in clouds], dtype=float)
+    nz = w_draws[w_draws > 0]
+    w_draw = float(nz.mean()) if nz.size else float("nan")
+    return {
+        "W_truth": w_truth,
+        "W_draw_mean": w_draw,
+        "W_ratio": (w_truth / w_draw) if w_draw else float("nan"),
+        "R_dW_mean": float(R * np.abs(w_truth - w_draws).mean()) if w_draws.size
+        else float("nan"),
+    }
+
+
 def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200, n_jets=300,
                             decode=None, verbose=True, draws_by_jet=None, null_reps=20,
-                            alpha=0.32, cluster_kwargs=None):
+                            alpha=0.32, cluster_kwargs=None, coords_by_jet=None):
     """Gates G2, G2', G3, G5, G6, G7, G8 and G8' in one pass over held-out jets.
 
     `decode` is a `decode_params(cfg)` dict; the metric settings come from it and are
@@ -235,8 +268,12 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
 
     `draws_by_jet` reuses posterior draws the caller already has — the same pattern as
     `run_closure(draws_by_jet=)` and `mbr_select(draws=)` — which makes this pass exactly
-    PAIRED with the closure table rather than merely comparable to it."""
+    PAIRED with the closure table rather than merely comparable to it. `coords_by_jet` is
+    its coordinate half (`inference.mbr.coords_for_draws`, unfiltered and index-aligned),
+    forwarded into `posterior_distances`; it is required under
+    `decode.mbr_cloud_source="coords"` and drawn here when the caller has none."""
     from ..inference.clusters import assert_cluster_metric_ok
+    from ..inference.mbr import coords_for_draws
 
     dec = dict(decode or {})
     mk = mbr_kwargs_from_decode(dec)
@@ -255,6 +292,10 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
     ck.update(cluster_kwargs or {})
     split = bool(dec.get("cluster_split", False))
     cloud_kw = dict(lnkt_cut=mk["lnkt_cut"], weight=mk["weight"], coords=mk["coords"])
+    # The truth is ALWAYS built from continuous `yraw` rows (`_truth_cloud`), so under
+    # `"coords"` both sides are continuous and the kt-weight mismatch is gone; under
+    # `"cells"` it is still there and `_weight_audit` prices it per jet.
+    cloud_source = str(mk.get("cloud_source", "cells"))
 
     n_jets = min(int(n_jets), len(val_ds))
     rows: list[dict] = []
@@ -266,8 +307,14 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
         draws = (model.sample_batch(xf, nx, K) if draws_by_jet is None else draws_by_jet[i])
         if not draws:
             continue
+        jet_coords = None
+        if coords_by_jet is not None:
+            jet_coords = coords_by_jet[i]
+        elif cloud_source == "coords":
+            jet_coords = coords_for_draws(model, xf, nx, draws)
         _d, clouds, cand_idx, D = posterior_distances(
-            model, xf, nx, draws=draws, geom=geometry, n_candidates=0, **mk)
+            model, xf, nx, draws=draws, geom=geometry, n_candidates=0,
+            coords_by_draw=jet_coords, **mk)
         if not cand_idx:
             continue
         mults = np.array([len(d) for d in draws], dtype=int)
@@ -285,6 +332,7 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
         # --- the truth, and every draw's distance to it ------------------------------
         ny = int(item["ny"])
         tc = _truth_cloud(item, geometry, **cloud_kw)
+        waudit = _weight_audit(tc, clouds, float(mk["R"]))
         dt = lund_emd_matrix([tc], clouds, R=mk["R"], beta=mk["beta"], norm=mk["norm"],
                              periodic_phi=mk["periodic_phi"], phi_col=mk["phi_col"],
                              backend=ck["backend"], geom=geometry)[0]
@@ -347,6 +395,11 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
             "region": cell_region(lead, geometry),
             "ln_pt": float("nan"),
             "K": int(len(draws)),
+            # A3 — the truth/draw weight audit, reported on every jet so the mismatch is
+            # priced rather than assumed small. `W_ratio == 1` and `R_dW_mean == 0` are
+            # what `cloud_source="coords"` buys; under `"cells"` they are the size of the
+            # defect that `d_top` / `d_best` / `d_mbr` / `d_nearest_draw` sit on.
+            **waudit,
         }
         try:  # ln_pt is a registered aux feature, but the jet file may predate the columns
             from ..features import AUX_FEATURES
@@ -366,6 +419,7 @@ def run_cluster_diagnostics(model, val_ds, val_jets, geometry, device, *, K=200,
         "eps_quantile": ck["eps_quantile"], "backend": ck["backend"],
         "cluster_split": bool(split), "resample_to_qn": resample,
         "mbr_R": mk["R"], "mbr_beta": mk["beta"], "mbr_coords": mk["coords"],
+        "mbr_cloud_source": cloud_source, "mbr_weight": mk["weight"],
     }
     metrics["per_jet"] = rows
     return metrics
@@ -500,6 +554,21 @@ def summarise_clusters(rows, stability_rows=None, *, alpha=0.32, verbose=True) -
              for r in rows])),
         # --- G5 ------------------------------------------------------------------
         "top_mass_mc_error": mc_err,
+        # --- A3: the truth/draw weight audit (docs/PLAN_z_aware.md §4/WP-3 inset) ---
+        # `W_ratio` is 1 and `R_dW` is 0 exactly when the truth and the draws are built
+        # in the same representation. Quoted beside `d_nearest_draw_mean`, which is the
+        # scale `R_dW` has to be read against — a charge of 0.05 on a typical d of 1.5 is
+        # a different statement from the same charge on a d of 0.1.
+        "weight_audit": {
+            "W_truth_over_W_draw": _mean(rows, "W_ratio"),
+            "R_dW_mean": _mean(rows, "R_dW_mean"),
+            "W_truth_mean": _mean(rows, "W_truth"),
+            "W_draw_mean": _mean(rows, "W_draw_mean"),
+            "R_dW_over_d_nearest_draw": (
+                _mean(rows, "R_dW_mean") / _mean(rows, "d_nearest_draw")
+                if _mean(rows, "d_nearest_draw") else float("nan")),
+            "matched": bool(abs(_mean(rows, "W_ratio") - 1.0) < 1e-9),
+        },
         # --- G6 ------------------------------------------------------------------
         "G6_reliability": rel,
         "G6_temperature": temp,
@@ -598,6 +667,16 @@ def _print_clusters(m: dict) -> None:
           f"truth unassigned on {m['unassigned_rate']:.1%} (out of the pool's support)")
     print(f"  gate G3: |mass(N=0 draws) - q(0|x)| = {m['G3_empty_mass_vs_q0']:.4f} "
           f"(a metric-convention bug if this is not ~0)")
+    wa = m.get("weight_audit")
+    if wa:
+        print(f"  truth/draw weight audit: W_truth/W_draw = "
+              f"{wa['W_truth_over_W_draw']:.4f}   R|dW| = {wa['R_dW_mean']:.4f}"
+              f"  ({wa['R_dW_over_d_nearest_draw']:.1%} of <d_nearest_draw>)"
+              + ("   -- matched: truth and draws are in the SAME representation"
+                 if wa["matched"] else
+                 "   -- MISMATCHED: the truth is continuous and the draws are cell "
+                 "centres, so\n      the kt weights differ per point (set "
+                 "decode.mbr_cloud_source=coords to remove it)"))
     r, rT = m["G6_reliability"], m["G6_reliability_recalibrated"]
     print(f"  gate G6: ECE = {r['ece']:.4f} raw -> {rT['ece']:.4f} at T = "
           f"{m['G6_temperature']['value']:.3f}   slope = {r['slope']:.2f} +/- "

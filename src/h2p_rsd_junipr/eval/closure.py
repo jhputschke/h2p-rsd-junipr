@@ -183,7 +183,7 @@ def lund_tree_str(obj, title: str, geometry: Geometry, ref=None) -> str:
 
 def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
                 verbose=True, decode=None, continuous=False, draws_by_jet=None,
-                per_jet=False):
+                per_jet=False, coords_by_jet=None):
     """Closure + calibration on held-out jets (cell-level, as the v2 script). Returns
     a metrics dict and (optionally) prints the same summary lines. `decode` is a
     decode_params(cfg) dict threaded into sampling (n_posterior_samples ignored here;
@@ -245,10 +245,31 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
     `mbr_select(draws=)` and `learned_min_emissions(mults=)`. Default None keeps
     today's behaviour, so `h2p-rsd-junipr eval` is untouched. Sharing one sampling pass
     across sections makes their comparisons exactly PAIRED, and makes the run not
-    bit-comparable to one that re-sampled per section."""
+    bit-comparable to one that re-sampled per section.
+
+    `coords_by_jet` is its coordinate half — `coords_by_jet[i]` an UNFILTERED,
+    index-aligned list of `(m_k, 4)` tables from `inference.mbr.coords_for_draws`. Taken
+    once per jet and reused for BOTH the point estimate (`map_or_mbr`'s
+    `coords_by_draw`, which is what `decode.mbr_cloud_source="coords"` selects on) and
+    the `cont_ok` block below, so the two cannot disagree about where a draw sits.
+
+    **The bit-identity hazard, and where it is fenced off** (docs/PLAN_z_aware.md §7.1).
+    This function's own continuous call is *filtered* — `[list(d) for d in draws if
+    len(d)]` — and `sample_coordinates_many` pads to `L_max` over the list it is handed,
+    so an unfiltered call changes the block shape, reorders RNG consumption, and moves
+    `dlund_*_cont` and the psi block. An unfiltered table therefore enters here **only**
+    when the caller supplied one or `decode.mbr_cloud_source="coords"` asked for it; with
+    the switch off the filtered call is still the one taken, byte for byte."""
     dec = dict(decode or {})
     # Either MBR variant produces the same series: a drawn tree selected off the same D.
     want_mbr = str(dec.get("point_estimator", "map")) in ("mbr", "mbr_n")
+    # `decode.mbr_cloud_source="coords"` makes the SELECTION read continuous coordinates
+    # (docs/PLAN_z_aware.md §4/WP-3). It only reaches an estimator that builds clouds, so
+    # it is a no-op under `point_estimator="map"` — asserted here rather than left implicit,
+    # because a MAP decode that silently drew K coordinate tables per jet would pay the
+    # whole cost of the switch for none of its effect.
+    cloud_source = str(dec.get("mbr_cloud_source", "cells"))
+    needs_coords = bool(want_mbr and cloud_source == "coords")
     # The edit family's emergent-alignment readout (docs/PLAN_EditTransducer.md). Gated on
     # the model exposing it, so every other family's metric dict is untouched.
     edit_summary = getattr(model, "edit_summary", None)
@@ -288,6 +309,12 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
             f"draws_by_jet has {len(draws_by_jet)} entries but n_closure={n_closure} jets "
             f"are scored — the shared draws must be aligned with val_ds[0..n_closure)"
         )
+    if coords_by_jet is not None and len(coords_by_jet) < n_closure:
+        raise ValueError(
+            f"coords_by_jet has {len(coords_by_jet)} entries but n_closure={n_closure} "
+            f"jets are scored — the shared coordinates must be aligned with "
+            f"val_ds[0..n_closure), one unfiltered table per draw"
+        )
     for i in range(n_closure):
         item = val_ds[i]
         xf = item["xf"].unsqueeze(0).to(device)
@@ -315,7 +342,17 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
         # blind to them by construction and `p_empty_true` would read a flat 0.0.
         # The point estimate is taken here (not after) for the same reason, and reused
         # by the MBR block below so the `point_estimator="mbr"` path pays for it once.
-        hat = model.map_or_mbr(xf, nx, draws=draws, **dec)
+        # The coordinate half of this jet's pool, taken ONCE and reused by both the point
+        # estimate and the `cont_ok` block. None on the default path, where nothing has
+        # asked for it and the filtered call below is still what runs.
+        jet_coords = None
+        if coords_by_jet is not None:
+            jet_coords = coords_by_jet[i]
+        elif needs_coords:
+            from ..inference.mbr import coords_for_draws
+
+            jet_coords = coords_for_draws(model, xf, nx, draws)
+        hat = model.map_or_mbr(xf, nx, draws=draws, coords_by_draw=jet_coords, **dec)
         empty_true.append(ny_true == 0)
         empty_pred.append(hat.multiplicity == 0)
         post_mean_all.append(float(mults.mean()) if mults.size else 0.0)
@@ -361,12 +398,22 @@ def run_closure(model, val_ds, val_jets, geometry, device, K=200, n_closure=300,
             rows3 = []
             # ONE batched call for the jet's K draws, not K calls: the per-draw hook
             # re-runs encode()/xattn_kv() every time on identical conditioning
-            # (docs/PLAN_prod_test_speedup.md §2).
-            for c in model.sample_coordinates_many(xf, nx, [list(d) for d in draws if len(d)]):
+            # (docs/PLAN_prod_test_speedup.md §2). When `jet_coords` already exists it is
+            # reused rather than re-drawn — one table per jet, feeding the selection and
+            # the ruler alike. That table is UNFILTERED, so it carries the empty draws too;
+            # they contribute no psi and no leading row, exactly as the filtered call's
+            # missing entries did, but the padded block shape (hence the RNG stream)
+            # differs — which is why this substitution stays behind the switch.
+            tables = (jet_coords if jet_coords is not None else
+                      model.sample_coordinates_many(
+                          xf, nx, [list(d) for d in draws if len(d)]))
+            for c in tables:
                 if c is None:      # family has no coordinate density -> stop asking
                     cont_ok = False
                     break
-                arr = c.detach().cpu().double().numpy().reshape(-1, 4)
+                arr = (c.detach().cpu().double().numpy().reshape(-1, 4)
+                       if hasattr(c, "detach") else
+                       np.asarray(c, dtype=float).reshape(-1, 4))
                 # the posterior's own psi resultant, from the same draws (G6's reference)
                 psi_sum["posterior"] += complex(np.exp(1j * arr[:, 3]).sum())
                 psi_n["posterior"] += int(arr.shape[0])

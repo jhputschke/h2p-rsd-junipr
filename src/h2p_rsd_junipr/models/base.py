@@ -390,6 +390,12 @@ def build_model(cfg, geometry: Geometry) -> PosteriorModel:
     if name not in _REGISTRY:
         raise KeyError(f"unknown model {name!r}; registered: {sorted(_REGISTRY)}")
     model = _REGISTRY[name](cfg, geometry)
+    # The registry key this instance was built under. One class serves several families
+    # (`ARJunipr` is v1..v4), so `type(model).__name__` cannot tell them apart — and the
+    # two places that report a family in an error message, `skeleton_search_spec` and
+    # `inference.mbr.coords_for_draws`, both need the distinction: `ar_junipr_v1` has no
+    # coordinate density and v2 does, from the same class.
+    model.model_name = str(name)
     # Read from the config snapshot so a checkpoint carries its own recalibration;
     # `cmd_eval` re-applies it afterwards so a lifted `decode.length_temperature` wins.
     from ..config import decode_params

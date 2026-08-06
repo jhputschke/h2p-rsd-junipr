@@ -142,3 +142,86 @@ def test_default_is_none_everywhere(tiny):
 
     for fn in (run_closure, run_calibration):
         assert inspect.signature(fn).parameters["draws_by_jet"].default is None
+
+
+# ---------------------------------------------------------------------------
+# WP-3 — `coords_by_jet=`, the coordinate half (docs/PLAN_z_aware.md §4/WP-3, §7.1)
+#
+# The largest risk in that work package: `run_closure`'s existing continuous call is
+# FILTERED (`[list(d) for d in draws if len(d)]`) and `sample_coordinates_many` pads to
+# `L_max` over the list it is handed, so an unfiltered call changes the block shape,
+# reorders RNG consumption, and moves `dlund_*_cont` and the psi block. It has to live
+# strictly behind the switch, and this is where that is pinned.
+# ---------------------------------------------------------------------------
+def _coords(model, ds, draws, n=N):
+    from h2p_rsd_junipr.inference.mbr import coords_for_draws
+
+    out = []
+    for i in range(n):
+        item = ds[i]
+        out.append(coords_for_draws(model, item["xf"].unsqueeze(0).to(DEV),
+                                    torch.tensor([item["nx"]], device=DEV), draws[i]))
+    return out
+
+
+def test_run_closure_reuses_the_coordinates_it_is_given(tiny, monkeypatch):
+    """Handed `coords_by_jet`, it must not draw a second table — asserted by making the
+    sampler raise, which is the only way to catch a helper that accepts them and then
+    quietly draws its own."""
+    model, ds, jets, geom = tiny
+    draws = _draws(model, ds)
+    coords = _coords(model, ds, draws)
+
+    def boom(*a, **kw):
+        raise AssertionError("re-drew coordinates despite being handed coords_by_jet")
+
+    monkeypatch.setattr(model, "sample_coordinates_many", boom)
+    m = run_closure(model, ds, jets, geom, DEV, K=K, n_closure=N, verbose=False,
+                    continuous=True, draws_by_jet=draws, coords_by_jet=coords)
+    assert m["n_jets_scored"] == N
+    assert np.isfinite(m["dlund_posterior_geomedian_cont"])
+
+
+def test_with_the_switch_off_the_filtered_call_is_still_taken(tiny, monkeypatch):
+    """The bit-identity hazard, pinned at the call site rather than at the numbers.
+
+    With `mbr_cloud_source` at its default the continuous block must still hand
+    `sample_coordinates_many` the FILTERED list — the empty draws dropped — because that
+    is what every committed `dlund_*_cont` was produced under. Under `"coords"` the same
+    block gets the unfiltered table, which is a different `L_max` and therefore a
+    different RNG stream: correct, deliberate, and exactly why it is opt-in."""
+    model, ds, jets, geom = tiny
+    draws = _draws(model, ds)
+    seen: list[list[int]] = []
+    original = model.sample_coordinates_many
+
+    def spy(xf, nx, d, **kw):
+        seen.append([len(x) for x in d])
+        return original(xf, nx, d, **kw)
+
+    monkeypatch.setattr(model, "sample_coordinates_many", spy)
+    run_closure(model, ds, jets, geom, DEV, K=K, n_closure=N, verbose=False,
+                continuous=True, draws_by_jet=draws)
+    assert seen, "the continuous block did not call the coordinate sampler at all"
+    for lens, d in zip(seen, draws):
+        assert lens == [len(x) for x in d if len(x)], "the call was NOT filtered"
+
+
+def test_short_coords_fail_loudly(tiny):
+    """Same contract as `draws_by_jet`: a truncated list is a silent mis-pairing."""
+    model, ds, jets, geom = tiny
+    draws = _draws(model, ds)
+    with pytest.raises(ValueError, match="coords_by_jet"):
+        run_closure(model, ds, jets, geom, DEV, K=K, n_closure=N, verbose=False,
+                    continuous=True, draws_by_jet=draws,
+                    coords_by_jet=_coords(model, ds, draws, n=N - 3))
+
+
+def test_coords_by_jet_defaults_to_none(tiny):
+    import inspect
+
+    assert inspect.signature(run_closure).parameters["coords_by_jet"].default is None
+    from h2p_rsd_junipr.eval.clusters import run_cluster_diagnostics
+
+    assert (inspect.signature(run_cluster_diagnostics)
+            .parameters["coords_by_jet"].default is None)

@@ -58,6 +58,23 @@ def cloud_columns_needed(coords: str = "lnDR_lnkt", weight: str = "kt") -> int:
     return max(_COORD_GDIM[coords], 3 if weight == "z" else 2)
 
 
+# What a posterior draw becomes before the ground metric sees it (`decode.mbr_cloud_source`).
+CLOUD_SOURCES = ("cells", "coords")
+
+
+def check_cloud_source(cloud_source: str) -> str:
+    """Validate `decode.mbr_cloud_source` and return it — one place, so every entry point
+    rejects a typo identically rather than silently falling back to `"cells"`."""
+    if cloud_source not in CLOUD_SOURCES:
+        raise ValueError(
+            f"unknown mbr_cloud_source={cloud_source!r}; expected one of {list(CLOUD_SOURCES)}. "
+            f"'cells' builds every cloud from the drawn cell CHAIN (the fielded path); "
+            f"'coords' builds it from the continuous coordinate table drawn alongside "
+            f"(`coords_for_draws`), which de-quantizes (u, v) and supplies ln z."
+        )
+    return cloud_source
+
+
 def needs_continuous_coords(coords: str = "lnDR_lnkt", weight: str = "kt") -> bool:
     """Does this decode configuration need something a Lund CELL cannot supply?
 
@@ -84,6 +101,7 @@ def mbr_kwargs_from_decode(decode: dict) -> dict:
         lnkt_cut=decode.get("mbr_lnkt_cut", None),
         weight=str(decode.get("mbr_weight", "kt")),
         coords=str(decode.get("mbr_coords", "lnDR_lnkt")),
+        cloud_source=str(decode.get("mbr_cloud_source", "cells")),
         R=float(decode.get("mbr_R", 8.485)),
         beta=float(decode.get("mbr_beta", 1.0)),
         norm=bool(decode.get("mbr_norm", False)),
@@ -183,6 +201,71 @@ def lund_cloud(draw, geom, *, lnkt_cut=None, weight="kt", coords="lnDR_lnkt"):
     if not pts:
         return np.zeros((0, g), dtype=float), np.zeros((0,), dtype=float)
     return np.asarray(pts, dtype=float), np.asarray(ws, dtype=float)
+
+
+def _as_coord_table(t) -> np.ndarray:
+    """A model's coordinate tensor (or an array) -> a float64 ``(m, 4)`` NumPy table.
+
+    Duck-typed on ``detach`` rather than importing torch: this module is otherwise pure
+    NumPy and the ``point_estimator="map"`` path must keep importing nothing new."""
+    if hasattr(t, "detach"):
+        t = t.detach().cpu().double().numpy()
+    return np.asarray(t, dtype=float).reshape(-1, 4)
+
+
+def coords_for_draws(model, xf, nx, draws) -> list:
+    """One jet's `K` draws -> `K` continuous coordinate tables, **index-aligned**.
+
+    ONE batched `sample_coordinates_many` for the whole pool (the per-draw hook re-runs
+    `encode()` / `xattn_kv()` on identical conditioning every time — 67 of the 109 min of
+    `docs/PLAN_prod_test_speedup.md` §2), returned as float64 `(m_k, 4)` arrays in
+    `features.node_raw` column order `(ln 1/DeltaR, ln kt, ln z, psi)`.
+
+    **Unfiltered.** `draws[k]`'s table is `out[k]`, including the empty draws — an empty
+    draw yields an honest `(0, 4)` and keeps its slot. Filtering is what `run_closure`'s
+    pre-existing continuous block does (`[list(d) for d in draws if len(d)]`) and it is
+    exactly what makes that call unusable here: a cloud list must line up with `draws`
+    position by position or the winner index means nothing. It also changes `L_max`, hence
+    the padded block shape, hence RNG consumption — which is why the unfiltered call lives
+    strictly behind `decode.mbr_cloud_source="coords"` (docs/PLAN_z_aware.md §7.1).
+
+    **Raises by family name** when the family has no coordinate density, rather than
+    returning `None`s for a caller to trip over later: `ar_junipr_v1` samples cell chains
+    and nothing else, so a `"coords"` decode of it is a misconfiguration, not a data state.
+    Same convention as `skeleton_search_spec` (docs/PLAN_z_aware.md §4/WP-3)."""
+    fam = getattr(model, "model_name", None) or type(model).__name__
+    if not getattr(model, "has_continuous_coords", False):
+        raise ValueError(
+            f"decode.mbr_cloud_source='coords' needs continuous coordinates, but the "
+            f"model family {fam!r} ({type(model).__name__}) has "
+            f"has_continuous_coords=False — it samples cell chains and has no "
+            f"q(coords | cells, x) to draw from, so every cloud would be built from "
+            f"placeholders (ln z = 0 means z = 1). Set decode.mbr_cloud_source='cells' "
+            f"for this family."
+        )
+    tables = model.sample_coordinates_many(xf, nx, [list(d) for d in draws])
+    if len(tables) != len(draws):
+        raise ValueError(
+            f"sample_coordinates_many returned {len(tables)} tables for {len(draws)} "
+            f"draws; `coords_for_draws` is index-aligned by contract."
+        )
+    out = []
+    for k, (t, d) in enumerate(zip(tables, draws)):
+        if t is None:
+            raise ValueError(
+                f"model family {fam!r} returned None coordinates for draw {k} while "
+                f"has_continuous_coords is True — the flag and the hook must agree "
+                f"(models/base.py sample_coordinates)."
+            )
+        a = _as_coord_table(t)
+        if a.shape[0] != len(d):
+            raise ValueError(
+                f"coordinate table for draw {k} has {a.shape[0]} rows for a "
+                f"{len(d)}-emission draw; the tables must be index-aligned AND "
+                f"row-aligned with the cell chains they complete."
+            )
+        out.append(a)
+    return out
 
 
 def cloud_to_event(pts, w) -> np.ndarray:
@@ -803,18 +886,56 @@ def _nearest_populated(mults, n_hat: int) -> int:
 # ---------------------------------------------------------------------------
 def posterior_distances(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
                         lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
-                        norm=False, periodic_phi=False, phi_col=-1, backend="pot"):
+                        norm=False, periodic_phi=False, phi_col=-1, backend="pot",
+                        coords_by_draw=None, cloud_source="cells"):
     """Everything both the point estimate and the cluster layer need, computed once.
 
     Returns `(draws, clouds, cand_idx, D)`. Factored out of `mbr_select` so `predict_set`
     and the WP4a diagnostics read the SAME `D` the point estimate was selected from —
     recomputing it would be `K^2` EMD solves for a matrix that is already in hand, and
-    (worse) it would let the two products drift apart under a config change."""
+    (worse) it would let the two products drift apart under a config change.
+
+    `cloud_source` (`decode.mbr_cloud_source`) picks what each draw becomes:
+
+      * ``"cells"`` — the drawn cell chain, i.e. cell centres. The fielded path, and the
+        one every committed artifact was produced under.
+      * ``"coords"`` — the continuous coordinate table in `coords_by_draw[k]`, which
+        de-quantizes `(u, v)` *and* supplies `ln z` / `psi`. This is what makes
+        `mbr_coords="+lnz"` and `mbr_weight="z"` functional instead of fatal
+        (docs/PLAN_z_aware.md §4/WP-3, measured in §13).
+
+    **It never draws coordinates itself, deliberately.** Under `"coords"` it RAISES when
+    `coords_by_draw` is missing, naming `coords_for_draws`. The draw has to happen once,
+    in the caller, so the same array feeds both the clouds and the winner's
+    `describe_cells(..., win_coords)` — otherwise the tree that gets shown sits at
+    coordinates its own cloud never saw, and a second draw is a second RNG consumption
+    nobody asked for.
+
+    Under `"cells"`, `coords_by_draw` is **ignored** and the result is bit-identical to
+    not passing it: two notebook generators already supply it for winner decoration."""
+    check_cloud_source(cloud_source)
     if draws is None:
         draws = model.sample_batch(xf, nx, n_samples)
     K = len(draws)
+    if cloud_source == "coords":
+        if coords_by_draw is None:
+            raise ValueError(
+                "posterior_distances(cloud_source='coords') needs `coords_by_draw` and "
+                "will not draw it: call `coords_for_draws(model, xf, nx, draws)` once in "
+                "the caller and pass the SAME array here and to describe_cells, so the "
+                "reported tree sits at the coordinates its cloud was built from."
+            )
+        if len(coords_by_draw) != K:
+            raise ValueError(
+                f"coords_by_draw has {len(coords_by_draw)} entries for {K} draws; "
+                f"`coords_for_draws` is unfiltered and index-aligned by contract, and an "
+                f"empty draw keeps its slot as a (0, 4) table."
+            )
+        sources = coords_by_draw
+    else:
+        sources = draws
     clouds_S = [
-        lund_cloud(d, geom, lnkt_cut=lnkt_cut, weight=weight, coords=coords) for d in draws
+        lund_cloud(s, geom, lnkt_cut=lnkt_cut, weight=weight, coords=coords) for s in sources
     ]
     if n_candidates and 0 < n_candidates < K:
         cand_idx = list(range(n_candidates))
@@ -828,11 +949,22 @@ def posterior_distances(model, xf, nx, *, draws=None, geom, n_samples=200, n_can
     return draws, clouds_S, cand_idx, D
 
 
+def _draw_coords_once(model, xf, nx, draws, coords_by_draw, cloud_source):
+    """The ONE place the coordinate table for a jet is drawn, shared by the three
+    estimators. Returns `coords_by_draw` unchanged under `"cells"`, or when the caller
+    already supplied one — so a double draw is structurally impossible rather than merely
+    avoided by discipline (docs/PLAN_z_aware.md §4/WP-3)."""
+    check_cloud_source(cloud_source)
+    if cloud_source != "coords" or coords_by_draw is not None:
+        return coords_by_draw
+    return coords_for_draws(model, xf, nx, draws)
+
+
 def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
                lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
                norm=False, periodic_phi=False, phi_col=-1, backend="pot",
-               resample_to_qn=False, coords_by_draw=None, diagnostic_losses=(),
-               loss_quantile=0.10):
+               resample_to_qn=False, coords_by_draw=None, cloud_source="cells",
+               diagnostic_losses=(), loss_quantile=0.10):
     """Sampling-based MBR (Eikema & Aziz, EMNLP 2022): pick the drawn tree of least
     mean perturbative-Lund EMD to the ``K`` draws.
 
@@ -844,6 +976,14 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     expectation still runs over all ``K`` draws. ``resample_to_qn=True`` reweights the
     support to the calibrated ``q(N|x)`` marginal (``_qn_importance_weights``), an
     opt-in decode-layer exposure-bias correction; off keeps the plain mean risk.
+
+    ``cloud_source="coords"`` (``decode.mbr_cloud_source``) builds every cloud from the
+    jet's continuous coordinate table instead of from cell centres, which is what makes
+    ``coords="+lnz"`` and ``weight="z"`` functional rather than fatal. The table is drawn
+    **once**, here, and the same array feeds both the clouds and the winner's
+    ``describe_cells`` — so the tree that comes back sits at exactly the coordinates its
+    cloud was built from. Off by default and bit-identical off (docs/PLAN_z_aware.md
+    §4/WP-3; measured in §13, where it recovers 47-70% of the ``|Δ ln z|`` ceiling).
 
     The winner keeps **its own** continuous coordinates (docs/PLAN_prod_test_v1.md
     WP-C.1): ``describe_cells`` draws them, or ``coords_by_draw`` supplies the ones the
@@ -860,10 +1000,18 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
     achieved mean distance" for all fourteen of its consumers and no config field, serving
     surface or config-hash churn is involved. It costs zero additional EMD calls: every
     loss is another reduction over the `D` already built."""
+    if check_cloud_source(cloud_source) == "coords" and draws is None:
+        # Hoisted out of `posterior_distances` only on this branch, because the
+        # coordinates have to be drawn from the same `draws` the clouds are built from.
+        # The default path still samples inside `posterior_distances`, at the same point
+        # in the RNG stream it always did.
+        draws = model.sample_batch(xf, nx, n_samples)
+    coords_by_draw = _draw_coords_once(model, xf, nx, draws, coords_by_draw, cloud_source)
     draws, clouds_S, cand_idx, D = posterior_distances(
         model, xf, nx, draws=draws, geom=geom, n_samples=n_samples, n_candidates=n_candidates,
         lnkt_cut=lnkt_cut, weight=weight, coords=coords, R=R, beta=beta, norm=norm,
         periodic_phi=periodic_phi, phi_col=phi_col, backend=backend,
+        coords_by_draw=coords_by_draw, cloud_source=cloud_source,
     )
     if not cand_idx:  # no draws at all -> honest empty tree (reflects the posterior)
         pe = model.describe_cells(xf, nx, [])
@@ -902,8 +1050,8 @@ def mbr_select(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0
 def mbr_select_stratified(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
                           lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
                           norm=False, periodic_phi=False, phi_col=-1, backend="pot",
-                          resample_to_qn=False, coords_by_draw=None, n_quantile=0.5,
-                          D=None):
+                          resample_to_qn=False, coords_by_draw=None, cloud_source="cells",
+                          n_quantile=0.5, D=None):
     """Two-stage point estimate: decide **N** from the calibrated marginal, then the
     **conditional medoid** within that stratum (`decode.point_estimator="mbr_n"`).
 
@@ -944,11 +1092,14 @@ def mbr_select_stratified(model, xf, nx, *, draws=None, geom, n_samples=200, n_c
     from .length import quantile_floor
 
     if D is None:
+        if check_cloud_source(cloud_source) == "coords" and draws is None:
+            draws = model.sample_batch(xf, nx, n_samples)
+        coords_by_draw = _draw_coords_once(model, xf, nx, draws, coords_by_draw, cloud_source)
         draws, _clouds, cand_idx, D = posterior_distances(
             model, xf, nx, draws=draws, geom=geom, n_samples=n_samples,
             n_candidates=n_candidates, lnkt_cut=lnkt_cut, weight=weight, coords=coords,
             R=R, beta=beta, norm=norm, periodic_phi=periodic_phi, phi_col=phi_col,
-            backend=backend,
+            backend=backend, coords_by_draw=coords_by_draw, cloud_source=cloud_source,
         )
         if not cand_idx:  # no draws at all -> honest empty tree (reflects the posterior)
             pe = model.describe_cells(xf, nx, [])
@@ -987,7 +1138,7 @@ def mbr_select_stratified(model, xf, nx, *, draws=None, geom, n_samples=200, n_c
 def mbr_cluster_set(model, xf, nx, *, draws=None, geom, n_samples=200, n_candidates=0,
                     lnkt_cut=None, weight="kt", coords="lnDR_lnkt", R=8.485, beta=1.0,
                     norm=False, periodic_phi=False, phi_col=-1, backend="pot",
-                    resample_to_qn=False, coords_by_draw=None,
+                    resample_to_qn=False, coords_by_draw=None, cloud_source="cells",
                     method="hdbscan", min_cluster_size=0, min_mass=0.05,
                     eps_quantile=0.10, split=False, screening_only=False,
                     set_threshold=None, fitted_under=None, D=None,
@@ -1051,10 +1202,14 @@ def mbr_cluster_set(model, xf, nx, *, draws=None, geom, n_samples=200, n_candida
         geom,
     )
     if D is None:
+        if check_cloud_source(cloud_source) == "coords" and draws is None:
+            draws = model.sample_batch(xf, nx, n_samples)
+        coords_by_draw = _draw_coords_once(model, xf, nx, draws, coords_by_draw, cloud_source)
         draws, _clouds, cand_idx, D = posterior_distances(
             model, xf, nx, draws=draws, geom=geom, n_samples=n_samples, n_candidates=0,
             lnkt_cut=lnkt_cut, weight=weight, coords=coords, R=R, beta=beta, norm=norm,
             periodic_phi=periodic_phi, phi_col=phi_col, backend=backend,
+            coords_by_draw=coords_by_draw, cloud_source=cloud_source,
         )
         if not cand_idx:  # no draws at all -> an honestly empty set, not a fabricated one
             return PosteriorSetEstimate(

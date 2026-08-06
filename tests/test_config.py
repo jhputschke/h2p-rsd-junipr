@@ -187,6 +187,7 @@ def test_decode_params_full():
                         "empty_threshold",
                         "point_estimator", "mbr_backend",
                         "mbr_n_candidates", "mbr_lnkt_cut", "mbr_weight", "mbr_coords",
+                        "mbr_cloud_source",
                         "mbr_R", "mbr_beta", "mbr_norm", "mbr_periodic_phi", "mbr_phi_col",
                         "mbr_resample_to_qn",
                         # posterior cluster layer (docs/PLAN_PosteriorClusters.md WP1-WP3)
@@ -207,6 +208,12 @@ def test_decode_params_full():
     assert dec["cluster_split"] is False
     assert dec["point_estimator"] == "map" and dec["mbr_backend"] == "pot"
     assert dec["mbr_lnkt_cut"] is None  # None default preserved through the tolerant read
+    # WP-3's switch: the fielded selection builds clouds from cell CHAINS, and "coords" is
+    # opt-in. It is in the exact set above deliberately — the assertion fails without it,
+    # which is what makes "a new decode knob lands in the config hash and in
+    # metrics['decode']" a checked property rather than a convention
+    # (docs/PLAN_z_aware.md §4/WP-3).
+    assert dec["mbr_cloud_source"] == "cells"
 
 
 def test_decode_params_tolerates_old_snapshot():
@@ -219,6 +226,9 @@ def test_decode_params_tolerates_old_snapshot():
     # the MBR keys backfill too (a snapshot predating them must not raise)
     assert dec["point_estimator"] == "map" and dec["mbr_backend"] == "pot"
     assert dec["mbr_lnkt_cut"] is None and dec["mbr_R"] == pytest.approx(8.485)
+    # ...including `mbr_cloud_source`: every committed artifact predates it, and it must
+    # backfill to the path those artifacts were produced under, not to the new one.
+    assert dec["mbr_cloud_source"] == "cells"
     # and a config with no decode block at all
     assert decode_params(OmegaConf.create({}))["min_emissions"] == 1
     assert decode_params(OmegaConf.create({}))["length_floor_quantile"] == pytest.approx(0.0)

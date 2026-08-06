@@ -350,6 +350,23 @@ class DecodeConfig:
     mbr_lnkt_cut: float | None = None   # None => inherit the geometry ln_kt floor (metric support)
     mbr_weight: str = "kt"             # kt | z | unit — Lund-cloud point weights
     mbr_coords: str = "lnDR_lnkt"      # lnDR_lnkt | +lnz | +psi — ground-metric columns (gdim follows)
+    mbr_cloud_source: str = "cells"    # cells | coords — WHAT each posterior draw becomes before
+    #                                    the ground metric sees it. "cells" is the fielded path:
+    #                                    a draw is a cell CHAIN, so its points are cell centres and
+    #                                    ln z / psi do not exist (mbr_coords="+lnz" and
+    #                                    mbr_weight="z" therefore RAISE). "coords" draws the
+    #                                    continuous coordinate table alongside the cells
+    #                                    (`inference.mbr.coords_for_draws`) and builds every cloud
+    #                                    from it, which de-quantizes (u, v) AND supplies ln z.
+    #                                    EXPLICIT rather than implicit: two notebook generators
+    #                                    already pass `coords_by_draw` for winner decoration, so
+    #                                    "coordinates were supplied => use them" would silently
+    #                                    move their numbers, and the continuous-2-D arm of
+    #                                    docs/PLAN_z_aware.md §12.1 would be inexpressible.
+    #                                    Measured: docs/PLAN_z_aware.md §13 — `+lnz` under
+    #                                    "coords" recovers 47-70% of the |Δ ln z| ceiling, 8/8 CIs
+    #                                    excluding 0. NOT the default decode (§13.3: the fielded
+    #                                    cell-centre `dlund_mbr` pays +0.0042).
     mbr_R: float = 8.485               # imbalance-penalty radius ~ Lund-plane diameter (default geometry)
     mbr_beta: float = 1.0              # ground-distance exponent (1.0 == KMT 1-Wasserstein EMD)
     mbr_norm: bool = False             # energyflow weight normalisation; off keeps the imbalance term
@@ -712,6 +729,7 @@ _DECODE_DEFAULTS: dict = {
     "mbr_lnkt_cut": None,
     "mbr_weight": "kt",
     "mbr_coords": "lnDR_lnkt",
+    "mbr_cloud_source": "cells",
     "mbr_R": 8.485,
     "mbr_beta": 1.0,
     "mbr_norm": False,

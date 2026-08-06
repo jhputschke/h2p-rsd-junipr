@@ -1089,3 +1089,220 @@ def test_mbr_n_is_recognised_by_every_point_estimator_consumer():
            "cluster_posterior": True, "set_alpha": 0.32}
     inert = {e["key"] for e in inert_decode_keys(_Stub(), dec)}
     assert not (inert & {"mbr_backend", "mbr_R"}), "mbr_* knobs are LIVE under mbr_n"
+
+
+# ---------------------------------------------------------------------------
+# WP-3 — the coordinate threading (docs/PLAN_z_aware.md §4/WP-3, PLAN_next_steps.md A1/A2)
+#
+# `decode.mbr_cloud_source="coords"` is what makes `mbr_coords="+lnz"` and
+# `mbr_weight="z"` functional rather than fatal: every cloud is built from the continuous
+# coordinate table drawn alongside the cells instead of from cell centres. §13 measured
+# what it buys — 47-70% of the `|d ln z|` ceiling, 8/8 CIs excluding 0 — and §13.4 fixed
+# how it ships: default off, and bit-identical off.
+# ---------------------------------------------------------------------------
+def _v2(geom=None):
+    return build_model(load_config(["model=ar_junipr_v2", "encoder=gru"]),
+                       geom or GEOM).eval()
+
+
+def test_check_cloud_source_rejects_a_typo():
+    """A misspelled source must not fall back to `"cells"` and quietly measure the
+    fielded thing under a new label — the exact failure mode `+lnz`'s inert years were."""
+    assert mbr.check_cloud_source("cells") == "cells"
+    assert mbr.check_cloud_source("coords") == "coords"
+    with pytest.raises(ValueError, match="unknown mbr_cloud_source"):
+        mbr.check_cloud_source("continuous")
+
+
+def test_coords_for_draws_is_index_aligned_and_unfiltered(batch):
+    """`out[k]` completes `draws[k]`, empty draws included.
+
+    `run_closure`'s pre-existing continuous block filters (`if len(d)`), which is exactly
+    what makes that call unusable for a cloud list: a winner index into a filtered list
+    points at a different draw. An empty draw here keeps its slot as an honest `(0, 4)`."""
+    xf, nx, geom = _jet(batch)
+    model = _v2(geom)
+    draws = [[12, 34], [], [5], [], [9, 27, 3]]
+    out = mbr.coords_for_draws(model, xf, nx, draws)
+    assert len(out) == len(draws)
+    for tbl, d in zip(out, draws):
+        assert tbl.shape == (len(d), 4) and tbl.dtype == np.float64
+    assert out[1].shape == (0, 4) and out[3].shape == (0, 4)
+
+
+def test_coords_for_draws_raises_by_family_name(batch):
+    """`ar_junipr_v1` samples cell chains and has no `q(coords | cells, x)` at all, so a
+    `"coords"` decode of it is a misconfiguration rather than a data state. The message
+    names the FAMILY, not the class: `ARJunipr` serves v1..v4 and only v1 lacks the head."""
+    xf, nx, geom = _jet(batch)
+    v1 = build_model(load_config(["model=ar_junipr_v1", "encoder=gru"]), geom).eval()
+    assert v1.has_continuous_coords is False
+    with pytest.raises(ValueError, match="ar_junipr_v1"):
+        mbr.coords_for_draws(v1, xf, nx, [[12, 34]])
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_posterior_distances_never_draws_and_says_so(batch):
+    """Under `"coords"` it RAISES for the missing table, naming `coords_for_draws`.
+
+    Drawing here would be a second RNG consumption AND would place the reported tree at
+    coordinates its own cloud never saw — the whole reason the draw is hoisted into the
+    estimator."""
+    xf, nx, geom = _jet(batch)
+    model = _v2(geom)
+    draws = [[12, 34], [5, 9], [40]]
+    with pytest.raises(ValueError, match="coords_for_draws"):
+        mbr.posterior_distances(model, xf, nx, draws=draws, geom=geom,
+                                cloud_source="coords", backend="pot")
+    # ...and a table of the wrong length is caught rather than zipped short
+    coords = mbr.coords_for_draws(model, xf, nx, draws)
+    with pytest.raises(ValueError, match="index-aligned"):
+        mbr.posterior_distances(model, xf, nx, draws=draws, geom=geom,
+                                cloud_source="coords", coords_by_draw=coords[:2],
+                                backend="pot")
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_coords_source_dequantizes_to_the_supplied_uv(batch):
+    """`"cells"` puts every point at a cell CENTRE; `"coords"` puts it at the drawn
+    `(u, v)`. That de-quantization is a second change riding along with `ln z`, which is
+    why §12.1 insisted on a `cont-2D` arm to attribute the gain."""
+    xf, nx, geom = _jet(batch)
+    model = _v2(geom)
+    draws = [[12, 34], [5, 9], [40]]
+    coords = mbr.coords_for_draws(model, xf, nx, draws)
+    _d, cl_cells, _c, _D = mbr.posterior_distances(
+        model, xf, nx, draws=draws, geom=geom, cloud_source="cells",
+        lnkt_cut=-1e9, backend="pot")
+    _d, cl_coords, _c, _D = mbr.posterior_distances(
+        model, xf, nx, draws=draws, geom=geom, cloud_source="coords",
+        coords_by_draw=coords, lnkt_cut=-1e9, backend="pot")
+    assert np.allclose(cl_cells[0][0], [geom.cell_center(c) for c in draws[0]])
+    assert np.allclose(cl_coords[0][0], coords[0][:, :2])
+    assert not np.allclose(cl_coords[0][0], cl_cells[0][0])   # genuinely off the grid
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_coords_supplied_under_cells_is_bit_identical(batch):
+    """Two notebook generators already pass `coords_by_draw` for winner decoration. If
+    supplying it silently switched the cloud source, their published numbers would move —
+    which is why the switch is EXPLICIT and this is the test that pins it."""
+    xf, nx, geom = _jet(batch)
+    model = _v2(geom)
+    draws = [[12, 34], [5, 9], [40], [7, 12, 34]]
+    coords = mbr.coords_for_draws(model, xf, nx, draws)
+    kw = dict(geom=geom, backend="pot", lnkt_cut=-1e9)
+    _d, cl_a, ci_a, D_a = mbr.posterior_distances(model, xf, nx, draws=draws, **kw)
+    _d, cl_b, ci_b, D_b = mbr.posterior_distances(model, xf, nx, draws=draws,
+                                                  coords_by_draw=coords, **kw)
+    assert ci_a == ci_b and np.array_equal(D_a, D_b)
+    for (pa, wa), (pb, wb) in zip(cl_a, cl_b):
+        assert np.array_equal(pa, pb) and np.array_equal(wa, wb)
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+@pytest.mark.parametrize("coords,weight", [("+lnz", "kt"), ("lnDR_lnkt", "z"),
+                                           ("+psi", "kt")])
+def test_the_knobs_work_under_coords_and_still_raise_under_cells(batch, coords, weight):
+    """A1's definition of done, clause 1. `lund_cloud`'s WP-2 guard is unchanged — a cell
+    chain still cannot supply `ln z` — and `"coords"` is the representation that can."""
+    xf, nx, geom = _jet(batch)
+    model = _v2(geom)
+    draws = [[12, 34], [5, 9], [40]]
+    dcoords = mbr.coords_for_draws(model, xf, nx, draws)
+    kw = dict(geom=geom, backend="pot", lnkt_cut=-1e9, coords=coords, weight=weight,
+              R=20.0)
+    with pytest.raises(ValueError, match="CELL CHAIN"):
+        mbr.posterior_distances(model, xf, nx, draws=draws, cloud_source="cells", **kw)
+    _d, cl, _c, D = mbr.posterior_distances(model, xf, nx, draws=draws,
+                                            cloud_source="coords",
+                                            coords_by_draw=dcoords, **kw)
+    gdim = mbr._COORD_GDIM[coords]
+    assert cl[0][0].shape == (len(draws[0]), gdim)
+    assert np.isfinite(D).all() and D.shape == (len(draws), len(draws))
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_coordinates_are_drawn_exactly_once_per_jet(batch, monkeypatch):
+    """One batched `sample_coordinates_many` for the whole pool, feeding both the clouds
+    and the winner's `describe_cells`. A second draw would be a second RNG consumption
+    *and* would move the reported tree off its own cloud."""
+    xf, nx, geom = _jet(batch)
+    model = _v2(geom)
+    calls = {"n": 0}
+    original = model.sample_coordinates_many
+
+    def counted(*a, **k):
+        calls["n"] += 1
+        return original(*a, **k)
+
+    monkeypatch.setattr(model, "sample_coordinates_many", counted)
+    draws = [[12, 34], [5, 9], [40], [7, 12, 34]]
+    pe = mbr.mbr_select(model, xf, nx, draws=draws, geom=geom, backend="pot",
+                        cloud_source="coords", coords="+lnz", R=20.0, lnkt_cut=-1e9)
+    assert calls["n"] == 1, f"coordinates drawn {calls['n']} times, not once"
+    assert pe.estimator == "mbr"
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_the_winner_is_reported_at_the_rows_its_cloud_used(batch):
+    """The tree that comes back sits at exactly the coordinates its cloud was built from.
+
+    Computed independently: build `D` from the same tables, take the argmin by hand, and
+    require the point estimate's node rows to be that table."""
+    xf, nx, geom = _jet(batch)
+    model = _v2(geom)
+    draws = [[12, 34], [5, 9], [40], [7, 12, 34]]
+    coords = mbr.coords_for_draws(model, xf, nx, draws)
+    kw = dict(geom=geom, backend="pot", lnkt_cut=-1e9, coords="+lnz", R=20.0)
+    _d, _cl, cand, D = mbr.posterior_distances(
+        model, xf, nx, draws=draws, cloud_source="coords", coords_by_draw=coords, **kw)
+    win = cand[int(np.argmin(D.mean(axis=1)))]
+    pe = mbr.mbr_select(model, xf, nx, draws=draws, cloud_source="coords",
+                        coords_by_draw=coords, **kw)
+    assert [n.cell for n in pe.nodes] == list(draws[win])
+    got = np.array([[n.ln_invDelta, n.ln_kt, n.ln_z, n.psi] for n in pe.nodes])
+    assert np.allclose(got, coords[win], atol=1e-6)
+    assert pe.coords_source == "sample"
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_mbr_select_is_bit_identical_with_the_switch_off(batch):
+    """The standing discipline (§13.4 clause 1). `cloud_source="cells"` is what every
+    committed artifact was produced under, so the default path must not move at all."""
+    xf, nx, geom = _jet(batch)
+    model = _v2(geom)
+    draws = [[12, 34], [5, 9], [40], [7, 12, 34]]
+    kw = dict(geom=geom, backend="pot", lnkt_cut=-1e9)
+    a = mbr.mbr_select(model, xf, nx, draws=draws, **kw)
+    b = mbr.mbr_select(model, xf, nx, draws=draws, cloud_source="cells", **kw)
+    assert a.risk == b.risk and a.multiplicity == b.multiplicity
+    assert [n.cell for n in a.nodes] == [n.cell for n in b.nodes]
+
+
+@pytest.mark.skipif(not POT_OK, reason="POT not installed")
+def test_the_three_estimators_all_take_the_switch(batch):
+    """`mbr_select`, `mbr_select_stratified` and `mbr_cluster_set` each draw the table
+    once, in their own `if needs_coords` block — so none of them can reach
+    `posterior_distances` without one and raise the developer-facing error at runtime."""
+    xf, nx, geom = _jet(batch)
+    model = _v2(geom)
+    draws = [[12, 34], [5, 9], [40], [7, 12, 34]]
+    kw = dict(geom=geom, backend="pot", lnkt_cut=-1e9, coords="+lnz", R=20.0,
+              cloud_source="coords")
+    pe = mbr.mbr_select(model, xf, nx, draws=draws, **kw)
+    st = mbr.mbr_select_stratified(model, xf, nx, draws=draws, **kw)
+    cs = mbr.mbr_cluster_set(model, xf, nx, draws=draws, method="pam", **kw)
+    assert pe.estimator == "mbr" and st.estimator == "mbr_n"
+    assert cs.members and all(m.estimator == "cluster" for m in cs.members)
+
+
+def test_build_model_stamps_the_family_name():
+    """One class serves `ar_junipr_v1..v4`, so `type(model).__name__` cannot tell them
+    apart — and two error paths (`skeleton_search_spec`, `coords_for_draws`) report a
+    family. `skeleton_search_spec`'s `getattr(self, 'model_name', '?')` printed a literal
+    '?' until this was set."""
+    for name in ("ar_junipr_v1", "ar_junipr_v2", "cinn"):
+        enc = "deepsets" if name == "cinn" else "gru"
+        m = build_model(load_config([f"model={name}", f"encoder={enc}"]), GEOM)
+        assert m.model_name == name

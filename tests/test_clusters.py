@@ -594,3 +594,114 @@ def test_pool_coverage_bound_handles_the_degenerate_pool():
     # ...and the off-diagonal must not be poisoned by the self-distance mask
     D, _a, _b = _two_lobe()
     assert np.isfinite(cl.pool_coverage_bound(D))
+
+
+# ---------------------------------------------------------------------------
+# WP-3 / A3 — the truth and the draws in the SAME representation
+# (docs/PLAN_z_aware.md §4/WP-3 inset, docs/PLAN_next_steps.md A2/A3)
+#
+# `_truth_cloud` has always built the truth from the continuous `yraw` rows while every
+# DRAW cloud came from cell centres. Under the default `mbr_weight="kt"` that weights the
+# truth by `exp(v_continuous)` and the draws by `exp(v_cell_centre)` — a per-point
+# mismatch plus a Jensen inflation of the truth's total mass, which the EMD charges at
+# `R*|dW|`. `d_top`, `d_best`, `d_mbr`, `d_nearest_draw` and gates G2'/G6/G7 all sit on it.
+# `mbr_cloud_source="coords"` removes it as a side effect, and these tests pin BOTH the
+# defect and its fix, so neither can regress unnoticed.
+# ---------------------------------------------------------------------------
+def test_R_guard_is_coords_dependent(monkeypatch):
+    """The same `R` can be admissible at 2-D and inadmissible at `+lnz`.
+
+    `assert_cluster_metric_ok` already reads `mbr_coords`; this pins that it does, because
+    WP-3 is what finally makes a caller set that knob to something other than the default —
+    and an `R` chosen for the 2-D diameter is the first thing that would silently break."""
+    d2 = cl.ground_diameter(GEOM, "lnDR_lnkt")
+    d3 = cl.ground_diameter(GEOM, "+lnz")
+    assert d3 > d2
+    R = 0.5 * (d2 / 2.0 + d3 / 2.0)              # clears the 2-D bound, misses the 3-D one
+    cl.assert_cluster_metric_ok({"mbr_R": R, "mbr_coords": "lnDR_lnkt"}, GEOM)
+    with pytest.raises(ValueError, match="ground diameter"):
+        cl.assert_cluster_metric_ok({"mbr_R": R, "mbr_coords": "+lnz"}, GEOM)
+
+
+@pytest.mark.skipif(not _POT_OK, reason="POT not installed")
+def test_truth_and_draws_share_a_representation_only_under_coords(small_jets):
+    """`|W_truth - W_draw| / W` is ~0 under `"coords"` and demonstrably nonzero under
+    `"cells"` — the defect and the fix in one assertion.
+
+    Constructed so the comparison is exact: the "draws" ARE the truth's own cells, so any
+    residual weight difference is the representation and nothing else."""
+    from h2p_rsd_junipr.data.dataset import MatchedLundDataset
+    from h2p_rsd_junipr.eval.clusters import _truth_cloud, _weight_audit
+    from h2p_rsd_junipr.inference.mbr import lund_cloud
+
+    geom = Geometry()
+    ds = MatchedLundDataset(small_jets, geom)
+    item = next(ds[i] for i in range(len(ds)) if int(ds[i]["ny"]) >= 2)
+    yraw = np.asarray(item["yraw"].numpy(), dtype=float)
+    cells = [int(c) for c in item["yc"].tolist()]
+    kw = dict(lnkt_cut=-1e9, weight="kt", coords="lnDR_lnkt")
+
+    tc = _truth_cloud(item, geom, **kw)
+    cells_cloud = lund_cloud(cells, geom, **kw)
+    coords_cloud = lund_cloud([row for row in yraw], geom, **kw)
+
+    mismatched = _weight_audit(tc, [cells_cloud], R=8.485)
+    matched = _weight_audit(tc, [coords_cloud], R=8.485)
+    assert matched["W_ratio"] == pytest.approx(1.0, abs=1e-12)
+    assert matched["R_dW_mean"] == pytest.approx(0.0, abs=1e-9)
+    # ...and the "cells" side is NOT ~0: the truth carries a different total mass from the
+    # cell-centre representation of the very same emissions.
+    assert abs(mismatched["W_ratio"] - 1.0) > 1e-6
+    assert mismatched["R_dW_mean"] > 1e-6
+
+
+@pytest.mark.skipif(not _POT_OK, reason="POT not installed")
+def test_truth_and_draws_are_both_three_dimensional_under_lnz(small_jets):
+    """Under `+lnz` the truth's third column is its real `ln z` and so is every draw's —
+    both non-constant. Before WP-3 the draw side was the constant 0 the adapter invented,
+    which is what made `+lnz` measure 2-D numbers under a 3-D label."""
+    from h2p_rsd_junipr.data.dataset import MatchedLundDataset
+    from h2p_rsd_junipr.eval.clusters import _truth_cloud
+    from h2p_rsd_junipr.inference.mbr import lund_cloud
+
+    geom = Geometry()
+    ds = MatchedLundDataset(small_jets, geom)
+    item = next(ds[i] for i in range(len(ds)) if int(ds[i]["ny"]) >= 3)
+    yraw = np.asarray(item["yraw"].numpy(), dtype=float)
+    kw = dict(lnkt_cut=-1e9, weight="kt", coords="+lnz")
+
+    tpts, _ = _truth_cloud(item, geom, **kw)
+    dpts, _ = lund_cloud([row for row in yraw], geom, **kw)
+    assert tpts.shape[1] == 3 and dpts.shape[1] == 3
+    assert tpts[:, 2].std() > 0 and dpts[:, 2].std() > 0
+    # the cell-chain representation cannot even be asked for the third column
+    with pytest.raises(ValueError, match="CELL CHAIN"):
+        lund_cloud([int(c) for c in item["yc"].tolist()], geom, **kw)
+
+
+@pytest.mark.skipif(not (_POT_OK and SKLEARN), reason="needs POT and scikit-learn")
+def test_run_cluster_diagnostics_reports_the_weight_audit(small_jets):
+    """The audit is a REPORTED number on every run, not an assumption. §4/WP-3 asked for
+    `W_truth/W_draw` and `R*|dW|` against the typical `d` — priced in the units the metric
+    charges in, because a ratio near 1 is not evidence of a small effect until it is."""
+    import torch
+
+    from h2p_rsd_junipr.config import decode_params
+    from h2p_rsd_junipr.data.dataset import MatchedLundDataset
+    from h2p_rsd_junipr.eval.clusters import run_cluster_diagnostics
+
+    cfg = load_config(["model=ar_junipr_v2", "encoder=gru",
+                       "decode.point_estimator=mbr", "decode.mbr_backend=pot"])
+    geom = Geometry.from_config(cfg.geometry)
+    model = build_model(cfg, geom).eval()
+    jets = small_jets[:16]
+    ds = MatchedLundDataset(jets, geom)
+    m = run_cluster_diagnostics(model, ds, jets, geom, torch.device("cpu"), K=10,
+                                n_jets=8, decode=decode_params(cfg), verbose=False,
+                                null_reps=2)
+    wa = m["weight_audit"]
+    for k in ("W_truth_over_W_draw", "R_dW_mean", "R_dW_over_d_nearest_draw", "matched"):
+        assert k in wa
+    assert wa["matched"] is False          # the fielded "cells" path IS mismatched
+    assert all("W_ratio" in r and "R_dW_mean" in r for r in m["per_jet"])
+    assert m["config"]["mbr_cloud_source"] == "cells"
