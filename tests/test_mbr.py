@@ -439,9 +439,8 @@ def test_kappa_gate_substitutes_a_draw_and_flags_it(batch):
 
     def pinned(kappa_value):
         def _params(coord_in):
-            p = list(real(coord_in))
-            p[7] = torch.full_like(p[7], kappa_value)
-            return tuple(p)
+            p = real(coord_in)
+            return p._replace(kappa=torch.full_like(p.kappa, kappa_value))
         return _params
 
     model.kappa_min_mode = 0.5

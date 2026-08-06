@@ -62,6 +62,22 @@ def trunc_normal_cdf(x, mu, sigma, lo, hi):
     return ((std_normal_cdf((x - mu) / sigma) - a) / (b - a).clamp(min=1e-6)).clamp(0.0, 1.0)
 
 
+def trunc_normal_icdf(q, mu, sigma, lo, hi):
+    """Inverse CDF of the truncated normal at `q` in [0, 1] — the quantile function.
+
+        x = mu + sigma * Phi^{-1}(a + q (b - a)),  a = Phi((lo-mu)/s), b = Phi((hi-mu)/s).
+
+    `trunc_normal_sample` IS this evaluated at a uniform draw, and saying so in code
+    rather than in a comment is what keeps the sampler and the CDF from drifting — they
+    are now the same expression read in two directions. `torch.erfinv` is elementwise and
+    runs on MPS."""
+    # clamp keeps erfinv off its +-inf endpoints when the interval sits far in a tail
+    a = std_normal_cdf((lo - mu) / sigma)
+    b = std_normal_cdf((hi - mu) / sigma)
+    p = (a + (b - a) * q).clamp(1e-6, 1.0 - 1e-6)
+    return (mu + sigma * math.sqrt(2.0) * torch.erfinv(2.0 * p - 1.0)).clamp(lo, hi)
+
+
 def trunc_normal_sample(mu, sigma, lo, hi, *, generator=None):
     """One draw from the truncated normal `trunc_normal_logpdf` describes, per element
     of the broadcast `(mu, sigma)`, by inverting its CDF:
@@ -70,14 +86,191 @@ def trunc_normal_sample(mu, sigma, lo, hi, *, generator=None):
 
     Exact (no rejection loop, so no data-dependent runtime) and built from the same
     `std_normal_cdf` the density's normalizer uses, so sampler and likelihood cannot
-    drift apart. `torch.erfinv` is elementwise and runs on MPS."""
+    drift apart."""
     mu, sigma = torch.broadcast_tensors(torch.as_tensor(mu), torch.as_tensor(sigma))
-    a = std_normal_cdf((lo - mu) / sigma)
-    b = std_normal_cdf((hi - mu) / sigma)
     u = torch.rand(mu.shape, device=mu.device, dtype=mu.dtype, generator=generator)
-    # clamp keeps erfinv off its +-inf endpoints when the interval sits far in a tail
-    p = (a + (b - a) * u).clamp(1e-6, 1.0 - 1e-6)
-    return (mu + sigma * math.sqrt(2.0) * torch.erfinv(2.0 * p - 1.0)).clamp(lo, hi)
+    return trunc_normal_icdf(u, mu, sigma, lo, hi)
+
+
+# ---------------------------------------------------------------------------
+# Monotone rational-quadratic spline (docs/PLAN_lnz_spline_head.md)
+# ---------------------------------------------------------------------------
+# Durkan, Bekasov, Murray & Papamakarios, *Neural Spline Flows*, arXiv:1906.04032,
+# eqs. (4)-(8). A monotone map S: [0, 1] -> [0, 1] built from K rational-quadratic
+# pieces, parameterised by K widths, K heights and the K-1 INTERNAL knot derivatives
+# (the two boundary derivatives are pinned to 1, which is what makes the identity
+# reachable and keeps S onto [0, 1] exactly).
+#
+# The spline is placed on the soft-drop interval through the AFFINE map
+#
+#     t = (x - lo) / (hi - lo),   F(x) = S(t),   p(x) = S'(t) / (hi - lo),
+#
+# so the density on (lo, hi] is the spline's own derivative and nothing else. The support
+# closure v1's WP-A bought (0.83% below-soft-drop and 3.94% above z = 1/2 -> 0.0000%) is
+# kept by construction: t is an affine bijection of the interval onto [0, 1] and S maps
+# [0, 1] onto itself, so no draw can leave.
+#
+# WHY THE BASE HAS NO PARAMETERS, which is a measured decision and not a simplification.
+# The first implementation warped the TRUNCATED NORMAL's CDF instead, `F(x) = S(F_tn(x))`,
+# to keep today's head as the identity special case. That parameterization is
+# NON-IDENTIFIABLE: once S carries the shape, any (mu, sigma) leaving F_tn roughly linear
+# on the interval gives the same composed density, so the pair drifts along a flat
+# direction. Measured on seed 2 of the first 3-seed run, it drifted until it broke —
+# `lnz_mean` reached -533 against an interval of [-2.303, -0.693], `lnz_sig` reached 85,
+# F_tn saturated to 0 or 1 on 100% of emissions, the gradient through S died and val NLL
+# went 4.19 -> 19.2 at epoch 4 and never recovered. Seeds 0 and 1 were on the same flat
+# direction and had merely not walked as far. A fixed base removes the redundancy at the
+# root rather than bounding its symptom; `lnz_head="truncnorm"` remains available as its
+# own path, which is what the parity flag is for.
+_MIN_BIN = 1e-3      # floor on a bin's width/height: keeps s = h/w finite
+_MIN_DERIV = 1e-3    # floor on a knot derivative: keeps the map strictly increasing
+# Shift that makes raw == 0 the IDENTITY spline: with uniform widths/heights every
+# s_k = 1, so the piece is linear exactly when its knot derivatives are 1, and
+# `softplus(_IDENTITY_SHIFT) + _MIN_DERIV == 1`. A head whose last layer starts near
+# zero therefore starts near the truncated normal it generalises.
+_IDENTITY_SHIFT = math.log(math.exp(1.0 - _MIN_DERIV) - 1.0)
+
+
+def rq_spline_n_params(n_bins: int) -> int:
+    """How many numbers per node the head must emit for a `n_bins`-piece spline."""
+    n_bins = int(n_bins)
+    if n_bins < 2:
+        raise ValueError(f"an RQ spline needs at least 2 bins, got {n_bins}")
+    return 3 * n_bins - 1
+
+
+def _rq_knots(raw, n_bins: int):
+    """Raw `(..., 3K-1)` head output -> `(cum_x, cum_y, deriv)` knots.
+
+    `cum_x`/`cum_y` are `(..., K+1)` and start at 0 and end at 1 by construction (the
+    softmax sums to one and the floors are subtracted back out), so no renormalisation
+    is needed downstream and the map is onto [0, 1] whatever the head emits."""
+    K = int(n_bins)
+    span = 1.0 - K * _MIN_BIN
+    w = torch.softmax(raw[..., :K], dim=-1) * span + _MIN_BIN
+    h = torch.softmax(raw[..., K:2 * K], dim=-1) * span + _MIN_BIN
+    inner = _MIN_DERIV + torch.nn.functional.softplus(raw[..., 2 * K:] + _IDENTITY_SHIFT)
+    ones = torch.ones_like(inner[..., :1])
+    d = torch.cat([ones, inner, ones], dim=-1)                     # (..., K+1)
+    zero = torch.zeros_like(w[..., :1])
+    cum_x = torch.cat([zero, torch.cumsum(w, dim=-1)], dim=-1)     # (..., K+1)
+    cum_y = torch.cat([zero, torch.cumsum(h, dim=-1)], dim=-1)
+    return cum_x, cum_y, d
+
+
+def _rq_bin(t, cum, n_bins: int):
+    """Index of the piece containing `t`, as `(t >= interior knots).sum()`.
+
+    Deliberately NOT `torch.searchsorted`: this runs inside the coordinate likelihood on
+    every node of every batch, and the comparison-sum is elementwise + a reduction, which
+    is the device-safety constraint the rest of this module is written to (see the module
+    docstring). With K ~ 8 the two cost the same."""
+    idx = (t.unsqueeze(-1) >= cum[..., 1:-1]).sum(dim=-1)
+    return idx.clamp(0, int(n_bins) - 1).unsqueeze(-1)
+
+
+def _rq_gather(cum_x, cum_y, d, k):
+    """The four knot quantities of the selected piece, plus its width/height/slope."""
+    x_k = cum_x.gather(-1, k).squeeze(-1)
+    x_k1 = cum_x.gather(-1, k + 1).squeeze(-1)
+    y_k = cum_y.gather(-1, k).squeeze(-1)
+    y_k1 = cum_y.gather(-1, k + 1).squeeze(-1)
+    d_k = d.gather(-1, k).squeeze(-1)
+    d_k1 = d.gather(-1, k + 1).squeeze(-1)
+    w = (x_k1 - x_k).clamp(min=1e-9)
+    h = y_k1 - y_k
+    return x_k, y_k, d_k, d_k1, w, h, h / w
+
+
+def rq_spline_forward(t, raw, n_bins: int):
+    """`(S(t), log S'(t))` for `t` in [0, 1] — eqs. (4) and (5) of arXiv:1906.04032.
+
+    Returns the log-derivative alongside the value because every caller needs both: the
+    density is `p_base * S'` and the PIT is `S` itself, and computing them in one place
+    is what stops the two from drifting apart (the same reason `trunc_normal_cdf` is
+    built from the normalizer's `std_normal_cdf`)."""
+    cum_x, cum_y, d = _rq_knots(raw, n_bins)
+    t = t.clamp(0.0, 1.0)
+    k = _rq_bin(t, cum_x, n_bins)
+    x_k, y_k, d_k, d_k1, w, h, s = _rq_gather(cum_x, cum_y, d, k)
+    xi = ((t - x_k) / w).clamp(0.0, 1.0)
+    xi1 = 1.0 - xi
+    curv = d_k1 + d_k - 2.0 * s
+    denom = (s + curv * xi * xi1).clamp(min=1e-9)
+    y = y_k + h * (s * xi * xi + d_k * xi * xi1) / denom
+    deriv = s * s * (d_k1 * xi * xi + 2.0 * s * xi * xi1 + d_k * xi1 * xi1) / (denom * denom)
+    return y.clamp(0.0, 1.0), torch.log(deriv.clamp(min=1e-12))
+
+
+def rq_spline_inverse(y, raw, n_bins: int):
+    """`S^{-1}(y)` for `y` in [0, 1] — eq. (6)-(8) of arXiv:1906.04032.
+
+    A rational quadratic inverts in closed form (one quadratic per piece), which is what
+    makes the sampler exact and its runtime data-independent — the same property
+    `trunc_normal_sample` has and for the same reason."""
+    cum_x, cum_y, d = _rq_knots(raw, n_bins)
+    y = y.clamp(0.0, 1.0)
+    k = _rq_bin(y, cum_y, n_bins)
+    x_k, y_k, d_k, d_k1, w, h, s = _rq_gather(cum_x, cum_y, d, k)
+    dy = (y - y_k).clamp(min=0.0)
+    curv = d_k1 + d_k - 2.0 * s
+    a = h * (s - d_k) + dy * curv
+    b = h * d_k - dy * curv
+    c = -s * dy
+    disc = (b * b - 4.0 * a * c).clamp(min=0.0)
+    # The `2c / (-b - sqrt(disc))` root is the numerically stable one and degrades
+    # gracefully to the linear solution when a -> 0 (a linear piece, which is what the
+    # identity spline is made of). The guard covers the one case that form cannot handle,
+    # `-b - sqrt(disc) == 0`; xi is clamped to the piece regardless.
+    root_den = -b - torch.sqrt(disc)
+    root_den = torch.where(root_den.abs() < 1e-9, torch.full_like(root_den, -1e-9), root_den)
+    xi = (2.0 * c / root_den).clamp(0.0, 1.0)
+    return (x_k + xi * w).clamp(0.0, 1.0)
+
+
+def _unit(x, lo, hi):
+    """The interval mapped onto [0, 1], and its width. One place, so the density, the
+    CDF and the sampler cannot disagree about where the interval is.
+
+    `lo`/`hi` may be tensors (the cell-conditional `ln z` bounds) or plain floats (the
+    constant `+-half_v` of the within-cell offsets), so the width is materialised as a
+    tensor rather than assumed to be one."""
+    width = torch.as_tensor(hi - lo, dtype=x.dtype, device=x.device).clamp(min=1e-9)
+    return ((x - lo) / width).clamp(0.0, 1.0), width
+
+
+def rq_interval_logpdf(x, lo, hi, raw, n_bins: int):
+    """log density of the RQ spline on `(lo, hi]`, evaluated at `x`.
+
+    `log S'(t) - log(hi - lo)`: the spline's derivative is the density on the unit
+    interval and the affine map contributes its constant Jacobian. At raw = 0 the spline
+    is the identity, so this is the UNIFORM density on the interval — the maximum-entropy
+    starting point, and a stable one (no parameter can saturate a fixed affine map)."""
+    t, width = _unit(x, lo, hi)
+    _y, log_deriv = rq_spline_forward(t, raw, n_bins)
+    return log_deriv - torch.log(width)
+
+
+def rq_interval_cdf(x, lo, hi, raw, n_bins: int):
+    """CDF of the same density: `S(t)`. This is the PIT the G3 gate reads."""
+    t, _ = _unit(x, lo, hi)
+    y, _ = rq_spline_forward(t, raw, n_bins)
+    return y
+
+
+def rq_interval_icdf(q, lo, hi, raw, n_bins: int):
+    """Quantile function `lo + (hi - lo) S^{-1}(q)` — the sampler, and the decode-time
+    median (a spline density has no closed-form mode)."""
+    return lo + (hi - lo) * rq_spline_inverse(q, raw, n_bins)
+
+
+def rq_interval_sample(lo, hi, raw, n_bins: int, *, generator=None):
+    """One exact draw per element, by inverting the CDF at a uniform. Cannot leave
+    `[lo, hi]`: `S^{-1}` lands in [0, 1] and the affine map carries that to the
+    interval."""
+    shape = torch.broadcast_shapes(torch.as_tensor(lo).shape, raw.shape[:-1])
+    u = torch.rand(shape, device=raw.device, dtype=raw.dtype, generator=generator)
+    return rq_interval_icdf(u, lo, hi, raw, n_bins)
 
 
 def log_bessel_i0(x):

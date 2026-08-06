@@ -123,7 +123,7 @@ def test_physical_joint_normalizes_over_its_box():
         cx = torch.full((M,), cxv)
         cy = torch.full((M,), cyv)
         lo, hi = m.lnz_bounds(cx)
-        p_t = tuple(torch.full((M,), float(p[t])) for p in params)
+        p_t = params.apply(lambda q, t=t: torch.full((M,), float(q[t])))
         u = cxv + m.half_u * (2.0 * torch.rand(M, generator=g) - 1.0)
         v = cyv + m.half_v * (2.0 * torch.rand(M, generator=g) - 1.0)
         lnz = lo + (hi - lo) * torch.rand(M, generator=g)

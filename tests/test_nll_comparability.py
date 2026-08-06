@@ -86,7 +86,7 @@ def _ar_emission_density(m, geom, xf, nx, u, v, lz, psi, cell):
     out = m._decode_states(torch.zeros(1, 0, dtype=torch.long), e, m.xattn_kv(xf, nx))
     eh = torch.cat([out, e.unsqueeze(1).expand(-1, out.shape[1], -1)], dim=-1)
     cell_lp = torch.log_softmax(m.split_head(eh[:, 0, :]), dim=-1)[0]   # (n_cells,)
-    p_t = tuple(p[cell] for p in params)
+    p_t = params.apply(lambda q: q[cell])
     cx, cy = m.cell_cx[cell], m.cell_cy[cell]
     return torch.exp(cell_lp[cell] + m._coord_logprob(p_t, u, v, lz, psi, cx, cy))
 

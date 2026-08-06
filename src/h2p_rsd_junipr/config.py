@@ -154,6 +154,43 @@ class ARJuniprConfig:
     #                                     Both are properties of the FILE, not free knobs:
     #                                     `data.stats.check_lnz_support` verifies them against
     #                                     the loaded jets' grooming record before training.
+    # --- ln z SHAPE (docs/PLAN_lnz_spline_head.md) -----------------------------
+    # `lnz_support` fixed WHERE the density lives; this fixes what SHAPE it may take
+    # there. v1 measured that the two failures were separate: putting ln z on its
+    # interval removed every support violation and still left the PIT at 1.05-2.07x its
+    # critical value, concentrated (2.16x) in the quadrant holding 94% of emissions — a
+    # mismatch INSIDE the interval, which a truncation cannot fix. "spline" composes a
+    # monotone rational-quadratic spline (Durkan et al., arXiv:1906.04032) onto the
+    # truncated normal's CDF, so the support closure is kept exactly and the truncated
+    # normal is the spline's identity special case. "truncnorm" is the default and is
+    # bit-identical to the pre-spline path (same state_dict width, same log_prob).
+    lnz_head: str = "truncnorm"         # truncnorm | spline
+    lnz_spline_bins: int = 8            # spline pieces; only read when lnz_head=spline.
+    #                                     Costs 3K-1 head outputs per node (23 at K=8).
+    # --- the WITHIN-CELL ln kt offset (docs/PLAN_lnz_spline_head.md §7.1) -------
+    # Same defect, measured on the same instrument, on the coordinate that became binding
+    # once `ln z` was fixed. A truncated normal on [-h, h] can tilt its log-density across
+    # the cell by at most `2h*mu/sigma^2`, and `mu` is clamped to +-h by the `h*tanh`
+    # parameterization — so a WIDE sigma costs tilt authority that cannot be bought back.
+    # Measured on the trained spline arms: `dv` runs at sigma = 2.6h and can achieve a tilt
+    # of 0.158 against a data requirement of ~0.18, while `du` runs at 1.7h and achieves
+    # 0.258. That is why `dv` fails its PIT on every seed and `du` never does — and why the
+    # fix is a spline (which is flat and tilted at once) rather than more truncated normal.
+    # `du` is deliberately NOT given one: it has no measured defect (0/6 seeds).
+    dv_head: str = "truncnorm"          # truncnorm | spline
+    dv_spline_bins: int = 8             # spline pieces; only read when dv_head=spline
+    # --- the coordinate head's CONDITIONING (docs/PLAN_lnz_spline_head.md §8.5) --
+    # The `dv` spline measured that the residual is a per-cell LOCATION bias reproduced
+    # identically by a truncated normal and by a spline with strictly more freedom — a
+    # limit on what the head can PREDICT, not on what it can express. The most likely
+    # reason is that the cell reaches the head only as a learned embedding of a
+    # CATEGORICAL id, so nothing tells it that cell 437 and cell 438 are neighbours and
+    # every cell's within-cell tilt has to be learned from its own emissions alone.
+    # True appends the cell's continuous centre, affinely mapped onto [-1, 1] by the
+    # geometry's own ranges — a FIXED transform, never data-dependent, so a checkpoint
+    # means the same thing on a new sample (the `features.py` standardization rule).
+    # False is the default and is bit-identical: no extra input, no extra buffer.
+    coord_cell_center: bool = False
 
 
 @dataclass
